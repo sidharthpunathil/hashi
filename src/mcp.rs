@@ -122,7 +122,7 @@ async fn dispatch(
     match method {
         "initialize" => Ok(initialize(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools(token) })),
+        "tools/list" => Ok(json!({ "tools": tools(state, token) })),
         "tools/call" => {
             let call: CallParams =
                 serde_json::from_value(params).map_err(RpcError::invalid_params)?;
@@ -161,10 +161,12 @@ fn ask_tool_agent(name: &str) -> Option<AgentKind> {
     (ask_tool_name(agent) == name).then_some(agent)
 }
 
-fn tools(token: &Token) -> Vec<Value> {
+fn tools(state: &AppState, token: &Token) -> Vec<Value> {
     let mut list: Vec<Value> = AgentKind::ALL
         .into_iter()
         .filter(|a| token.allows(*a))
+        // Crush is opt-in: not listed unless the owner enabled it.
+        .filter(|a| *a != AgentKind::Crush || state.runtime.agents.iter().any(|i| i.agent == *a))
         .map(|agent| {
             json!({
                 "name": ask_tool_name(agent),

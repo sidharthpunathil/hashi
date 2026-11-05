@@ -529,6 +529,9 @@ pub struct BinArgs {
     /// Path to the Qwen Code executable.
     #[arg(long, env = "HASHI_QWEN_BIN")]
     qwen_bin: Option<PathBuf>,
+    /// Path to the Crush executable.
+    #[arg(long, env = "HASHI_CRUSH_BIN")]
+    crush_bin: Option<PathBuf>,
 }
 
 impl BinArgs {
@@ -539,6 +542,7 @@ impl BinArgs {
             AgentKind::Gemini => self.gemini_bin.clone(),
             AgentKind::Opencode => self.opencode_bin.clone(),
             AgentKind::Qwen => self.qwen_bin.clone(),
+            AgentKind::Crush => self.crush_bin.clone(),
             AgentKind::Cursor => None,
         };
         custom.unwrap_or_else(|| AgentConfig::default_for(agent).bin)
@@ -681,9 +685,12 @@ fn read_hidden() -> Result<String> {
 /// shown to the owner.
 fn sign_in_line(home: &Path, agent: AgentKind, name: &str, bin: &Path) -> Option<String> {
     let sign = acct::sign_in(agent)?;
-    let var = acct::dir_var(agent)?;
+    acct::dir_var(agent)?;
     let dir = acct::account_dir(home, agent, name);
-    let mut parts = vec![format!("{var}={}", shell_quote(&dir.to_string_lossy()))];
+    let mut parts: Vec<String> = acct::account_vars(agent, &dir)
+        .iter()
+        .map(|(k, v)| format!("{k}={}", shell_quote(v)))
+        .collect();
     parts.extend(sign.env.iter().map(|(k, v)| format!("{k}={v}")));
     parts.push(shell_quote(&bin.to_string_lossy()));
     parts.extend(sign.args.iter().map(|a| (*a).to_owned()));
@@ -706,15 +713,18 @@ fn account_command(home: &Path, agent: AgentKind, name: &str, bin: &Path) -> std
     let mut cmd = std::process::Command::new(bin);
     for (key, _) in std::env::vars_os() {
         let upper = key.to_string_lossy().to_ascii_uppercase();
-        if hashi::agent::runner::is_hashi_secret(&key)
-            || acct::credential_vars(agent).contains(&upper.as_str())
-        {
+        let removed = acct::credential_vars(agent)
+            .iter()
+            .chain(acct::always_removed(agent))
+            .any(|p| hashi::agent::runner::env_name_matches(p, &upper));
+        if hashi::agent::runner::is_hashi_secret(&key) || removed {
             cmd.env_remove(&key);
         }
     }
-    if let Some(var) = acct::dir_var(agent) {
-        cmd.env(var, acct::account_dir(home, agent, name));
-    }
+    cmd.envs(acct::account_vars(
+        agent,
+        &acct::account_dir(home, agent, name),
+    ));
     cmd
 }
 
@@ -857,7 +867,8 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     agent.display_name(),
                     match agent {
                         AgentKind::Cursor => "; add an API key with --kind api-key",
-                        AgentKind::Opencode | AgentKind::Qwen => "; add a login account",
+                        AgentKind::Opencode | AgentKind::Qwen | AgentKind::Crush =>
+                            "; add a login account",
                         _ => "",
                     }
                 );
@@ -913,6 +924,13 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             yes,
             bins,
         } => {
+            // Crush's default account has a Hashi-owned directory too, so
+            // the owner's own Crush config never loads; sign it in here.
+            if agent == AgentKind::Crush && name == acct::DEFAULT {
+                acct::crush_default_dir(home).context("preparing the account directory")?;
+                sign_in(home, agent, &name, yes, &bins)?;
+                return Ok(());
+            }
             account_name(&name)?;
             match store.get_account(agent, &name)? {
                 Some(a) if a.kind == AccountKind::Login => {}

@@ -38,6 +38,18 @@ pub fn is_hashi_secret(name: &OsStr) -> bool {
     name.starts_with("HASHI_") || SECRET_VARS.contains(&name.as_str())
 }
 
+/// Whether the variable `name` matches `pattern`, without regard to case. A
+/// pattern ending in `*` matches every name with that prefix (`CRUSH_*`).
+#[must_use]
+pub fn env_name_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix)),
+        None => pattern.eq_ignore_ascii_case(name),
+    }
+}
+
 /// Variables set on every agent child, before the backend's own.
 ///
 /// On Windows, `NoDefaultCurrentDirectoryInExePath` stops `cmd.exe` (which
@@ -332,7 +344,7 @@ pub async fn run_with(
     let mut cmd = command(bin, args, limits.nice);
     for (key, _) in std::env::vars_os() {
         let upper = key.to_string_lossy().to_ascii_uppercase();
-        if is_hashi_secret(&key) || remove.iter().any(|r| r.eq_ignore_ascii_case(&upper)) {
+        if is_hashi_secret(&key) || remove.iter().any(|r| env_name_matches(r, &upper)) {
             cmd.env_remove(&key);
         }
     }
@@ -943,6 +955,16 @@ exit 0;
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         false
+    }
+
+    #[test]
+    fn env_patterns_match_names_and_prefixes() {
+        assert!(env_name_matches("OPENAI_API_KEY", "openai_api_key"));
+        assert!(!env_name_matches("OPENAI_API_KEY", "OPENAI_API_KEY_2"));
+        assert!(env_name_matches("CRUSH_*", "CRUSH_HOME"));
+        assert!(env_name_matches("CRUSH_*", "crush_anthropic_api_key"));
+        assert!(!env_name_matches("CRUSH_*", "CRUSH"));
+        assert!(!env_name_matches("CRUSH_*", "XCRUSH_HOME"));
     }
 
     #[test]

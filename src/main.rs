@@ -69,7 +69,7 @@ enum Command {
     /// Remove the binary and everything Hashi stored on this machine.
     Uninstall(UninstallArgs),
     /// Show the official install command for a helper (cloudflared or
-    /// tailscale) and run it after you confirm.
+    /// tailscale) or for Crush, and run it after you confirm.
     Install(InstallArgs),
 }
 
@@ -88,7 +88,7 @@ struct UninstallArgs {
 
 #[derive(Debug, Args)]
 struct InstallArgs {
-    /// Which helper: cloudflared or tailscale.
+    /// Which helper: cloudflared, tailscale or crush.
     #[arg(value_parser = parse_helper)]
     helper: hashi::install::Helper,
     /// Run the command without asking first.
@@ -97,7 +97,8 @@ struct InstallArgs {
 }
 
 fn parse_helper(s: &str) -> Result<hashi::install::Helper, String> {
-    hashi::install::Helper::parse(s).ok_or_else(|| "choose cloudflared or tailscale".to_owned())
+    hashi::install::Helper::parse(s)
+        .ok_or_else(|| "choose cloudflared, tailscale or crush".to_owned())
 }
 
 #[derive(Debug, Args, Clone)]
@@ -169,6 +170,17 @@ struct AgentArgs {
     /// Path to the Cursor CLI executable (`cursor-agent` or `agent`).
     #[arg(long, env = "HASHI_CURSOR_BIN")]
     cursor_bin: Option<PathBuf>,
+    /// Offer Crush (off by default: Crush auto-approves every tool it has
+    /// in a headless run, so Hashi removes all but the read-only ones).
+    #[arg(long, env = "HASHI_ENABLE_CRUSH")]
+    enable_crush: bool,
+    /// Path to the Crush executable.
+    #[arg(long, env = "HASHI_CRUSH_BIN")]
+    crush_bin: Option<PathBuf>,
+    /// Run a Crush release newer than the newest one whose tools Hashi has
+    /// checked.
+    #[arg(long, env = "HASHI_CRUSH_ALLOW_NEWER")]
+    crush_allow_newer: bool,
     /// Maximum agentic turns per Claude request.
     #[arg(long, default_value_t = 10, env = "HASHI_MAX_TURNS")]
     max_turns: u32,
@@ -185,6 +197,7 @@ impl AgentArgs {
     fn configs(&self) -> HashMap<AgentKind, AgentConfig> {
         AgentKind::ALL
             .into_iter()
+            .filter(|kind| *kind != AgentKind::Crush || self.enable_crush)
             .map(|kind| {
                 let mut cfg = AgentConfig::default_for(kind);
                 let custom = match kind {
@@ -194,6 +207,7 @@ impl AgentArgs {
                     AgentKind::Opencode => self.opencode_bin.clone(),
                     AgentKind::Qwen => self.qwen_bin.clone(),
                     AgentKind::Cursor => self.cursor_bin.clone(),
+                    AgentKind::Crush => self.crush_bin.clone(),
                 };
                 if let Some(bin) = custom {
                     cfg.bin = bin;
@@ -201,6 +215,7 @@ impl AgentArgs {
                 cfg.max_turns = self.max_turns;
                 cfg.permission_mode.clone_from(&self.claude_permission_mode);
                 cfg.sandbox.clone_from(&self.codex_sandbox);
+                cfg.allow_newer = self.crush_allow_newer;
                 (kind, cfg)
             })
             .collect()
@@ -629,7 +644,9 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
     let kind = args.agent.unwrap_or(AgentKind::Claude);
     let message = args.message.context("a prompt is required")?;
     let configs = args.agents.configs();
-    let cfg = configs.get(&kind).context("agent not configured")?;
+    let Some(cfg) = configs.get(&kind) else {
+        bail!("{}", agent::unavailable_message(kind));
+    };
     let workdir = home.join("workspaces").join("cli");
     std::fs::create_dir_all(&workdir)?;
     let inv = Invocation {
@@ -643,8 +660,16 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
     };
     // The agent runs in its own process group, so the terminal's Ctrl-C does
     // not reach it. Dropping the run on Ctrl-C kills its whole tree instead.
+    // The default account: no change for most agents, Hashi-owned
+    // directories for Crush.
+    let account = hashi::accounts::run_env(
+        home,
+        kind,
+        hashi::accounts::DEFAULT,
+        hashi::accounts::AccountKind::Default,
+    )?;
     let out = tokio::select! {
-        out = agent::execute(kind, cfg, inv, &workdir, limits) => out?,
+        out = agent::execute_as(kind, cfg, inv, &workdir, limits, account.as_ref()) => out?,
         _ = tokio::signal::ctrl_c() => bail!("interrupted"),
     };
     println!("{}", out.text);
@@ -973,6 +998,34 @@ async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
             ),
         }
     }
+    if !args.agents.enable_crush {
+        let installed = args
+            .agents
+            .crush_bin
+            .clone()
+            .or_else(|| agent::locate(AgentKind::Crush.binary_name()));
+        match installed {
+            Some(p) => println!(
+                "  · {:<12} installed ({}), not enabled: start with --enable-crush to offer it",
+                AgentKind::Crush.display_name(),
+                p.display()
+            ),
+            None => println!(
+                "  · {:<12} not enabled (opt-in: --enable-crush; hashi install crush)",
+                AgentKind::Crush.display_name()
+            ),
+        }
+    } else {
+        println!(
+            "  · {:<12} enabled (--enable-crush){}",
+            AgentKind::Crush.display_name(),
+            if args.agents.crush_allow_newer {
+                ", newer releases allowed (--crush-allow-newer)"
+            } else {
+                ""
+            }
+        );
+    }
     doctor_helpers(&args.helpers).await;
     admin_cli::doctor_accounts(home);
     doctor_update(home).await;
@@ -987,4 +1040,38 @@ async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configs(args: &[&str]) -> HashMap<AgentKind, AgentConfig> {
+        let mut argv = vec!["hashi", "serve"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).map(|c| c.command) {
+            Ok(Some(Command::Serve(serve))) => serve.agents.configs(),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crush_is_configured_only_when_enabled() {
+        // HASHI_ENABLE_CRUSH in the test's own environment would turn it on.
+        if std::env::var_os("HASHI_ENABLE_CRUSH").is_some() {
+            return;
+        }
+        let off = configs(&[]);
+        assert!(!off.contains_key(&AgentKind::Crush));
+        assert_eq!(off.len(), AgentKind::ALL.len() - 1);
+        let on = configs(&[
+            "--enable-crush",
+            "--crush-bin",
+            "/opt/crush",
+            "--crush-allow-newer",
+        ]);
+        let crush = &on[&AgentKind::Crush];
+        assert_eq!(crush.bin, PathBuf::from("/opt/crush"));
+        assert!(crush.allow_newer);
+    }
 }
