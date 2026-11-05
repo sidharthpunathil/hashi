@@ -13,6 +13,7 @@ use crate::accounts::{self as acct, AccountKind};
 use crate::agent::AgentKind;
 use crate::api::{LimitsPatch, UpdateTokenBody};
 use crate::token::Token;
+use crate::usage::Strategy;
 use crate::util::now_ms;
 
 /// A field error: the field's index and the message shown next to it.
@@ -587,15 +588,25 @@ pub struct ProjectForm {
     pub models: String,
     /// Who or what it is for.
     pub note: String,
+    /// How runs choose among an agent's accounts; `None` is the server's
+    /// `--account-strategy`.
+    pub strategy: Option<Strategy>,
+    /// Percent used at which runs move off an account; empty is the
+    /// server's `--rotate-at`.
+    pub rotate_at: String,
     /// The field that failed and why.
     pub error: Option<FieldError>,
 }
 
 impl ProjectForm {
     /// Number of fields.
-    pub const FIELDS: usize = 7;
+    pub const FIELDS: usize = 9;
     /// Index of the default agent selector.
     pub const DEFAULT_AGENT: usize = 4;
+    /// Index of the account strategy selector.
+    pub const STRATEGY: usize = 7;
+    /// Index of the rotate threshold field.
+    pub const ROTATE_AT: usize = 8;
     /// Labels, in field order.
     pub const LABELS: [&'static str; Self::FIELDS] = [
         "name",
@@ -605,6 +616,8 @@ impl ProjectForm {
         "default agent",
         "models",
         "note",
+        "account strategy",
+        "rotate at %",
     ];
 
     /// An empty form for a new project.
@@ -620,6 +633,8 @@ impl ProjectForm {
             default_agent: None,
             models: String::new(),
             note: String::new(),
+            strategy: None,
+            rotate_at: String::new(),
             error: None,
         }
     }
@@ -642,8 +657,22 @@ impl ProjectForm {
                 .collect::<Vec<_>>()
                 .join(" "),
             note: p.note.clone().unwrap_or_default(),
+            strategy: p.account_strategy,
+            rotate_at: show_count(p.rotate_at.map(u32::from)),
             error: None,
         }
+    }
+
+    /// Whether the focused field is a choice that left and right change.
+    #[must_use]
+    pub fn is_choice(&self) -> bool {
+        matches!(self.field, Self::DEFAULT_AGENT | Self::STRATEGY)
+    }
+
+    /// The account strategy, as shown in the form.
+    #[must_use]
+    pub fn strategy_label(&self) -> &'static str {
+        self.strategy.map_or("server default", Strategy::as_str)
     }
 
     /// The text of the focused field, when it is an editable text field.
@@ -655,12 +684,24 @@ impl ProjectForm {
             3 => &mut self.accounts,
             5 => &mut self.models,
             6 => &mut self.note,
+            Self::ROTATE_AT => &mut self.rotate_at,
             _ => return None,
         })
     }
 
-    /// Moves the default agent choice by `by`.
+    /// Moves the focused choice, the default agent or the strategy, by `by`.
     pub fn step(&mut self, by: isize) {
+        if self.field == Self::STRATEGY {
+            let options: Vec<Option<Strategy>> = std::iter::once(None)
+                .chain(Strategy::ALL.into_iter().map(Some))
+                .collect();
+            let i = options
+                .iter()
+                .position(|s| *s == self.strategy)
+                .unwrap_or(0);
+            self.strategy = options[cycle(i, options.len(), by)];
+            return;
+        }
         if self.field != Self::DEFAULT_AGENT {
             return;
         }
@@ -702,6 +743,23 @@ impl ProjectForm {
     /// A malformed binding.
     pub fn parse_accounts(&self) -> Result<acct::AccountMap, FieldError> {
         acct::parse_bindings(&self.accounts).map_err(|e| (3, e))
+    }
+
+    /// The rotate threshold typed, or `None` (empty) for the server's.
+    ///
+    /// # Errors
+    ///
+    /// Anything but a whole percent from 50 to 99.
+    pub fn parse_rotate_at(&self) -> Result<Option<u8>, FieldError> {
+        let min = u32::from(crate::usage::MIN_ROTATE_AT);
+        let max = u32::from(crate::usage::MAX_ROTATE_AT);
+        match parse_count(&self.rotate_at, Self::ROTATE_AT, min..=max) {
+            Ok(v) => Ok(v.and_then(|n| u8::try_from(n).ok())),
+            Err(_) => Err((
+                Self::ROTATE_AT,
+                format!("a percent from {min} to {max}, or empty for the server default"),
+            )),
+        }
     }
 
     /// The models typed.

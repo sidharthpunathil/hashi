@@ -1,6 +1,7 @@
 //! Rendering of the management popups: token edit, the prompt popup,
-//! accounts, projects, bridges, the audit log, the doctor, the report, the
-//! listen address and update confirmation. Pure functions of [`App`].
+//! access requests, accounts, projects, bridges, the audit log, the doctor,
+//! the report, the listen address and update confirmation. Pure functions
+//! of [`App`].
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -206,8 +207,137 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
                 key_hint(&[("y", "update"), ("n", "not now")]),
             ],
         ),
+        Popup::AccessRequests { selected, all } => access_requests(app, frame, *selected, *all),
+        Popup::AcceptRequest(form) => super::access::render_accept(frame, frame.area(), form),
+        Popup::DeclineRequest(form) => super::access::render_decline(frame, frame.area(), form),
+        Popup::AccessLink {
+            code,
+            hours,
+            project,
+        } => access_link(app, frame, code, *hours, project.as_deref()),
         _ => {}
     }
+}
+
+fn access_requests(app: &App, frame: &mut Frame, selected: usize, all: bool) {
+    let now = crate::util::now_ms();
+    let rows = app.access_rows(all);
+    let link = match crate::access::current_link(&app.state.store).ok().flatten() {
+        Some(l) if l.status(now) == "open" => Line::from(vec![
+            Span::styled("◌ ", t::fg(t::MINT)),
+            Span::styled(
+                format!(
+                    "The ask-access link is open{} until {}.",
+                    l.project
+                        .as_deref()
+                        .map(|p| format!(" for project {}", crate::diagnostics::terminal_safe(p)))
+                        .unwrap_or_default(),
+                    rfc3339(l.expires_at).unwrap_or_default()
+                ),
+                plain(),
+            ),
+        ]),
+        _ => muted_line("The ask-access link is closed. Press o to open one."),
+    };
+    let foot = vec![
+        link,
+        muted_line(if all {
+            "Showing every request, decided and expired ones too."
+        } else {
+            "Showing pending requests."
+        }),
+        Line::raw(""),
+        key_hint(&[
+            ("a", "accept"),
+            ("d", "decline"),
+            ("o", "open link"),
+            ("x", "close link"),
+            ("s", if all { "pending only" } else { "show all" }),
+            ("esc", "close"),
+        ]),
+    ];
+    let area = frame.area();
+    let foot_h = u16::try_from(foot.len()).unwrap_or(0);
+    let wanted = u16::try_from(rows.len()).unwrap_or(20) + 8 + foot_h;
+    let rect = centered(area, 120, wanted.max(14));
+    let inner = modal("").inner(rect);
+    let [list, foot_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(foot_h)]).areas(inner);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(modal("access requests"), rect);
+    let selected = (!rows.is_empty()).then(|| selected.min(rows.len() - 1));
+    super::access::render_list(frame, list, &rows, selected, now);
+    frame.render_widget(Paragraph::new(foot).wrap(Wrap { trim: false }), foot_area);
+}
+
+fn access_link(app: &App, frame: &mut Frame, code: &str, hours: u32, project: Option<&str>) {
+    let area = frame.area();
+    let url = app.access_link_url(code);
+    let local_only = app.local_only();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Anyone with this link can ask for access. You decide each request here.",
+            plain(),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!(" {url} "),
+            Style::new()
+                .fg(t::PINK.into())
+                .bg(SELECT.into())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+    let base = u16::try_from(lines.len()).unwrap_or(0) + 9;
+    let qr = super::qr::size(&url)
+        .filter(|(w, h)| area.height >= base + h + 3 && area.width >= w + 10)
+        .and_then(|_| super::qr::lines(&url));
+    match &qr {
+        Some(rows) => {
+            // Dark on light whatever the terminal's theme, as phone
+            // cameras expect.
+            let style = Style::new()
+                .fg(ratatui::style::Color::Black)
+                .bg(ratatui::style::Color::White);
+            for row in rows {
+                lines.push(Line::from(Span::styled(row.clone(), style)).centered());
+            }
+            lines.push(Line::raw(""));
+        }
+        None => lines.push(muted_line(
+            "Make the terminal larger to see the link as a QR code.",
+        )),
+    }
+    lines.push(muted_line(format!(
+        "Closes by itself in {}{}. Opening a new one closes this one.",
+        super::app::link_short(hours),
+        project
+            .map(|p| format!(
+                "; requests are for project {}",
+                crate::diagnostics::terminal_safe(p)
+            ))
+            .unwrap_or_default()
+    )));
+    if local_only {
+        lines.push(Line::from(vec![
+            Span::styled("! ", t::bold(t::AMBER)),
+            Span::styled(
+                "No public URL: this link only works on this machine. Press t to go public.",
+                t::fg(t::AMBER),
+            ),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(key_hint(&[
+        ("c", "copy"),
+        ("t", "go public"),
+        ("enter", "done"),
+    ]));
+    let width = u16::try_from(url.chars().count() + 10)
+        .unwrap_or(u16::MAX)
+        .max(84);
+    fitted(frame, width, "ask-access link", lines);
 }
 
 fn edit_token(frame: &mut Frame, form: &EditTokenForm, tick: u64) {
@@ -598,7 +728,7 @@ fn projects(app: &App, frame: &mut Frame, selected: usize) {
 }
 
 fn project(frame: &mut Frame, form: &ProjectForm, tick: u64) {
-    const W: usize = 15;
+    const W: usize = 17;
     let f = |i: usize| form.field == i;
     let text = |i: usize, value: &str, placeholder: &'static str| {
         form_field(
@@ -641,6 +771,17 @@ fn project(frame: &mut Frame, form: &ProjectForm, tick: u64) {
         ),
         text(5, &form.models, "none (or claude=sonnet)"),
         text(6, &form.note, "who or what it is for"),
+        form_field(
+            f(ProjectForm::STRATEGY),
+            ProjectForm::LABELS[ProjectForm::STRATEGY],
+            W,
+            form_toggle(form.strategy_label(), f(ProjectForm::STRATEGY)),
+        ),
+        text(
+            ProjectForm::ROTATE_AT,
+            &form.rotate_at,
+            "server default (or 50 to 99)",
+        ),
     ];
     let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
     lines.push(Line::raw(""));
@@ -650,7 +791,7 @@ fn project(frame: &mut Frame, form: &ProjectForm, tick: u64) {
     lines.push(Line::raw(""));
     lines.push(key_hint(&[
         ("↑↓", "field"),
-        ("←→", "default agent"),
+        ("←→", "choose"),
         ("enter", "save"),
         ("esc", "back"),
     ]));
@@ -690,11 +831,13 @@ fn remotes(app: &App, frame: &mut Frame, selected: usize) {
             "No bridges saved. Press c and paste an invite link someone sent you.",
         ));
     }
+    foot.extend(request_status_lines(app));
     foot.push(Line::raw(""));
     foot.push(key_hint(&[
         ("c", "connect"),
         ("a", "ask it"),
         ("x", "forget"),
+        ("r", "request status"),
         ("esc", "close"),
     ]));
     list_popup(
@@ -706,6 +849,71 @@ fn remotes(app: &App, frame: &mut Frame, selected: usize) {
         selected,
         foot,
     );
+}
+
+/// The requests for access this machine sent, as `hashi request status`
+/// shows them: the last check's answers, or the ones still waiting.
+fn request_status_lines(app: &App) -> Vec<Line<'static>> {
+    let safe = crate::diagnostics::terminal_safe;
+    let mut out = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Requests for access you sent",
+            t::bold(t::MIST),
+        )),
+    ];
+    if app.request_checking {
+        out.push(Line::from(Span::styled(
+            format!("  {} asking each bridge…", t::spinner(app.tick)),
+            t::fg(t::AMBER),
+        )));
+    }
+    match &app.request_checks {
+        Some(found) if !found.is_empty() => {
+            for c in found {
+                let (glyph, color, text) = match c.state {
+                    "pending" => (
+                        "◌",
+                        t::AMBER,
+                        format!("waiting for the owner (expires {})", c.detail),
+                    ),
+                    "connected" => (
+                        "✓",
+                        t::MINT,
+                        format!("accepted, saved as remote \"{}\"", c.detail),
+                    ),
+                    "declined" if c.detail.is_empty() => ("✗", t::ROSE, "declined".to_owned()),
+                    "declined" => ("✗", t::ROSE, format!("declined: {}", c.detail)),
+                    "expired" => ("✗", t::ROSE, "expired without an answer".to_owned()),
+                    other => ("!", t::AMBER, format!("{other}: {}", c.detail)),
+                };
+                out.push(Line::from(vec![
+                    Span::styled(format!("  {glyph} "), t::fg(color)),
+                    Span::styled(format!("{}: ", c.server), strong()),
+                    Span::styled(text, plain()),
+                ]));
+            }
+            return out;
+        }
+        _ => {}
+    }
+    let waiting = app.outgoing_requests();
+    if waiting.is_empty() {
+        out.push(muted_line(
+            "  None waiting. Ask with hashi request <link>; press r to check again.",
+        ));
+    }
+    for p in waiting {
+        out.push(Line::from(vec![
+            Span::styled("  ◌ ", t::fg(t::AMBER)),
+            Span::styled(format!("{}: ", safe(&p.server)), strong()),
+            Span::styled(
+                format!("asked as {}; press r to check", safe(&p.name)),
+                plain(),
+            ),
+        ]));
+    }
+    out
 }
 
 fn connect(frame: &mut Frame, form: &forms::ConnectForm, tick: u64) {

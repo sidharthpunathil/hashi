@@ -86,6 +86,8 @@ pub enum Action {
     NewInvite,
     /// Create a token.
     NewToken,
+    /// See and decide requests for access, and open or close the link.
+    AccessRequests,
     /// Send a prompt to an agent here or on a bridge.
     Ask,
     /// List and manage agent accounts.
@@ -122,13 +124,14 @@ pub enum Action {
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
         Self::StopPublic,
         Self::NewInvite,
         Self::NewToken,
+        Self::AccessRequests,
         Self::Ask,
         Self::Accounts,
         Self::Projects,
@@ -154,7 +157,7 @@ impl Action {
             Self::Cloudflare | Self::TailscaleServe | Self::TailscaleFunnel | Self::StopPublic => {
                 "Go public"
             }
-            Self::NewInvite | Self::NewToken => "Share",
+            Self::NewInvite | Self::NewToken | Self::AccessRequests => "Share",
             Self::Ask => "Ask",
             Self::Accounts | Self::Projects | Self::Bridges | Self::Connect => "Manage",
             Self::Listen | Self::CopyUrl => "Server",
@@ -190,6 +193,7 @@ impl Action {
             Self::StopPublic => "Stop going public",
             Self::NewInvite => "New invite",
             Self::NewToken => "New token",
+            Self::AccessRequests => "Access requests",
             Self::Ask => "Ask an agent",
             Self::Accounts => "Accounts",
             Self::Projects => "Projects",
@@ -219,6 +223,7 @@ impl Action {
             Self::StopPublic => "turn off the active route; links go back to local",
             Self::NewInvite => "a one-time link that gives someone their own token",
             Self::NewToken => "an API token for a script or app",
+            Self::AccessRequests => "people asking for access or for more, and the link",
             Self::Ask => "a prompt through the queue, or to a bridge you use",
             Self::Accounts => "add, sign in, disable and remove agent accounts",
             Self::Projects => "folders that tokens and invites can be bound to",
@@ -753,6 +758,28 @@ pub enum Popup {
     },
     /// Confirmation before the dashboard steps aside for `hashi update`.
     ConfirmUpdate,
+    /// Requests for access and for more.
+    AccessRequests {
+        /// Selected row.
+        selected: usize,
+        /// Decided and expired requests too, as `hashi requests list --all`.
+        all: bool,
+    },
+    /// The accept popup, prefilled with what was asked.
+    AcceptRequest(Box<super::access::AcceptForm>),
+    /// The decline popup, with an optional reason.
+    DeclineRequest(Box<super::access::DeclineForm>),
+    /// A freshly opened ask-access link. Like an invite, the URL is built
+    /// from the current base URL each time, so it turns public with a
+    /// tunnel. The code is shown only here.
+    AccessLink {
+        /// The link code.
+        code: String,
+        /// Hours until it closes by itself.
+        hours: u32,
+        /// The project new requests are for.
+        project: Option<String>,
+    },
 }
 
 /// Work finished in the background, picked up on the next tick.
@@ -767,6 +794,8 @@ pub enum Done {
         /// The answer, or why there is none.
         result: Result<String, String>,
     },
+    /// `hashi request status`: what checking each outgoing request found.
+    RequestStatus(Result<Vec<crate::access_client::Checked>, String>),
 }
 
 /// Public tunnel state.
@@ -867,6 +896,13 @@ pub struct App {
     pub crush: Option<std::path::PathBuf>,
     /// Background work that has finished, waiting for the next tick.
     pub(crate) done: Shared<Vec<Done>>,
+    /// Requests for access waiting for the owner: the Commands tab's badge.
+    pub access_pending: usize,
+    /// What the last `hashi request status` check found, for the Bridges
+    /// popup.
+    pub request_checks: Option<Vec<crate::access_client::Checked>>,
+    /// Whether a request status check is running.
+    pub request_checking: bool,
 }
 
 /// State a background task fills in for the dashboard.
@@ -921,6 +957,9 @@ impl App {
             tailscale_self: std::sync::Arc::default(),
             crush: None,
             done: std::sync::Arc::default(),
+            access_pending: 0,
+            request_checks: None,
+            request_checking: false,
         };
         app.refresh();
         app
@@ -973,6 +1012,9 @@ impl App {
             }
             Err(e) => self.notify(format!("refresh failed: {e}")),
         }
+        if let Ok(pending) = crate::access::pending(&self.state.store) {
+            self.access_pending = pending.len();
+        }
         if let Ok(list) = self.state.store.list_accounts() {
             let mut counts = HashMap::new();
             for a in list.iter().filter(|a| a.kind != acct::AccountKind::Default) {
@@ -998,6 +1040,7 @@ impl App {
                 .any(|r| r.status == crate::store::RequestStatus::Running)
             || matches!(self.tunnel, TunnelState::Starting)
             || self.toast.is_some()
+            || self.request_checking
             || self.popup.as_ref().is_some_and(Popup::animates)
     }
 
@@ -1008,7 +1051,10 @@ impl App {
         if animating && !self.reduced_motion {
             self.tick = self.tick.wrapping_add(1);
         }
-        let mut redraw = animating || self.take_done();
+        // Always pick up finished work: a spinner waiting for it animates,
+        // so it must not short-circuit the check.
+        let done = self.take_done();
+        let mut redraw = animating || done;
         if self
             .last_refresh
             .is_none_or(|t| t.elapsed() >= Duration::from_millis(750))
@@ -1141,15 +1187,15 @@ impl App {
                 item
             }
             Event::AccessRequest { kind, name, .. } => {
-                let text = match kind {
-                    crate::store::AccessKind::New => format!("{name} asks for access"),
-                    crate::store::AccessKind::More => format!("{name} asks for more"),
-                };
+                // The text is made safe to draw; the refresh below updates
+                // the Commands tab's badge.
+                let text = super::access::toast_text(kind, &name);
+                self.notify(format!("{text}: see Commands, Access requests"));
                 FeedItem {
                     at: now_ms(),
                     glyph: "?",
                     color: theme::ORCHID,
-                    text: crate::diagnostics::neutralize_controls(&text, false),
+                    text,
                 }
             }
             Event::Log(text) => FeedItem {
@@ -1297,7 +1343,11 @@ impl App {
             | Popup::ReportSaved { .. }
             | Popup::Listen(_)
             | Popup::ConfirmListen { .. }
-            | Popup::ConfirmUpdate) => self.on_manage_key(popup, key),
+            | Popup::ConfirmUpdate
+            | Popup::AccessRequests { .. }
+            | Popup::AcceptRequest(_)
+            | Popup::DeclineRequest(_)
+            | Popup::AccessLink { .. }) => self.on_manage_key(popup, key),
             Popup::Reveal { title, secret } => match key.code {
                 KeyCode::Char('c') => {
                     self.copy(&secret, "token copied to clipboard");
@@ -1897,6 +1947,7 @@ impl App {
             }
             Action::Help => self.popup = Some(Popup::Help),
             Action::Ask
+            | Action::AccessRequests
             | Action::Accounts
             | Action::Projects
             | Action::Bridges

@@ -55,6 +55,13 @@ All notable changes to this project are documented here. The format follows [Kee
 - Loop prevention: `GET /v1/status` reports an `instance` id kept in the database. Forwarded prompts carry `X-Hashi-Hops` (one more per bridge) and `X-Hashi-From`; a bridge refuses a prompt past 2 hops (`508 hop_limit`) or one it sent itself (`508 loop`, which disables a remote account pointing back at its own bridge).
 - `shareUsage` on tokens and invites (`--share-usage` on `token create` and `share`, `--share-usage true|false` on `token update`, the `shareUsage` API field), off by default. With it, `GET /v1/me` adds `agentUsage`: for each agent, the headroom left on the accounts serving it, the next reset and the state, never account names, counts or windows. The claim page says "The bridge owner lets you see how much quota is left" and `/me` shows the figures.
 - The usage poller reads each remote account's `/v1/me` on its cadence as source `remote`: the shared headroom when the friend shares it, and the remote token's own request and budget caps, which make the account limited until their reset when used up. `hashi account list` and `hashi account usage` show remote accounts with their bridge (`remote via bob`, `via bob, shared`), as the dashboard's usage section does. The database moves to schema version 8 (version 7 is reserved).
+- Access requests in the dashboard: a Commands row "Access requests" (`hashi requests list`) lists pending requests, `s` shows all, `a` accepts through the prefilled form, `d` declines with an optional reason, `o` opens the ask-access link and shows it with `c` to copy and a QR code, and `x` closes it. The Commands tab shows the number waiting as a badge, refreshed when a request arrives and with the regular refresh. Decisions are audited as `dashboard`.
+- The Bridges I use popup lists the requests for access this machine sent, and `r` checks them as `hashi request status` does.
+- The dashboard's project form sets the account strategy (server default, in-order, most-left or soonest-reset) and rotate at % (50 to 99, empty for the server default), with errors next to the field.
+
+### Fixed
+
+- The dashboard picked up finished background work only while nothing animated, so a bridge's answer or a connect result waited until its own spinner stopped, which it never did.
 
 ## [0.2.0] - 2026-11-05
 

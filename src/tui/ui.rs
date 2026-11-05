@@ -253,6 +253,10 @@ fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
                     format!(" ·{}", app.stats.running + app.stats.queued)
                 }
                 Tab::Tokens => format!(" ·{}", app.tokens.len()),
+                // Requests for access waiting for the owner.
+                Tab::Commands => super::access::badge(app.access_pending)
+                    .map(|n| format!(" ·{n}"))
+                    .unwrap_or_default(),
                 _ => String::new(),
             };
             Line::from(vec![
@@ -1510,6 +1514,17 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             Some(v) => (format!("v{v} available"), t::ORCHID),
             None => ("installs the latest release, if newer".to_owned(), TEXT),
         },
+        Action::AccessRequests => {
+            let open = crate::access::current_link(&app.state.store)
+                .ok()
+                .flatten()
+                .is_some_and(|l| l.status(crate::util::now_ms()) == "open");
+            let link = if open { "link open" } else { "link closed" };
+            match app.access_pending {
+                0 => (format!("none pending, {link}"), TEXT),
+                n => (format!("{n} pending, {link}"), t::ORCHID),
+            }
+        }
         Action::Ask => match app.owner_token() {
             Some(t) => (format!("sends as {}", t.name), TEXT),
             None => ("no active admin token".to_owned(), t::AMBER),
@@ -1557,6 +1572,7 @@ pub fn action_cli(app: &App, action: Action) -> String {
         },
         Action::NewInvite => "hashi share <label>".to_owned(),
         Action::NewToken => "hashi token create <name>".to_owned(),
+        Action::AccessRequests => "hashi requests list".to_owned(),
         Action::Ask => "hashi ask \"<prompt>\"".to_owned(),
         Action::Accounts => "hashi account list".to_owned(),
         Action::Projects => "hashi project list".to_owned(),
@@ -1726,8 +1742,8 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 ("t", "go public: start a Cloudflare quick tunnel"),
                 ("a", "ask an agent here or on a bridge you use"),
                 ("enter", "run the selected command (Commands view)"),
-                ("", "Commands also has accounts, projects, bridges,"),
-                ("", "the port, doctor, report, audit and updates"),
+                ("", "Commands also has access requests, accounts,"),
+                ("", "projects, bridges, the port, doctor and more"),
                 ("n", "new token (Tokens and Commands views)"),
                 ("e", "edit token: name, note, expiry, limits (Tokens)"),
                 ("d", "revoke token (Tokens view)"),
