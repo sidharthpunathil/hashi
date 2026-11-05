@@ -19,6 +19,8 @@ use tracing_subscriber::fmt::MakeWriter;
 
 /// File name of the active log inside the logs directory.
 pub const LOG_FILE: &str = "hashi.log";
+/// Directory in the Hashi home where the dashboard saves diagnostic reports.
+pub const REPORTS_DIR: &str = "reports";
 /// The log is rotated, at startup and while running, once it grows past
 /// this many bytes.
 pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;

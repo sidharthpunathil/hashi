@@ -548,6 +548,194 @@ where
     }
 }
 
+/// Whether the port or bind address came from a flag or environment
+/// variable at startup, which wins over `<home>/settings.json`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Overrides {
+    /// `--port` or `HASHI_PORT` was given.
+    pub port: bool,
+    /// `--bind` or `HASHI_BIND` was given.
+    pub bind: bool,
+}
+
+/// Where a server listens now, and the way to move it while it runs.
+///
+/// [`Listen::new`] makes one that only reports a URL (the dashboard tests
+/// use it); [`Listen::switchable`] pairs one with the receiver that
+/// [`serve_switching`] takes.
+#[derive(Debug, Default)]
+pub struct Listen {
+    url: std::sync::RwLock<String>,
+    addr: std::sync::RwLock<Option<SocketAddr>>,
+    tls: bool,
+    switch: Mutex<Option<tokio::sync::mpsc::UnboundedSender<std::net::TcpListener>>>,
+    overrides: Mutex<Overrides>,
+}
+
+impl Listen {
+    /// A fixed listen URL that cannot be moved.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: std::sync::RwLock::new(url.into()),
+            ..Self::default()
+        }
+    }
+
+    /// A server listening on `addr` (HTTPS when `tls`), and the receiver of
+    /// the listeners it is moved to.
+    #[must_use]
+    pub fn switchable(
+        addr: SocketAddr,
+        tls: bool,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::UnboundedReceiver<std::net::TcpListener>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let listen = Self {
+            url: std::sync::RwLock::new(listen_url(addr, tls)),
+            addr: std::sync::RwLock::new(Some(addr)),
+            tls,
+            switch: Mutex::new(Some(tx)),
+            overrides: Mutex::default(),
+        };
+        (listen, rx)
+    }
+
+    /// The URL clients on this machine use, such as `http://127.0.0.1:7878`.
+    #[must_use]
+    pub fn url(&self) -> String {
+        self.url.read().map(|u| u.clone()).unwrap_or_default()
+    }
+
+    /// The address listened on, when known.
+    #[must_use]
+    pub fn addr(&self) -> Option<SocketAddr> {
+        self.addr.read().ok().and_then(|a| *a)
+    }
+
+    /// Whether the server serves HTTPS itself.
+    #[must_use]
+    pub const fn tls(&self) -> bool {
+        self.tls
+    }
+
+    /// Whether [`Listen::switch_to`] can move this server.
+    #[must_use]
+    pub fn can_switch(&self) -> bool {
+        self.switch.lock().is_ok_and(|s| s.is_some())
+    }
+
+    /// What the flags and environment fixed at startup.
+    #[must_use]
+    pub fn overrides(&self) -> Overrides {
+        self.overrides.lock().map(|o| *o).unwrap_or_default()
+    }
+
+    /// Records what the flags and environment fixed at startup.
+    pub fn set_overrides(&self, overrides: Overrides) {
+        if let Ok(mut o) = self.overrides.lock() {
+            *o = overrides;
+        }
+    }
+
+    /// Hands `listener`, already bound, to the server, which starts serving
+    /// on it at once and lets the old listener drain. Returns its address.
+    ///
+    /// # Errors
+    ///
+    /// Fails when this server cannot be moved or has stopped.
+    pub fn switch_to(&self, listener: std::net::TcpListener) -> io::Result<SocketAddr> {
+        let addr = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        let sent = self
+            .switch
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().map(|tx| tx.send(listener).is_ok()));
+        match sent {
+            Some(true) => {}
+            Some(false) => return Err(io::Error::other("the server has stopped")),
+            None => return Err(io::Error::other("this server cannot be moved")),
+        }
+        if let Ok(mut u) = self.url.write() {
+            *u = listen_url(addr, self.tls);
+        }
+        if let Ok(mut a) = self.addr.write() {
+            *a = Some(addr);
+        }
+        Ok(addr)
+    }
+}
+
+/// `http(s)://addr`, with IPv6 in brackets.
+#[must_use]
+pub fn listen_url(addr: SocketAddr, tls: bool) -> String {
+    format!("{}://{addr}", if tls { "https" } else { "http" })
+}
+
+/// Serves `app` on `first`, then on each listener that arrives on `next`:
+/// the new one starts serving at once, and the one before stops accepting
+/// and finishes its open requests within [`NetLimits::shutdown_grace`], as
+/// at shutdown. Every listener gets the same limits and, with `tls`, the
+/// same certificate. Returns once `shutdown` fires and every listener has
+/// drained.
+pub async fn serve_switching(
+    first: TcpListener,
+    mut next: tokio::sync::mpsc::UnboundedReceiver<std::net::TcpListener>,
+    app: Router,
+    limits: NetLimits,
+    tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    shutdown: CancellationToken,
+) {
+    let mut running = tokio::task::JoinSet::new();
+    let spawn = |running: &mut tokio::task::JoinSet<()>, tcp: TcpListener| {
+        let stop = shutdown.child_token();
+        let app = app.clone();
+        let limits = limits.clone();
+        let tls = tls.clone();
+        let handle = stop.clone();
+        running.spawn(async move {
+            match tls {
+                Some(config) => {
+                    match crate::tls::TlsListener::new(tcp, config, limits.max_connections) {
+                        Ok(listener) => serve(listener, app, &limits, stop).await,
+                        Err(e) => tracing::warn!(error = %e, "could not serve TLS here"),
+                    }
+                }
+                None => {
+                    let listener = LimitedListener::new(tcp, limits.max_connections);
+                    serve(listener, app, &limits, stop).await;
+                }
+            }
+        });
+        handle
+    };
+    let mut current = spawn(&mut running, first);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            got = next.recv(), if open => match got {
+                Some(std) => match TcpListener::from_std(std) {
+                    Ok(tcp) => {
+                        let stop = spawn(&mut running, tcp);
+                        // The old listener drains while the new one serves.
+                        current.cancel();
+                        current = stop;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "could not use the new listener"),
+                },
+                None => open = false,
+            },
+            // Reap listeners that have finished draining.
+            Some(_) = running.join_next(), if running.len() > 1 => {}
+        }
+    }
+    while running.join_next().await.is_some() {}
+}
+
 /// The host name in a `Host` header or URL authority: lowercased, without
 /// port, IPv6 brackets or a trailing dot.
 #[must_use]

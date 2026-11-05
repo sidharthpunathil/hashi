@@ -16,6 +16,7 @@ pub mod projects;
 pub mod queue;
 pub mod remote;
 pub mod server;
+pub mod settings;
 pub mod shutdown;
 pub mod store;
 pub mod tailscale;

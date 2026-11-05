@@ -227,12 +227,15 @@ impl AgentArgs {
 
 #[derive(Debug, Parser, Clone)]
 struct ServeArgs {
-    /// Address to listen on. Keep it on loopback and use --tunnel for remote access.
-    #[arg(long, default_value = "127.0.0.1", env = "HASHI_BIND")]
-    bind: std::net::IpAddr,
-    /// Port to listen on.
-    #[arg(short, long, default_value_t = 7878, env = "HASHI_PORT")]
-    port: u16,
+    /// Address to listen on. Keep it on loopback and use --tunnel for remote
+    /// access. Default: the one saved from the dashboard in
+    /// `<home>/settings.json`, else 127.0.0.1.
+    #[arg(long, env = "HASHI_BIND")]
+    bind: Option<std::net::IpAddr>,
+    /// Port to listen on. Default: the one saved from the dashboard in
+    /// `<home>/settings.json`, else 7878.
+    #[arg(short, long, env = "HASHI_PORT")]
+    port: Option<u16>,
     /// Expose the API through a Cloudflare quick tunnel (requires `cloudflared`).
     #[arg(long, env = "HASHI_TUNNEL")]
     tunnel: bool,
@@ -506,23 +509,21 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         );
     }
 
-    if !args.bind.is_loopback() {
-        if args.tls_cert.is_some() {
-            eprintln!(
-                "note: serving HTTPS on {}, reachable from your network",
-                args.bind
-            );
-        } else {
-            eprintln!(
-                "warning: listening on {} without TLS exposes the API to your network in plain text; \
-                 add --tls-cert/--tls-key, or keep 127.0.0.1 and use --tunnel",
-                args.bind
-            );
-        }
+    // A flag or variable wins over the dashboard's saved choice.
+    let saved = hashi::settings::load(home).unwrap_or_else(|why| {
+        tracing::warn!("{why}");
+        hashi::settings::Settings::default()
+    });
+    let (bind, bind_from) =
+        hashi::settings::resolve(args.bind, saved.bind, hashi::settings::DEFAULT_BIND);
+    let (port, port_from) =
+        hashi::settings::resolve(args.port, saved.port, hashi::settings::DEFAULT_PORT);
+    if let Some(warning) = server::plain_text_warning(bind, args.tls_cert.is_some()) {
+        eprintln!("{warning}");
     }
 
     let cfg = ServerConfig {
-        bind: SocketAddr::new(args.bind, args.port),
+        bind: SocketAddr::new(bind, port),
         home: home.to_path_buf(),
         agents: args.agents.configs(),
         default_agent: args.default_agent,
@@ -573,6 +574,14 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         ..hashi::net::NetLimits::default()
     };
     let running = server::start_with(cfg, net, bus).await?;
+    running
+        .state
+        .runtime
+        .listen
+        .set_overrides(hashi::net::Overrides {
+            port: port_from == hashi::settings::Source::Override,
+            bind: bind_from == hashi::settings::Source::Override,
+        });
     // Ctrl-C, SIGTERM and SIGHUP (or the Windows console closing) all stop
     // the server the same graceful way; a second one exits at once.
     let mut signals = hashi::shutdown::Signals::install().context("installing signal handlers")?;
@@ -620,7 +629,7 @@ fn print_banner(running: &server::Running) {
     println!();
     println!("  ✦ hashi {}  the bridge", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("  local    {}", rt.local_url);
+    println!("  local    {}", rt.local_url());
     for a in &rt.agents {
         let state = a.version.as_deref().unwrap_or("not found");
         println!("  {:<8} {}", a.agent.as_str(), state);
@@ -994,5 +1003,40 @@ mod tests {
         let crush = &on[&AgentKind::Crush];
         assert_eq!(crush.bin, PathBuf::from("/opt/crush"));
         assert!(crush.allow_newer);
+    }
+
+    #[test]
+    fn port_and_bind_are_unset_without_a_flag_so_the_saved_value_can_apply() {
+        // HASHI_PORT or HASHI_BIND in the test's own environment would set them.
+        if std::env::var_os("HASHI_PORT").is_some() || std::env::var_os("HASHI_BIND").is_some() {
+            return;
+        }
+        let serve = |args: &[&str]| {
+            let mut argv = vec!["hashi", "serve"];
+            argv.extend_from_slice(args);
+            match Cli::try_parse_from(argv).map(|c| c.command) {
+                Ok(Some(Command::Serve(serve))) => (serve.port, serve.bind),
+                other => panic!("unexpected parse: {other:?}"),
+            }
+        };
+        assert_eq!(serve(&[]), (None, None));
+        assert_eq!(
+            serve(&["--port", "9000", "--bind", "0.0.0.0"]),
+            (Some(9000), Some("0.0.0.0".parse().unwrap()))
+        );
+        let home = tempfile::tempdir().unwrap();
+        hashi::settings::save(
+            home.path(),
+            &hashi::settings::Settings {
+                port: Some(8000),
+                bind: None,
+            },
+        )
+        .unwrap();
+        let saved = hashi::settings::load(home.path()).unwrap();
+        let (port, from) = hashi::settings::resolve(serve(&[]).0, saved.port, 7878);
+        assert_eq!((port, from), (8000, hashi::settings::Source::Saved));
+        let (port, from) = hashi::settings::resolve(serve(&["-p", "9001"]).0, saved.port, 7878);
+        assert_eq!((port, from), (9001, hashi::settings::Source::Override));
     }
 }

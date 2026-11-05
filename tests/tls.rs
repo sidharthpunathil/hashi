@@ -67,7 +67,7 @@ async fn start() -> Tls {
         account_cooldown: std::time::Duration::from_secs(3600),
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
-    let url = running.state.runtime.local_url.clone();
+    let url = running.state.runtime.local_url();
     assert!(url.starts_with("https://"), "{url}");
     let port = url.rsplit(':').next().unwrap().parse().unwrap();
 

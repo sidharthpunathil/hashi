@@ -626,6 +626,9 @@ pub struct Control {
     settings: Option<Settings>,
     trust: TunnelTrust,
     slot: Mutex<Slot>,
+    /// The local port, and why Tailscale cannot reach it, after the server
+    /// moved: these replace the ones in `settings`.
+    moved_to: Mutex<Option<(u16, Option<String>)>>,
 }
 
 impl Control {
@@ -636,7 +639,27 @@ impl Control {
             settings: Some(settings),
             trust,
             slot: Mutex::default(),
+            moved_to: Mutex::default(),
         }
+    }
+
+    /// Points routes started from now on at `local_port`, after the server
+    /// moved. `unreachable` says why Tailscale cannot reach the new address,
+    /// if it cannot.
+    pub fn set_local(&self, local_port: u16, unreachable: Option<String>) {
+        if let Ok(mut m) = self.moved_to.lock() {
+            *m = Some((local_port, unreachable));
+        }
+    }
+
+    /// The settings with the local port and reachability after any move.
+    fn current(&self) -> Option<Settings> {
+        let mut s = self.settings.clone()?;
+        if let Some((port, why)) = self.moved_to.lock().ok().and_then(|m| m.clone()) {
+            s.local_port = port;
+            s.unreachable = why;
+        }
+        Some(s)
     }
 
     fn slot(&self) -> MutexGuard<'_, Slot> {
@@ -699,7 +722,8 @@ impl Control {
     ///
     /// See [`StartError`].
     pub fn begin(&self, mode: Mode) -> Result<(Settings, PathBuf, CancellationToken), StartError> {
-        let settings = self.settings.as_ref().ok_or(StartError::Unavailable)?;
+        let current = self.current().ok_or(StartError::Unavailable)?;
+        let settings = &current;
         if let Some(why) = &settings.unreachable {
             return Err(StartError::Unsupported(why.clone()));
         }

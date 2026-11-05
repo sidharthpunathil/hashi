@@ -77,7 +77,7 @@ async fn harness() -> Harness {
         account_cooldown: std::time::Duration::from_secs(3600),
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
-    let base = running.state.runtime.local_url.clone();
+    let base = running.state.runtime.local_url();
     let admin = running.bootstrap_token.clone().unwrap();
     Harness {
         dir,

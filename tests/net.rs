@@ -63,7 +63,7 @@ async fn start_full(rate_limit: u32, net: NetLimits, public_url: Option<String>)
         account_cooldown: std::time::Duration::from_secs(3600),
     };
     let running = server::start_with(cfg, net, Bus::default()).await.unwrap();
-    let base = running.state.runtime.local_url.clone();
+    let base = running.state.runtime.local_url();
     let port = base.rsplit(':').next().unwrap().parse().unwrap();
     let admin = running.bootstrap_token.clone().unwrap();
     Net {

@@ -72,7 +72,7 @@ fn state() -> AppState {
         dispatcher: Dispatcher::new(),
         runtime: Arc::new(Runtime {
             started: Instant::now(),
-            local_url: "http://127.0.0.1:7878".into(),
+            listen: hashi::net::Listen::new("http://127.0.0.1:7878"),
             public_url: RwLock::new(None),
             name: "Hashi".into(),
             tunnel: Default::default(),
@@ -592,7 +592,7 @@ fn with_agents(installed: &[AgentKind]) -> AppState {
         .collect();
     st.runtime = Arc::new(Runtime {
         started: Instant::now(),
-        local_url: "http://127.0.0.1:7878".into(),
+        listen: hashi::net::Listen::new("http://127.0.0.1:7878"),
         public_url: RwLock::new(None),
         agents,
         name: "Hashi".into(),
@@ -827,7 +827,7 @@ fn go_public_key_defers_to_a_configured_public_url() {
     let url = "https://hashi.example.com";
     st.runtime = Arc::new(Runtime {
         started: Instant::now(),
-        local_url: "http://127.0.0.1:7878".into(),
+        listen: hashi::net::Listen::new("http://127.0.0.1:7878"),
         public_url: RwLock::new(Some(url.into())),
         agents: Vec::new(),
         name: "Hashi".into(),
@@ -869,7 +869,7 @@ fn without_helpers() -> AppState {
     let cancel = tokio_util::sync::CancellationToken::new();
     st.runtime = Arc::new(Runtime {
         started: Instant::now(),
-        local_url: "http://127.0.0.1:7878".into(),
+        listen: hashi::net::Listen::new("http://127.0.0.1:7878"),
         public_url: RwLock::new(None),
         agents: Vec::new(),
         name: "Hashi".into(),

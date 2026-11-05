@@ -209,7 +209,7 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
         Line::raw(""),
         Line::from(vec![
             Span::styled("local   ", t::muted()),
-            Span::styled(rt.local_url.clone(), plain()),
+            Span::styled(rt.local_url(), plain()),
         ]),
         Line::from(vec![Span::styled("public  ", t::muted()), public, via]),
         Line::from(agents),

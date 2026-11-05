@@ -104,8 +104,8 @@ pub struct AgentInfo {
 pub struct Runtime {
     /// Process start.
     pub started: Instant,
-    /// Local listen address.
-    pub local_url: String,
+    /// Where the server listens now. The dashboard can move it.
+    pub listen: crate::net::Listen,
     /// Public URL: configured with `--public-url`, or the tunnel's once known.
     pub public_url: RwLock<Option<String>>,
     /// Agent readiness.
@@ -126,6 +126,12 @@ impl Runtime {
         self.public_url.read().ok().and_then(|u| u.clone())
     }
 
+    /// The local listen URL, such as `http://127.0.0.1:7878`.
+    #[must_use]
+    pub fn local_url(&self) -> String {
+        self.listen.url()
+    }
+
     /// Best URL to hand to clients.
     #[must_use]
     pub fn base_url(&self) -> String {
@@ -133,7 +139,7 @@ impl Runtime {
             .read()
             .ok()
             .and_then(|u| u.clone())
-            .unwrap_or_else(|| self.local_url.clone())
+            .unwrap_or_else(|| self.local_url())
     }
 }
 
@@ -206,7 +212,7 @@ async fn host_check(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if !policy.runtime.local_url.starts_with("https://") {
+    if !policy.runtime.listen.tls() {
         let host = req
             .headers()
             .get(header::HOST)
