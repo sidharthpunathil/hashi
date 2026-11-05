@@ -12,7 +12,7 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--trust-proxy` | `HASHI_TRUST_PROXY` | off. Read client addresses from `X-Forwarded-For` on loopback connections |
 | `--cors-origin` | `HASHI_CORS_ORIGINS` (comma separated) | none. Origins allowed to call Hashi from a browser |
 | `--allowed-host` | `HASHI_ALLOWED_HOSTS` (comma separated) | none. Extra host names accepted over plain HTTP |
-| `--public-url` | `HASHI_PUBLIC_URL` | none. Base for invite links, for example `https://hashi.example.com` |
+| `--public-url` | `HASHI_PUBLIC_URL` | none. Base for invite links, for example `https://hashi.example.com`. Without it, `hashi share` uses the running server's public URL from `~/.hashi/public-url` when there is one |
 | `--tls-cert`, `--tls-key` | `HASHI_TLS_CERT`, `HASHI_TLS_KEY` | none. Serve HTTPS with these PEM files |
 | `--name` | `HASHI_NAME` | `Hashi`. Shown on invite and My access pages |
 | `--headless` | | off (on when stdout is not a terminal) |
@@ -70,7 +70,8 @@ Run `hashi` in a terminal and the dashboard takes over the screen. When stdout i
 | `s` | Share: create an invite link (Tokens view) |
 | `p` | Pause or resume the selected token |
 | `i` / `x` | Switch to pending invites / cancel one |
-| `c` | Copy the API URL, or the token being shown |
+| `c` | Copy the API URL, or the token or invite link being shown |
+| `t` | Go public: start a Cloudflare quick tunnel on the running server (needs `cloudflared`) |
 | `r` | Refresh |
 | `?` | All key bindings |
 | `Esc` | Close a popup |

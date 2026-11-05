@@ -131,7 +131,7 @@ Hashi listens on `127.0.0.1` by default. To reach it from elsewhere, each of the
 
 | Option | Command |
 |---|---|
-| Cloudflare quick tunnel (random URL, new on each start) | `hashi serve --tunnel` |
+| Cloudflare quick tunnel (random URL, new on each start) | press `t` in the dashboard, or `hashi serve --tunnel` |
 | Cloudflare named tunnel (your hostname) | `HASHI_TUNNEL_TOKEN=... hashi serve --public-url https://hashi.example.com` |
 | Hashi serves TLS itself (LAN, Tailscale, your own certificate) | `hashi serve --tls-cert cert.pem --tls-key key.pem` |
 | Behind Caddy or nginx | `hashi serve --public-url https://... --trust-proxy` |
