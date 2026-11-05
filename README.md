@@ -131,6 +131,19 @@ This prints a one-time link like `https://your-host/claim/hashi_inv_…` (for pe
 - **From her own agent.** Hashi is an MCP server at `/mcp`, so she can add your agents as tools in her Claude Code or Cursor. The claim page shows the exact command, plus one-click Add to Cursor and Add to VS Code buttons.
 - **One command.** Instead of clicking, she can copy the setup command from the claim page: it installs Hashi from GitHub and runs `hashi connect` with her link, so `hashi ask --remote "..."` works straight away. See [connecting to someone else's Hashi](docs/configuration.md#connecting-to-someone-elses-hashi).
 
+### Let people ask
+
+Instead of making every invite yourself, you can let people ask. It is off until you open a link:
+
+```bash
+hashi requests open --note "For the docs team" --hours 48   # prints https://your-host/ask-access/hashi_ask_…
+hashi requests list                                          # who asked, for what
+hashi requests accept 1a2b3c4d --daily-requests 50           # or: hashi requests decline 1a2b3c4d --reason "..."
+hashi requests close
+```
+
+The page asks for a name, a message and the agents they want. Accepting creates a single-use invite exactly as `hashi share` would, filled in from the request, with your flags on top; their page, or `hashi request status` on their machine, picks it up, so there is no link for you to pass on. People who already have a token can ask for more (higher limits, more agents, a later expiry) from `/me`, `POST /v1/me/requests` or the MCP tool `request_more`, and accepting applies the values you settle on. Nothing is granted without you. The link closes by itself (after a week by default), and requests are capped and expire after 7 days. See [access requests](docs/configuration.md#access-requests).
+
 ### Several accounts
 
 If you have more than one login for an agent (a work and a personal Claude plan, two Codex accounts, an API key on top of a subscription), add them and choose which ones each token uses:
