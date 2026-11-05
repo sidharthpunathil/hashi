@@ -74,24 +74,24 @@ fn insert_window(
     name: &str,
     w: &Window,
 ) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO usage (agent, account, window, label, used_percent, resets_at, window_mins,
              source, observed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(agent, account, window) DO UPDATE SET label = ?4, used_percent = ?5,
              resets_at = ?6, window_mins = ?7, source = ?8, observed_at = ?9",
-        params![
-            agent.as_str(),
-            name,
-            w.key,
-            w.label,
-            crate::usage::clamp_percent(w.used_percent),
-            w.resets_at,
-            w.window_mins,
-            w.source.as_str(),
-            w.observed_at.unwrap_or_else(now_ms),
-        ],
-    )?;
+    )?
+    .execute(params![
+        agent.as_str(),
+        name,
+        w.key,
+        w.label,
+        crate::usage::clamp_percent(w.used_percent),
+        w.resets_at,
+        w.window_mins,
+        w.source.as_str(),
+        w.observed_at.unwrap_or_else(now_ms),
+    ])?;
     Ok(())
 }
 
@@ -155,7 +155,7 @@ impl Store {
             "SELECT {WINDOW_COLUMNS} FROM usage WHERE agent = ?1 AND account = ?2
              ORDER BY COALESCE(window_mins, 0), window"
         );
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![agent.as_str(), name], row_to_window)?;
         rows.map(|r| r.map_err(StoreError::from).and_then(|w| w))
             .collect()
@@ -272,13 +272,17 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn account_spend_today(&self, agent: AgentKind, name: &str, now: i64) -> Result<Spend> {
-        let (cost, tokens): (f64, i64) = self.conn()?.query_row(
-            "SELECT COALESCE(SUM(cost_usd), 0.0),
+        let (cost, tokens): (f64, i64) = self
+            .conn()?
+            .prepare_cached(
+                "SELECT COALESCE(SUM(cost_usd), 0.0),
                     COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
              FROM requests WHERE agent = ?1 AND account = ?2 AND started_at >= ?3",
-            params![agent.as_str(), name, crate::util::day_start_utc(now)],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+            )?
+            .query_row(
+                params![agent.as_str(), name, crate::util::day_start_utc(now)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
         Ok(Spend {
             cost_usd: cost,
             tokens: u64::try_from(tokens).unwrap_or(0),
@@ -291,11 +295,13 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn account_busy(&self, agent: AgentKind, name: &str) -> Result<bool> {
-        let n: i64 = self.conn()?.query_row(
-            "SELECT COUNT(*) FROM requests WHERE status = 'running' AND agent = ?1 AND account = ?2",
-            params![agent.as_str(), name],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn()?
+            .prepare_cached(
+                "SELECT COUNT(*) FROM requests
+                 WHERE status = 'running' AND agent = ?1 AND account = ?2",
+            )?
+            .query_row(params![agent.as_str(), name], |r| r.get(0))?;
         Ok(n > 0)
     }
 
@@ -313,7 +319,7 @@ impl Store {
         accounts: &[String],
     ) -> Result<Option<String>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT account FROM sessions WHERE token_id = ?1 AND agent = ?2 AND project = ?3
              ORDER BY updated_at DESC",
         )?;
@@ -351,7 +357,7 @@ impl Store {
     /// Fails on database errors.
     pub fn conversations(&self, token_id: &str) -> Result<Vec<Conversation>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT agent, account, project, updated_at FROM sessions WHERE token_id = ?1
              ORDER BY updated_at DESC",
         )?;

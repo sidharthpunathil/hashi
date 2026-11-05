@@ -598,6 +598,9 @@ const MIGRATIONS: [&str; 9] = [
     SCHEMA_V9,
 ];
 
+/// Prepared statements kept per connection. The hot paths cache about 40.
+const STATEMENT_CACHE: usize = 64;
+
 /// The schema version a fully migrated database reports.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -643,6 +646,9 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5_000)?;
+        // Room for every statement the request path and the workers prepare
+        // with `prepare_cached`, so none is parsed and planned again.
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         let before = migrate(&mut conn)?;
         let store = Self {
             conn: Mutex::new(conn),
@@ -702,17 +708,16 @@ impl Store {
         let conn = self.conn()?;
         let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE hash = ?1");
         let Some(t) = conn
-            .query_row(&sql, [&digest], row_to_token)
+            .prepare_cached(&sql)?
+            .query_row([&digest], row_to_token)
             .optional()?
             .transpose()?
         else {
             return Ok(None);
         };
         let now = now_ms();
-        conn.execute(
-            "UPDATE tokens SET last_used_at = ?1 WHERE id = ?2",
-            params![now, t.id],
-        )?;
+        conn.prepare_cached("UPDATE tokens SET last_used_at = ?1 WHERE id = ?2")?
+            .execute(params![now, t.id])?;
         Ok(Some(Token {
             last_used_at: Some(now),
             ..t
@@ -727,7 +732,8 @@ impl Store {
     pub fn get_token(&self, id: &str) -> Result<Option<Token>> {
         let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
         self.conn()?
-            .query_row(&sql, [id], row_to_token)
+            .prepare_cached(&sql)?
+            .query_row([id], row_to_token)
             .optional()?
             .transpose()
     }
@@ -788,16 +794,14 @@ impl Store {
     /// Fails on database errors.
     pub fn instance_id(&self) -> Result<String> {
         let conn = self.conn()?;
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO meta (key, value) VALUES ('instance_id', ?1)
              ON CONFLICT(key) DO NOTHING",
-            [uuid::Uuid::new_v4().simple().to_string()],
-        )?;
-        Ok(conn.query_row(
-            "SELECT value FROM meta WHERE key = 'instance_id'",
-            [],
-            |r| r.get(0),
-        )?)
+        )?
+        .execute([uuid::Uuid::new_v4().simple().to_string()])?;
+        Ok(conn
+            .prepare_cached("SELECT value FROM meta WHERE key = 'instance_id'")?
+            .query_row([], |r| r.get(0))?)
     }
 
     /// A token's use in the UTC day and month containing `now_ms`. Served
@@ -950,11 +954,9 @@ impl Store {
                 max,
             });
         }
-        let total: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM requests WHERE status IN ('queued', 'running')",
-            [],
-            |r| r.get(0),
-        )?;
+        let total: i64 = tx
+            .prepare_cached("SELECT COUNT(*) FROM requests WHERE status IN ('queued', 'running')")?
+            .query_row([], |r| r.get(0))?;
         let cap = if new.token.is_admin() {
             queue_limit
         } else {
@@ -965,10 +967,8 @@ impl Store {
         }
         insert_request_row(&tx, new)?;
         if hops > 0 {
-            tx.execute(
-                "UPDATE requests SET hops = ?2 WHERE id = ?1",
-                params![new.id, hops],
-            )?;
+            tx.prepare_cached("UPDATE requests SET hops = ?2 WHERE id = ?1")?
+                .execute(params![new.id, hops])?;
         }
         tx.commit()?;
         Ok(Admission::Accepted)
@@ -982,14 +982,15 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn has_queued(&self, agent: AgentKind) -> Result<bool> {
-        Ok(self.conn()?.query_row(
-            "SELECT EXISTS(
+        Ok(self
+            .conn()?
+            .prepare_cached(
+                "SELECT EXISTS(
                  SELECT 1 FROM requests r JOIN tokens t ON t.id = r.token_id
                  WHERE r.status = 'queued' AND r.agent = ?1
                    AND (t.paused = 0 OR (t.expires_at IS NOT NULL AND t.expires_at <= ?2)))",
-            params![agent.as_str(), now_ms()],
-            |r| r.get(0),
-        )?)
+            )?
+            .query_row(params![agent.as_str(), now_ms()], |r| r.get(0))?)
     }
 
     /// Fails every queued request for `agent` whose token has expired, with
@@ -1002,7 +1003,7 @@ impl Store {
     pub fn fail_expired_queued(&self, agent: AgentKind) -> Result<Vec<String>> {
         let now = now_ms();
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "UPDATE requests SET status = 'failed', error = ?1, completed_at = ?2
              WHERE status = 'queued' AND agent = ?3 AND token_id IN
                  (SELECT id FROM tokens WHERE expires_at IS NOT NULL AND expires_at <= ?2)
@@ -1031,7 +1032,8 @@ impl Store {
              RETURNING {REQUEST_COLUMNS}"
         );
         self.conn()?
-            .query_row(&sql, params![now_ms(), agent.as_str()], row_to_request)
+            .prepare_cached(&sql)?
+            .query_row(params![now_ms(), agent.as_str()], row_to_request)
             .optional()?
             .transpose()
     }
@@ -1044,11 +1046,12 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn is_running(&self, id: &str) -> Result<bool> {
-        Ok(self.conn()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM requests WHERE id = ?1 AND status = 'running')",
-            [id],
-            |r| r.get(0),
-        )?)
+        Ok(self
+            .conn()?
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE id = ?1 AND status = 'running')",
+            )?
+            .query_row([id], |r| r.get(0))?)
     }
 
     /// Requests of `token_id` that are running now.
@@ -1057,11 +1060,12 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn running_for_token(&self, token_id: &str) -> Result<u64> {
-        let n: i64 = self.conn()?.query_row(
-            "SELECT COUNT(*) FROM requests WHERE token_id = ?1 AND status = 'running'",
-            [token_id],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn()?
+            .prepare_cached(
+                "SELECT COUNT(*) FROM requests WHERE token_id = ?1 AND status = 'running'",
+            )?
+            .query_row([token_id], |r| r.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
@@ -1072,18 +1076,19 @@ impl Store {
     /// Fails on database errors.
     pub fn complete_request(&self, id: &str, response: &str, usage: Option<Usage>) -> Result<()> {
         let to_i64 = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
-        self.conn()?.execute(
-            "UPDATE requests SET status = 'completed', response = ?1, input_tokens = ?2,
+        self.conn()?
+            .prepare_cached(
+                "UPDATE requests SET status = 'completed', response = ?1, input_tokens = ?2,
                  output_tokens = ?3, cost_usd = ?4, completed_at = ?5 WHERE id = ?6",
-            params![
+            )?
+            .execute(params![
                 response,
                 usage.map(|u| to_i64(u.input_tokens)),
                 usage.map(|u| to_i64(u.output_tokens)),
                 usage.and_then(|u| u.cost_usd),
                 now_ms(),
                 id,
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -1093,10 +1098,12 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn fail_request(&self, id: &str, error: &str) -> Result<()> {
-        self.conn()?.execute(
-            "UPDATE requests SET status = 'failed', error = ?1, completed_at = ?2 WHERE id = ?3",
-            params![error, now_ms(), id],
-        )?;
+        self.conn()?
+            .prepare_cached(
+                "UPDATE requests SET status = 'failed', error = ?1, completed_at = ?2
+                 WHERE id = ?3",
+            )?
+            .execute(params![error, now_ms(), id])?;
         Ok(())
     }
 
@@ -1108,7 +1115,8 @@ impl Store {
     pub fn get_request(&self, id: &str) -> Result<Option<Request>> {
         let sql = format!("SELECT {REQUEST_COLUMNS} FROM requests WHERE id = ?1");
         self.conn()?
-            .query_row(&sql, [id], row_to_request)
+            .prepare_cached(&sql)?
+            .query_row([id], row_to_request)
             .optional()?
             .transpose()
     }
@@ -1186,11 +1194,13 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn queue_position(&self, req: &Request) -> Result<u64> {
-        let n: i64 = self.conn()?.query_row(
-            "SELECT COUNT(*) FROM requests WHERE status = 'queued' AND agent = ?1 AND created_at <= ?2",
-            params![req.agent.as_str(), req.created_at],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn()?
+            .prepare_cached(
+                "SELECT COUNT(*) FROM requests
+                 WHERE status = 'queued' AND agent = ?1 AND created_at <= ?2",
+            )?
+            .query_row(params![req.agent.as_str(), req.created_at], |r| r.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
@@ -1200,11 +1210,10 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn pending_count(&self) -> Result<u64> {
-        let n: i64 = self.conn()?.query_row(
-            "SELECT COUNT(*) FROM requests WHERE status IN ('queued', 'running')",
-            [],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn()?
+            .prepare_cached("SELECT COUNT(*) FROM requests WHERE status IN ('queued', 'running')")?
+            .query_row([], |r| r.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
@@ -1345,18 +1354,22 @@ impl Store {
     pub fn stats(&self) -> Result<Stats> {
         let conn = self.conn()?;
         let n = |v: i64| u64::try_from(v).unwrap_or(0);
-        let tokens: i64 = conn.query_row("SELECT COUNT(*) FROM tokens", [], |r| r.get(0))?;
+        let tokens: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM tokens")?
+            .query_row([], |r| r.get(0))?;
         // A bare COUNT(*) counts index pages without reading each entry,
         // which a GROUP BY over every status has to do. Completed requests
         // are the bulk, so they are what is left once the other three are
         // counted; this module writes no fifth status.
-        let total: i64 = conn.query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))?;
+        let total: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM requests")?
+            .query_row([], |r| r.get(0))?;
         let mut stats = Stats {
             tokens: n(tokens),
             total: n(total),
             ..Stats::default()
         };
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT status, COUNT(*) FROM requests
              WHERE status IN ('queued', 'running', 'failed') GROUP BY status",
         )?;
@@ -1448,12 +1461,13 @@ impl Store {
     ) -> Result<Option<String>> {
         Ok(self
             .conn()?
-            .query_row(
+            .prepare_cached(
                 "SELECT agent_session_id FROM sessions
                  WHERE token_id = ?1 AND agent = ?2 AND account = ?3 AND project = ?4",
-                params![token_id, agent.as_str(), account, project],
-                |r| r.get(0),
-            )
+            )?
+            .query_row(params![token_id, agent.as_str(), account, project], |r| {
+                r.get(0)
+            })
             .optional()?)
     }
 
@@ -1494,20 +1508,22 @@ impl Store {
         project: &str,
         session: &str,
     ) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT INTO sessions (token_id, agent, account, project, agent_session_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(token_id, agent, account, project) DO UPDATE SET agent_session_id = ?5,
-                 updated_at = ?6",
-            params![
+        self.conn()?
+            .prepare_cached(
+                "INSERT INTO sessions
+                     (token_id, agent, account, project, agent_session_id, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(token_id, agent, account, project) DO UPDATE SET
+                     agent_session_id = ?5, updated_at = ?6",
+            )?
+            .execute(params![
                 token_id,
                 agent.as_str(),
                 account,
                 project,
                 session,
                 now_ms()
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -1531,15 +1547,17 @@ impl Store {
 fn usage_in(conn: &Connection, token_id: &str, now_ms: i64) -> Result<TokenUsage> {
     let day = crate::util::day_start_utc(now_ms);
     let month = month_start_utc(now_ms);
-    let row = conn.query_row(TOKEN_USAGE_SQL, params![token_id, day, month], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, f64>(2)?,
-            r.get::<_, f64>(3)?,
-            r.get::<_, i64>(4)?,
-        ))
-    })?;
+    let row =
+        conn.prepare_cached(TOKEN_USAGE_SQL)?
+            .query_row(params![token_id, day, month], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?;
     let n = |v: i64| u64::try_from(v).unwrap_or(0);
     Ok(TokenUsage {
         today_requests: n(row.0),
@@ -1568,22 +1586,22 @@ fn migrate(conn: &mut Connection) -> Result<i64> {
 }
 
 fn insert_request_row(conn: &Connection, new: NewRequest<'_>) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO requests (id, token_id, token_name, agent, model, message, stateful, status,
              created_at, project)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9)",
-        params![
-            new.id,
-            new.token.id,
-            new.token.name,
-            new.agent.as_str(),
-            new.model,
-            new.message,
-            new.token.session_mode == SessionMode::Stateful,
-            now_ms(),
-            new.token.project,
-        ],
-    )?;
+    )?
+    .execute(params![
+        new.id,
+        new.token.id,
+        new.token.name,
+        new.agent.as_str(),
+        new.model,
+        new.message,
+        new.token.session_mode == SessionMode::Stateful,
+        now_ms(),
+        new.token.project,
+    ])?;
     Ok(())
 }
 
