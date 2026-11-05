@@ -1021,6 +1021,15 @@ fn detail_head(r: &Request, tick: u64) -> Vec<Line<'static>> {
         ),
         kv("token", Span::styled(r.token_name.clone(), plain())),
         kv(
+            "project",
+            Span::styled(
+                r.project
+                    .clone()
+                    .unwrap_or_else(|| "none (own workspace)".to_owned()),
+                plain(),
+            ),
+        ),
+        kv(
             "account",
             Span::styled(
                 r.account
@@ -1345,7 +1354,8 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.tokens_table);
 }
 
-/// The selected token's accounts, for the foot of the tokens panel.
+/// The selected token's accounts and project, for the foot of the tokens
+/// panel.
 fn selected_accounts_line(app: &App) -> Line<'static> {
     let Some(tk) = app.tokens_table.selected().and_then(|i| app.tokens.get(i)) else {
         return Line::raw("");
@@ -1354,6 +1364,11 @@ fn selected_accounts_line(app: &App) -> Line<'static> {
         Span::styled(" accounts ", t::muted()),
         Span::styled(
             format!("{} ", crate::accounts::format_bindings(&tk.accounts)),
+            plain(),
+        ),
+        Span::styled(" project ", t::muted()),
+        Span::styled(
+            format!("{} ", tk.project.as_deref().unwrap_or("none")),
             plain(),
         ),
     ])
@@ -2078,7 +2093,7 @@ fn form_error(error: Option<&String>, indent: usize) -> Line<'static> {
 
 fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
     const W: usize = 16;
-    let rect = centered(area, 72, 18);
+    let rect = centered(area, 72, 19);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(
@@ -2125,6 +2140,12 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
                 tick,
             ),
         ),
+        form_field(
+            f(ShareForm::PROJECT),
+            "project",
+            W,
+            form_toggle(&form.project.label(), f(ShareForm::PROJECT)),
+        ),
         Line::raw(""),
         Line::from(Span::styled(
             "  The link works once and creates a user token for them.",
@@ -2148,7 +2169,7 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
 
 fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
     const W: usize = 10;
-    let rect = centered(area, 60, 15);
+    let rect = centered(area, 60, 16);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(f(0), "name", W, form_text(&form.name, f(0), "my-app", tick)),
@@ -2166,6 +2187,12 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
                 "default (or claude=work,personal)",
                 tick,
             ),
+        ),
+        form_field(
+            f(TokenForm::PROJECT),
+            "project",
+            W,
+            form_toggle(&form.project.label(), f(TokenForm::PROJECT)),
         ),
         Line::raw(""),
         Line::from(Span::styled(

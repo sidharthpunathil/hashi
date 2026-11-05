@@ -220,6 +220,46 @@ impl AgentChoice {
     }
 }
 
+/// A project picked in a form: none (the token's own workspace) or one of
+/// the projects that existed when the form opened.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectChoice {
+    names: Vec<String>,
+    /// 0 is none, `i + 1` is `names[i]`.
+    at: usize,
+}
+
+impl ProjectChoice {
+    /// A choice among `names`, starting at none.
+    #[must_use]
+    pub fn new(names: Vec<String>) -> Self {
+        Self { names, at: 0 }
+    }
+
+    fn shift(&mut self, by: isize) {
+        self.at = cycle(self.at, self.names.len() + 1, by);
+    }
+
+    /// The picked project's name.
+    #[must_use]
+    pub fn selected(&self) -> Option<&str> {
+        self.at
+            .checked_sub(1)
+            .and_then(|i| self.names.get(i))
+            .map(String::as_str)
+    }
+
+    /// Label for the form.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self.selected() {
+            Some(name) => name.to_owned(),
+            None if self.names.is_empty() => "none (add one with hashi project add)".to_owned(),
+            None => "none (own workspace)".to_owned(),
+        }
+    }
+}
+
 /// State of the "new token" form.
 #[derive(Debug, Clone)]
 pub struct TokenForm {
@@ -236,17 +276,21 @@ pub struct TokenForm {
     /// Accounts per agent, typed as `claude=work,personal codex=team`.
     /// Empty means every agent uses its default account.
     pub accounts: String,
+    /// The project the token is bound to.
+    pub project: ProjectChoice,
     /// Validation message shown under the name field.
     pub error: Option<String>,
 }
 
 impl TokenForm {
     /// Number of fields.
-    pub const FIELDS: usize = 5;
+    pub const FIELDS: usize = 6;
     /// Index of the accounts text field.
     pub const ACCOUNTS: usize = 4;
+    /// Index of the project selector.
+    pub const PROJECT: usize = 5;
 
-    fn new() -> Self {
+    fn new(projects: Vec<String>) -> Self {
         Self {
             name: String::new(),
             field: 0,
@@ -254,6 +298,7 @@ impl TokenForm {
             mode: SessionMode::Stateless,
             agents: AgentChoice::EVERY,
             accounts: String::new(),
+            project: ProjectChoice::new(projects),
             error: None,
         }
     }
@@ -274,6 +319,7 @@ impl TokenForm {
                 }
             }
             3 => self.agents = self.agents.next(),
+            Self::PROJECT => self.project.shift(1),
             _ => {}
         }
     }
@@ -308,17 +354,21 @@ pub struct ShareForm {
     /// Accounts per agent, typed as `claude=work,personal codex=team`.
     /// Empty means every agent uses its default account.
     pub accounts: String,
+    /// The project the token is bound to.
+    pub project: ProjectChoice,
     /// Validation message shown under the label field.
     pub error: Option<String>,
 }
 
 impl ShareForm {
     /// Number of fields.
-    pub const FIELDS: usize = 8;
+    pub const FIELDS: usize = 9;
     /// Index of the accounts text field.
     pub const ACCOUNTS: usize = 7;
+    /// Index of the project selector.
+    pub const PROJECT: usize = 8;
 
-    fn new() -> Self {
+    fn new(projects: Vec<String>) -> Self {
         Self {
             label: String::new(),
             field: 0,
@@ -329,6 +379,7 @@ impl ShareForm {
             lifetime: 0,
             link: 1,
             accounts: String::new(),
+            project: ProjectChoice::new(projects),
             error: None,
         }
     }
@@ -346,6 +397,7 @@ impl ShareForm {
             4 => self.budget = cycle(self.budget, DAILY_BUDGET.len(), by),
             5 => self.lifetime = cycle(self.lifetime, LIFETIME_DAYS.len(), by),
             6 => self.link = cycle(self.link, LINK_HOURS.len(), by),
+            Self::PROJECT => self.project.shift(by),
             _ => {}
         }
     }
@@ -405,7 +457,7 @@ impl ShareForm {
             },
             link_hours: self.link_hours(),
             accounts,
-            project: None,
+            project: self.project.selected().map(str::to_owned),
         }
     }
 }
@@ -928,10 +980,10 @@ impl App {
             KeyCode::Char('t') => self.go_public(),
             KeyCode::Enter if self.tab == Tab::Commands => self.run_action(self.selected_action()),
             KeyCode::Char('n') if matches!(self.tab, Tab::Tokens | Tab::Commands) => {
-                self.popup = Some(Popup::NewToken(TokenForm::new()))
+                self.popup = Some(Popup::NewToken(TokenForm::new(self.project_names())));
             }
             KeyCode::Char('s') if matches!(self.tab, Tab::Tokens | Tab::Commands) => {
-                self.popup = Some(Popup::Share(ShareForm::new()));
+                self.popup = Some(Popup::Share(ShareForm::new(self.project_names())));
             }
             KeyCode::Char('i') if self.tab == Tab::Tokens => {
                 if self.invites.is_empty() {
@@ -1178,8 +1230,18 @@ impl App {
             note: None,
             limits: NewToken::default_limits(form.role),
             accounts,
-            project: None,
+            project: form.project.selected().map(str::to_owned),
         };
+        if let Err(e) = crate::api::check_binding(
+            &self.state.store,
+            new.project.as_deref(),
+            &new.agents,
+            &new.accounts,
+        ) {
+            form.field = TokenForm::PROJECT;
+            form.error = Some(e.to_string());
+            return Some(Popup::NewToken(form));
+        }
         match self.state.store.create_token(&new) {
             Ok((token, secret)) => {
                 self.state
@@ -1214,6 +1276,16 @@ impl App {
             }
         };
         let new = form.to_new_invite(label, accounts);
+        if let Err(e) = crate::api::check_binding(
+            &self.state.store,
+            new.project.as_deref(),
+            &new.agents,
+            &new.accounts,
+        ) {
+            form.field = ShareForm::PROJECT;
+            form.error = Some(e.to_string());
+            return Some(Popup::Share(form));
+        }
         match self.state.store.create_invite(&new) {
             Ok((invite, code)) => {
                 self.audit("invite.create", &invite.label, link_long(new.link_hours));
@@ -1232,6 +1304,15 @@ impl App {
                 None
             }
         }
+    }
+
+    /// The names of the projects, for the project selector of the forms.
+    fn project_names(&self) -> Vec<String> {
+        self.state
+            .store
+            .list_projects()
+            .map(|l| l.into_iter().map(|p| p.name).collect())
+            .unwrap_or_default()
     }
 
     fn cancel_invite(&mut self, id: &str, label: &str) {
@@ -1518,8 +1599,12 @@ impl App {
                 self.start_route(PublicRoute::Tailscale(Mode::Funnel), true);
             }
             Action::StopPublic => self.stop_public(),
-            Action::NewInvite => self.popup = Some(Popup::Share(ShareForm::new())),
-            Action::NewToken => self.popup = Some(Popup::NewToken(TokenForm::new())),
+            Action::NewInvite => {
+                self.popup = Some(Popup::Share(ShareForm::new(self.project_names())));
+            }
+            Action::NewToken => {
+                self.popup = Some(Popup::NewToken(TokenForm::new(self.project_names())));
+            }
             Action::InstallCloudflared | Action::InstallTailscale => {
                 let helper = if action == Action::InstallCloudflared {
                     Helper::Cloudflared
