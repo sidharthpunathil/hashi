@@ -275,6 +275,7 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 429 | `limit_reached` | A daily or monthly cap was hit; `limit` and `resetAt` say which and until when |
 | 429 | `too_many_pending` | The token already has `maxPending` prompts in flight |
 | 429 | `rate_limited` | Per-token rate limit hit, or the queue is full |
+| 500 | `internal` | A bug in Hashi. The error also carries an `errorId` to quote in a bug report |
 | 503 | `unavailable` | That agent is not installed on this machine |
 
 ### From code
@@ -370,12 +371,13 @@ Every flag also reads an environment variable.
 | `--claude-permission-mode` | `HASHI_CLAUDE_PERMISSION_MODE` | Claude's default |
 | `--codex-sandbox` | `HASHI_CODEX_SANDBOX` | `read-only` |
 
-Pass these to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Running bare `hashi` starts the server with defaults and environment variables. Logs go to `~/.hashi/logs/hashi.log` while the dashboard is open. Set `HASHI_LOG=hashi=debug` for more detail.
+Pass these to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Running bare `hashi` starts the server with defaults and environment variables. Logs always go to `~/.hashi/logs/hashi.log` with secrets redacted (rotated past 5 MB, three old files kept), and with `--headless` also to stderr. Set `HASHI_LOG=hashi=debug` for more detail.
 
 ### Other commands
 
 ```bash
 hashi doctor                               # are the agents and cloudflared installed?
+hashi report                               # redacted diagnostics to attach to a bug report
 hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
 hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, --clear-limits
@@ -412,6 +414,18 @@ A request is written to SQLite and the matching agent's worker is woken. The wor
 - With the default `--concurrency 1`, prompts for the same agent run one at a time.
 - On Windows, npm installs Codex as a `codex.cmd` batch shim. Rust refuses to pass arguments it cannot quote safely for a batch file, so a prompt containing such characters fails with a clear error instead of running.
 - Using your subscription this way is subject to each provider's terms. Check them for your plan before you share access.
+
+## Reporting a bug
+
+```bash
+hashi report                     # writes hashi-report-<time>.md in this directory
+hashi report --stdout            # print it instead
+hashi report --include-prompts   # add the first 500 characters of failed prompts
+```
+
+The report holds the version, OS, agent and cloudflared detection, `HASHI_*` settings, database counts, the last 20 failed requests, the last 200 log lines and any crash file. Tokens, invite codes, provider keys and your home directory are redacted, and prompts are left out unless you ask for them. Nothing is uploaded: the command prints a link to a prefilled GitHub issue, and you attach the file yourself after reading it.
+
+If Hashi crashes, it saves `~/.hashi/logs/crash-<time>.txt` and the next report includes it. API errors with status 500 carry an `errorId` that matches a line in the log; quote it in the issue.
 
 ## Contributing
 

@@ -11,9 +11,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use hashi::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
+use hashi::diagnostics::{self, RedactingMakeWriter};
 use hashi::events::{Bus, Event};
 use hashi::server::{self, ServerConfig};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Hashi: a bridge that turns your local Claude Code and Codex CLIs into an HTTP API.
 #[derive(Debug, Parser)]
@@ -49,6 +52,24 @@ enum Command {
     Ask(AskArgs),
     /// Check that the agents and tunnel are installed.
     Doctor(AgentArgs),
+    /// Write a redacted diagnostic report to attach to a bug report.
+    Report(ReportArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReportArgs {
+    /// Where to write the report (a file, or a directory to put it in).
+    /// Defaults to the current directory.
+    #[arg(long, conflicts_with = "stdout")]
+    out: Option<PathBuf>,
+    /// Print the report instead of writing a file.
+    #[arg(long)]
+    stdout: bool,
+    /// Include excerpts (500 characters) of the prompts that failed.
+    #[arg(long)]
+    include_prompts: bool,
+    #[command(flatten)]
+    agents: AgentArgs,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -194,6 +215,9 @@ fn home_dir(custom: Option<PathBuf>) -> Result<PathBuf> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let home = home_dir(cli.home)?;
+    // Before the dashboard starts: ratatui chains its terminal restore in
+    // front of this hook, so the crash note prints on a sane terminal.
+    diagnostics::install_panic_hook(home.join("logs"));
     match cli.command {
         None => serve(&home, ServeArgs::parse_from(["hashi"])).await,
         Some(Command::Serve(args)) => serve(&home, *args).await,
@@ -203,30 +227,37 @@ async fn main() -> Result<()> {
         Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
         Some(Command::Ask(args)) => ask(&home, args).await,
         Some(Command::Doctor(args)) => doctor(&args).await,
+        Some(Command::Report(args)) => report(&home, args).await,
     }
 }
 
-fn init_logging(home: &std::path::Path, to_file: bool) -> Result<()> {
+/// Logs always go to `~/.hashi/logs/hashi.log`, redacted. Without the
+/// dashboard they are also printed to stderr.
+fn init_logging(home: &std::path::Path, tui: bool) -> Result<()> {
     let filter =
         EnvFilter::try_from_env("HASHI_LOG").unwrap_or_else(|_| EnvFilter::new("hashi=info,warn"));
-    if to_file {
-        // The dashboard owns the terminal, so logs go to a file instead.
-        let dir = home.join("logs");
-        std::fs::create_dir_all(&dir)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("hashi.log"))?;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(false)
-            .with_writer(std::sync::Mutex::new(file))
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
+    let dir = home.join("logs");
+    std::fs::create_dir_all(&dir)?;
+    let rotated =
+        diagnostics::rotate_logs(&dir, diagnostics::MAX_LOG_BYTES, diagnostics::KEEP_LOGS);
+    let file = diagnostics::open_log_file(&dir)
+        .with_context(|| format!("opening {}", dir.join(diagnostics::LOG_FILE).display()))?;
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(RedactingMakeWriter::new(file));
+    let stderr_layer = (!tui).then(|| {
+        tracing_subscriber::fmt::layer()
             .with_target(false)
-            .init();
+            .with_ansi(std::io::stderr().is_terminal())
+            .with_writer(RedactingMakeWriter::new(std::io::stderr()))
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+    if let Err(e) = rotated {
+        tracing::warn!(error = %e, "could not rotate the log file");
     }
     Ok(())
 }
@@ -392,6 +423,61 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
                 .unwrap_or_default()
         );
     }
+    Ok(())
+}
+
+/// Writes the redacted diagnostic report. Nothing is uploaded.
+async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
+    let agents = server::discover_agents(&args.agents.configs()).await;
+    let cloudflared = hashi::tunnel::locate();
+    let db = home.join("hashi.db");
+    // Opening creates the file, so only open a database that already exists.
+    let store = if db.exists() {
+        server::open_store(home).map_err(|e| format!("{e:#}"))
+    } else {
+        Err(format!("no database at {}", db.display()))
+    };
+    let env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("HASHI_"))
+        .collect();
+    let now = time::OffsetDateTime::now_utc();
+    let text = diagnostics::build_report(&diagnostics::ReportInput {
+        store: store.as_ref().map_err(Clone::clone),
+        logs_dir: &home.join("logs"),
+        agents: &agents,
+        cloudflared: cloudflared.as_deref(),
+        env: &env,
+        include_prompts: args.include_prompts,
+        now_ms: hashi::util::now_ms(),
+    });
+
+    let name = format!("hashi-report-{}.md", diagnostics::file_timestamp(now));
+    let issue = diagnostics::issue_url();
+    if args.stdout {
+        print!("{text}");
+        eprintln!(
+            "\nRead the report before you share it. To file a bug, open:\n{issue}\n\
+             Nothing has been uploaded."
+        );
+        return Ok(());
+    }
+    let path = match args.out {
+        Some(p) if p.is_dir() => p.join(name),
+        Some(p) => p,
+        None => PathBuf::from(name),
+    };
+    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+    println!("\n  ✦ hashi report\n");
+    let shown = std::path::absolute(&path).unwrap_or(path);
+    println!("  Saved {}", shown.display());
+    println!();
+    println!("  Read it before you share it. Secrets are redacted and prompts are left out,");
+    println!("  but it does contain error messages and log lines from this machine.");
+    println!();
+    println!("  To file a bug, open this link and attach the file:");
+    println!("  {issue}");
+    println!();
+    println!("  Nothing has been uploaded.\n");
     Ok(())
 }
 

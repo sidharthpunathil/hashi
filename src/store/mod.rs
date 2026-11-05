@@ -630,6 +630,34 @@ impl Store {
             .collect()
     }
 
+    /// Most recent failed requests, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn failed_requests(&self, limit: u32) -> Result<Vec<Request>> {
+        let sql = format!(
+            "SELECT {REQUEST_COLUMNS} FROM requests WHERE status = 'failed' \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+        );
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([limit], row_to_request)?;
+        rows.map(|r| r.map_err(StoreError::from).and_then(|t| t))
+            .collect()
+    }
+
+    /// The migration level the database is at.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self
+            .conn()?
+            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
     /// 1-based position of a queued request within its agent's queue.
     ///
     /// # Errors

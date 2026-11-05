@@ -194,7 +194,8 @@ async fn security_headers(mut res: Response) -> Response {
 
 // ── errors ─────────────────────────────────────────────────────────────────
 
-/// Errors rendered as `{"error": {"code", "message"}}`.
+/// Errors rendered as `{"error": {"code", "message"}}`. 500s also carry an
+/// `errorId` that matches a line in the log.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     /// 400
@@ -260,15 +261,28 @@ impl ApiError {
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
+
+    /// The full cause for the log, which the client never sees.
+    fn log_detail(&self) -> String {
+        match self {
+            Self::Internal(e) => e.to_string(),
+            other => other.to_string(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        if let Self::Internal(e) = &self {
-            tracing::error!(error = %e, "internal error");
-        }
         let (status, code) = self.parts();
         let mut error = json!({ "code": code, "message": self.to_string() });
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            // The id ties the user's report to this log line.
+            let error_id = crate::diagnostics::new_error_id();
+            tracing::error!(error_id = %error_id, error = %self.log_detail(), "internal error");
+            if let Some(obj) = error.as_object_mut() {
+                obj.insert("errorId".to_owned(), json!(error_id));
+            }
+        }
         if let (
             Self::Coded {
                 extra: Some(serde_json::Value::Object(extra)),
@@ -465,5 +479,31 @@ mod tests {
             extra: Some(json!({ "limit": "dailyRequests" })),
         };
         assert_eq!(err.into_response().status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    async fn error_body(err: ApiError) -> (StatusCode, serde_json::Value) {
+        let res = err.into_response();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn internal_errors_carry_an_error_id() {
+        let (status, body) = error_body(ApiError::Internal(StoreError::Poisoned)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal");
+        assert_eq!(body["error"]["message"], "internal error");
+        let id = body["error"]["errorId"].as_str().unwrap();
+        assert!(id.starts_with("E-") && id.len() == 10, "{id}");
+    }
+
+    #[tokio::test]
+    async fn client_errors_have_no_error_id() {
+        let (status, body) = error_body(ApiError::NotFound("nope")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].get("errorId").is_none());
     }
 }

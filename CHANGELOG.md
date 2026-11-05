@@ -12,6 +12,13 @@ All notable changes to this project are documented here. The format follows [Kee
 - MCP server at `/mcp` with `ask_claude`, `ask_codex`, `get_result` and `my_usage`.
 - Audit log of token and invite changes (`GET /v1/audit`, `hashi audit`).
 - Native HTTPS (`--tls-cert`, `--tls-key`), named Cloudflare tunnels (`--tunnel-token`), `--public-url` and `--name`.
+- `hashi report` writes a redacted Markdown diagnostic report (versions, agent detection, settings, counts, recent failures, log tail, crash files) and prints a prefilled GitHub issue link. Nothing is uploaded. `--include-prompts` adds prompt excerpts, `--stdout` prints it.
+- Crash reports: a panic saves a redacted `~/.hashi/logs/crash-<time>.txt` with a backtrace.
+- API errors with status 500 carry an `errorId` that is also logged, and failed requests log one too.
+
+### Changed
+
+- Logs are always written to `~/.hashi/logs/hashi.log`, also in `--headless` mode, with tokens, keys and the home directory redacted. The file rotates past 5 MB and keeps three old copies.
 
 ### Fixed
 
