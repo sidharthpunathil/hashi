@@ -102,6 +102,8 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         tls: None,
         tunnel_token: None,
         update_check: false,
+        tailscale: None,
+        helpers: Default::default(),
     };
     tweak(&mut cfg);
 

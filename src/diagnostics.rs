@@ -384,6 +384,7 @@ pub fn headless_line(ev: &crate::events::Event) -> String {
         Event::Held { reason, detail } => format!("  ! held     {reason}: {detail}"),
         Event::TunnelReady(url) => format!("  ⌁ public   {url}"),
         Event::TunnelDown(why) => format!("  ! tunnel   {why}"),
+        Event::ApprovalNeeded(url) => format!("  ! approve  open {url} to let Tailscale continue"),
         Event::UpdateAvailable { version, url } => {
             format!("  ↑ update   v{version} is available, run hashi update ({url})")
         }
@@ -1212,6 +1213,7 @@ mod tests {
         for ev in [
             Event::TunnelDown("x\u{1b}[2Jy".into()),
             Event::TunnelReady("https://a\u{7}.example".into()),
+            Event::ApprovalNeeded("https://login.example/\u{1b}[2J".into()),
             Event::Log("a\u{9b}b".into()),
             Event::UpdateAvailable {
                 version: "9.9.9".into(),

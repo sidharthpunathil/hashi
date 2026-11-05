@@ -11,11 +11,15 @@ use ratatui::widgets::{
     ScrollbarOrientation, ScrollbarState, Shadow, Sparkline, Table, TableState, Tabs, Wrap,
 };
 
-use super::app::{App, FeedItem, Popup, ShareForm, Tab, TokenForm, TokensFocus, TunnelState};
+use super::app::{
+    Action, App, FeedItem, Popup, ShareForm, Tab, TokenForm, TokensFocus, TunnelState,
+};
 use super::theme::{self as t, Rgb};
 use crate::agent::AgentKind;
 use crate::guard::HoldReason;
+use crate::install::Helper;
 use crate::store::{Request, RequestStatus};
+use crate::tailscale::Mode;
 use crate::token::{Role, SessionMode, Token, TokenStatus};
 use crate::util::{human_age, human_bytes, human_duration, one_line, truncate};
 
@@ -49,6 +53,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         Tab::Requests => render_requests(app, frame, body),
         Tab::Tokens => render_tokens(app, frame, body),
         Tab::Logs => render_logs(app, frame, body),
+        Tab::Commands => render_commands(app, frame, body),
     }
     render_footer(app, frame, footer);
 
@@ -166,6 +171,10 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
         ),
         TunnelState::Down(why) => Span::styled(truncate(why, 40), t::fg(t::ROSE)),
     };
+    let via = app
+        .tailscale_mode_up()
+        .map(|m| Span::styled(format!("  tailscale {m}"), t::muted()))
+        .unwrap_or_default();
     let mut agents = vec![Span::styled("agents  ", t::muted())];
     let shown = app.shown_agents();
     // Names for up to three agents; beyond that, glyphs keep the line short.
@@ -202,7 +211,7 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
             Span::styled("local   ", t::muted()),
             Span::styled(rt.local_url.clone(), plain()),
         ]),
-        Line::from(vec![Span::styled("public  ", t::muted()), public]),
+        Line::from(vec![Span::styled("public  ", t::muted()), public, via]),
         Line::from(agents),
     ]
 }
@@ -270,7 +279,7 @@ fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     let keys: &[(&str, &str)] = match app.tab {
         Tab::Overview => &[
-            ("1-4", "views"),
+            ("1-5", "views"),
             ("c", "copy url"),
             ("t", "go public"),
             ("r", "refresh"),
@@ -311,7 +320,15 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
             ("?", "help"),
             ("q", "quit"),
         ],
-        Tab::Logs => &[("1-4", "views"), ("?", "help"), ("q", "quit")],
+        Tab::Logs => &[("1-5", "views"), ("?", "help"), ("q", "quit")],
+        Tab::Commands => &[
+            ("↑↓", "select"),
+            ("enter", "run"),
+            ("t", "go public"),
+            ("1-5", "views"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
     };
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
@@ -1341,6 +1358,203 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+// ── commands ───────────────────────────────────────────────────────────────
+
+/// A route's state for its Commands row.
+fn route_state(status: &crate::tunnel::Status, tick: u64, approval: Option<&str>) -> (String, Rgb) {
+    use crate::tunnel::Status;
+    match status {
+        Status::Up(url) => (format!("live at {url}"), t::MINT),
+        Status::Starting => match approval {
+            Some(url) => (format!("approve at {url}"), t::AMBER),
+            None => (format!("{} starting…", t::spinner(tick)), t::AMBER),
+        },
+        Status::Down(why) => (format!("failed: {}", one_line(why)), t::ROSE),
+        Status::Off => ("off".to_owned(), TEXT),
+    }
+}
+
+/// The current state shown on a Commands row.
+fn action_state(app: &App, action: Action) -> (String, Rgb) {
+    let rt = &app.state.runtime;
+    let missing = |h: Helper| app.helper_path(h).is_none();
+    match action {
+        Action::Cloudflare => {
+            let status = rt.tunnel.status();
+            if status == crate::tunnel::Status::Off && missing(Helper::Cloudflared) {
+                ("not installed".to_owned(), t::AMBER)
+            } else {
+                route_state(&status, app.tick, None)
+            }
+        }
+        Action::TailscaleServe | Action::TailscaleFunnel => {
+            let mode = if action == Action::TailscaleServe {
+                Mode::Serve
+            } else {
+                Mode::Funnel
+            };
+            let status = rt.tailscale.status();
+            let mine = rt.tailscale.mode() == Some(mode);
+            if mine && status != crate::tunnel::Status::Off {
+                return route_state(&status, app.tick, rt.tailscale.approval().as_deref());
+            }
+            if missing(Helper::Tailscale) {
+                return ("not installed".to_owned(), t::AMBER);
+            }
+            match app.tailscale_backend() {
+                Some(state) if state == "Running" => ("off, signed in".to_owned(), TEXT),
+                Some(state) if state.starts_with("unknown") => ("off".to_owned(), TEXT),
+                Some(state) => (format!("signed out ({state})"), t::AMBER),
+                None => ("off".to_owned(), TEXT),
+            }
+        }
+        Action::StopPublic => match crate::server::active_route(rt) {
+            Some(route) => (format!("stops {}", route.label()), t::PINK),
+            None => ("nothing is public".to_owned(), TEXT),
+        },
+        Action::NewInvite => match app.invites.len() {
+            0 => ("no pending invites".to_owned(), TEXT),
+            n => (format!("{n} pending"), TEXT),
+        },
+        Action::NewToken => match app.tokens.len() {
+            1 => ("1 token".to_owned(), TEXT),
+            n => (format!("{n} tokens"), TEXT),
+        },
+        Action::InstallCloudflared | Action::InstallTailscale => {
+            let helper = if action == Action::InstallCloudflared {
+                Helper::Cloudflared
+            } else {
+                Helper::Tailscale
+            };
+            match app.helper_path(helper) {
+                Some(path) => (format!("installed: {}", path.display()), t::MINT),
+                None => ("not installed".to_owned(), t::AMBER),
+            }
+        }
+        Action::CheckUpdate => match &app.update {
+            Some(v) => (format!("v{v} available: run hashi update"), t::ORCHID),
+            None => (format!("v{} running", env!("CARGO_PKG_VERSION")), TEXT),
+        },
+        Action::CopyUrl => (rt.base_url(), TEXT),
+        Action::Help => (String::new(), TEXT),
+    }
+}
+
+/// The CLI command that does the same thing, so the owner learns it.
+fn action_cli(app: &App, action: Action) -> String {
+    let rt = &app.state.runtime;
+    match action {
+        Action::Cloudflare => "hashi serve --tunnel".to_owned(),
+        Action::TailscaleServe => "hashi serve --tailscale serve".to_owned(),
+        Action::TailscaleFunnel => "hashi serve --tailscale funnel".to_owned(),
+        Action::StopPublic => match crate::server::active_route(rt) {
+            Some(crate::server::PublicRoute::Tailscale(mode)) => {
+                let port = rt
+                    .tailscale
+                    .settings()
+                    .map_or(crate::tailscale::DEFAULT_PORT, |s| s.https_port);
+                crate::tailscale::off_command(mode, port)
+            }
+            _ => "-".to_owned(),
+        },
+        Action::NewInvite => "hashi share <label>".to_owned(),
+        Action::NewToken => "hashi token create <name>".to_owned(),
+        Action::InstallCloudflared => "hashi install cloudflared".to_owned(),
+        Action::InstallTailscale => "hashi install tailscale".to_owned(),
+        Action::CheckUpdate if app.update.is_some() => "hashi update".to_owned(),
+        Action::CheckUpdate => "hashi update --check".to_owned(),
+        Action::CopyUrl => "-".to_owned(),
+        Action::Help => "hashi --help".to_owned(),
+    }
+}
+
+fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
+    let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(5)]).areas(area);
+    let block = panel("commands", t::VIOLET);
+    let inner_w = usize::from(block.inner(list).width);
+    let state_w = (inner_w / 4).clamp(14, 44);
+    let cli_w = (inner_w / 4).clamp(14, 34);
+    let mut rows = Vec::new();
+    let mut selected_row = 0;
+    let mut group = "";
+    for (i, action) in Action::ALL.into_iter().enumerate() {
+        if action.group() != group {
+            group = action.group();
+            if !rows.is_empty() {
+                rows.push(Row::new(vec![Cell::from("")]).height(1));
+            }
+            rows.push(Row::new(vec![
+                Cell::from(""),
+                Cell::from(Span::styled(group, t::bold(t::ORCHID))),
+            ]));
+        }
+        if i == app.commands_selected {
+            selected_row = rows.len();
+        }
+        let (state, color) = action_state(app, action);
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                format!(" {} ", action.key()),
+                t::bold(t::PINK),
+            )),
+            Cell::from(Line::from(vec![
+                Span::styled(action.title(), plain()),
+                Span::styled(format!("  {}", action.description()), t::muted()),
+            ])),
+            Cell::from(Span::styled(truncate(&state, state_w), t::fg(color))),
+            Cell::from(Span::styled(action_cli(app, action), t::fg(t::ORCHID))),
+        ]));
+    }
+    let widths = [
+        Constraint::Length(8),
+        Constraint::Fill(1),
+        Constraint::Length(u16::try_from(state_w).unwrap_or(30)),
+        Constraint::Length(u16::try_from(cli_w).unwrap_or(30)),
+    ];
+    let table = Table::new(rows, widths)
+        .header(Row::new(vec!["key", "what", "state", "same from a terminal"]).style(t::muted()))
+        .row_highlight_style(Style::new().bg(SELECT.into()).add_modifier(Modifier::BOLD))
+        .highlight_symbol("› ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(block);
+    let mut state = TableState::default().with_selected(Some(selected_row));
+    frame.render_stateful_widget(table, list, &mut state);
+
+    let action = app.selected_action();
+    let (state_text, color) = action_state(app, action);
+    let run = match action.key() {
+        "enter" => "press enter to run it".to_owned(),
+        key @ ("s" | "n") => format!("press enter, or {key} here and in Tokens"),
+        key => format!("press enter, or {key} from anywhere"),
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(action.title(), t::bold(t::PINK)),
+            Span::styled(format!("  {}", action.description()), t::muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("state  ", t::muted()),
+            Span::styled(
+                if state_text.is_empty() {
+                    "-".to_owned()
+                } else {
+                    state_text
+                },
+                t::fg(color),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("cli    ", t::muted()),
+            Span::styled(action_cli(app, action), t::fg(t::ORCHID)),
+            Span::styled(format!("    {run}"), t::muted()),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(panel("selected", t::PINK)),
+        detail,
+    );
+}
+
 // ── popups ─────────────────────────────────────────────────────────────────
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -1391,17 +1605,19 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
     let area = frame.area();
     match popup {
         Popup::Help => {
-            let rows: [(&str, &str); 17] = [
-                ("1 2 3 4", "jump to a view"),
+            let rows: [(&str, &str); 19] = [
+                ("1 2 3 4 5", "jump to a view (5: Commands)"),
                 ("tab / ←→", "next / previous view"),
                 ("↑↓ / j k", "move selection"),
                 ("PgUp PgDn", "scroll request detail"),
                 ("c", "copy the API base URL"),
                 ("t", "go public: start a Cloudflare quick tunnel"),
-                ("n", "new token (Tokens view)"),
+                ("enter", "run the selected command (Commands view)"),
+                ("", "Commands also starts Tailscale, stops going public"),
+                ("n", "new token (Tokens and Commands views)"),
                 ("d", "revoke token (Tokens view)"),
                 ("p", "pause or resume token (Tokens view)"),
-                ("s", "share: create an invite link (Tokens view)"),
+                ("s", "share: create an invite link (Tokens, Commands)"),
                 ("i", "switch between tokens and invites"),
                 ("x", "cancel pending invite (Tokens view)"),
                 ("r", "refresh now"),
@@ -1604,7 +1820,148 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
         }
         Popup::Share(form) => render_share_form(frame, area, form, app.tick),
         Popup::NewToken(form) => render_token_form(frame, area, form, app.tick),
+        Popup::Install(plan) => render_install(frame, area, plan),
+        Popup::ConfirmSwitch { from, to } => {
+            let rect = centered(area, 68, 8);
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(capitalize(&from.label()), t::bold(t::PINK)),
+                    Span::styled(" is public now.", plain()),
+                ]),
+                Line::from(Span::styled(
+                    format!(
+                        "Only one route runs at a time: stop it and start {}?",
+                        to.label()
+                    ),
+                    t::muted(),
+                )),
+                Line::raw(""),
+                key_hint(&[("y", "switch"), ("n", "keep it")]),
+            ];
+            frame.render_widget(Clear, rect);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(modal("switch route?")),
+                rect,
+            );
+        }
+        Popup::Approval { url } => {
+            let width = u16::try_from(url.chars().count() + 10)
+                .unwrap_or(u16::MAX)
+                .max(72);
+            let rect = centered(area, width, 10);
+            let lines = vec![
+                Line::from(Span::styled(
+                    "Tailscale asks you to approve this in your browser:",
+                    plain(),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    format!(" {url} "),
+                    Style::new()
+                        .fg(t::PINK.into())
+                        .bg(SELECT.into())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "Hashi waits up to 60 s, then you can try again.",
+                    t::muted(),
+                )),
+                key_hint(&[("c", "copy"), ("enter", "done")]),
+            ];
+            frame.render_widget(Clear, rect);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(modal("approve in Tailscale")),
+                rect,
+            );
+        }
     }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+}
+
+fn render_install(frame: &mut Frame, area: Rect, plan: &crate::install::Plan) {
+    use crate::install::Plan;
+    let helper = plan.helper();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{helper} is not installed."),
+            strong(),
+        )),
+        Line::raw(""),
+    ];
+    let keys: &[(&str, &str)] = match plan {
+        Plan::Run {
+            via,
+            steps,
+            source,
+            note,
+            ..
+        } => {
+            lines.push(Line::from(Span::styled(
+                format!("The official install ({via}), from {source}:"),
+                t::muted(),
+            )));
+            lines.push(Line::raw(""));
+            for step in steps {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", step.shown),
+                    t::bold(t::ORCHID),
+                )));
+            }
+            if let Some(note) = note {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(Span::styled(
+                    format!("note: {note}"),
+                    t::muted(),
+                )));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "enter runs it here: the dashboard steps aside so sudo can ask for your \
+                 password, then comes back.",
+                t::muted(),
+            )));
+            &[("enter", "run it"), ("c", "copy"), ("esc", "cancel")]
+        }
+        Plan::Download { url, why, .. } => {
+            lines.push(Line::from(Span::styled(
+                format!("No command to run here: {why}."),
+                t::muted(),
+            )));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {url}"),
+                t::bold(t::ORCHID),
+            )));
+            &[("c", "copy link"), ("esc", "close")]
+        }
+    };
+    lines.push(Line::raw(""));
+    lines.push(key_hint(keys));
+    let longest = lines.iter().map(Line::width).max().unwrap_or(60);
+    let width = u16::try_from(longest + 8)
+        .unwrap_or(u16::MAX)
+        .clamp(64, 120);
+    let height = u16::try_from(lines.len() + 4).unwrap_or(20);
+    let rect = centered(area, width, height);
+    let title = format!("install {helper}");
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(modal(&title)),
+        rect,
+    );
 }
 
 /// One form row: focus marker, label column and value.

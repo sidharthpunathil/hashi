@@ -57,14 +57,17 @@ enum Command {
     /// List or remove the bridges saved by `hashi connect`.
     #[command(subcommand)]
     Remote(RemoteCommand),
-    /// Check that the agents and tunnel are installed.
-    Doctor(AgentArgs),
+    /// Check that the agents, cloudflared and Tailscale are installed.
+    Doctor(DoctorArgs),
     /// Write a redacted diagnostic report to attach to a bug report.
     Report(ReportArgs),
     /// Download the latest release and replace this binary.
     Update(UpdateArgs),
     /// Remove the binary and everything Hashi stored on this machine.
     Uninstall(UninstallArgs),
+    /// Show the official install command for a helper (cloudflared or
+    /// tailscale) and run it after you confirm.
+    Install(InstallArgs),
 }
 
 #[derive(Debug, Args)]
@@ -78,6 +81,38 @@ struct UninstallArgs {
     /// List what would be removed and stop.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+struct InstallArgs {
+    /// Which helper: cloudflared or tailscale.
+    #[arg(value_parser = parse_helper)]
+    helper: hashi::install::Helper,
+    /// Run the command without asking first.
+    #[arg(long, short = 'y')]
+    yes: bool,
+}
+
+fn parse_helper(s: &str) -> Result<hashi::install::Helper, String> {
+    hashi::install::Helper::parse(s).ok_or_else(|| "choose cloudflared or tailscale".to_owned())
+}
+
+#[derive(Debug, Args, Clone)]
+struct HelperArgs {
+    /// Path to the cloudflared executable. Default: looked up on PATH.
+    #[arg(long, env = "HASHI_CLOUDFLARED_BIN")]
+    cloudflared_bin: Option<PathBuf>,
+    /// Path to the tailscale executable. Default: looked up on PATH.
+    #[arg(long, env = "HASHI_TAILSCALE_BIN")]
+    tailscale_bin: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    #[command(flatten)]
+    agents: AgentArgs,
+    #[command(flatten)]
+    helpers: HelperArgs,
 }
 
 #[derive(Debug, Args)]
@@ -180,6 +215,17 @@ struct ServeArgs {
     /// Expose the API through a Cloudflare quick tunnel (requires `cloudflared`).
     #[arg(long, env = "HASHI_TUNNEL")]
     tunnel: bool,
+    /// Go public through Tailscale: `serve` (your tailnet) or `funnel` (the
+    /// internet). Needs `tailscale`, signed in.
+    #[arg(long, env = "HASHI_TAILSCALE", value_enum,
+          conflicts_with_all = ["tunnel", "tunnel_token"])]
+    tailscale: Option<hashi::tailscale::Mode>,
+    /// HTTPS port for --tailscale (Funnel allows 443, 8443 or 10000).
+    #[arg(long, default_value_t = hashi::tailscale::DEFAULT_PORT, env = "HASHI_TAILSCALE_PORT",
+          value_parser = clap::value_parser!(u16).range(1..))]
+    tailscale_port: u16,
+    #[command(flatten)]
+    helpers: HelperArgs,
     /// Stable public URL used in invite links, e.g. https://hashi.example.com.
     #[arg(long, env = "HASHI_PUBLIC_URL", value_parser = parse_public_url)]
     public_url: Option<String>,
@@ -366,6 +412,7 @@ async fn main() -> Result<()> {
             hashi::remote::remove(&home, &name)
         }
         Some(Command::Doctor(args)) => doctor(&home, &args).await,
+        Some(Command::Install(args)) => tokio::task::spawn_blocking(move || install(&args)).await?,
         Some(Command::Report(args)) => report(&home, args).await,
         Some(Command::Update(args)) => {
             tokio::task::spawn_blocking(move || update(&home, &args)).await?
@@ -479,6 +526,12 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         },
         tunnel_token: args.tunnel_token.clone(),
         update_check: !args.no_update_check,
+        tailscale: args.tailscale,
+        helpers: server::Helpers {
+            tailscale_port: args.tailscale_port,
+            tailscale_bin: args.helpers.tailscale_bin.clone(),
+            cloudflared_bin: args.helpers.cloudflared_bin.clone(),
+        },
     };
 
     let bus = Bus::default();
@@ -500,9 +553,16 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
             running.state.clone(),
             events,
             running.bootstrap_token.clone(),
-            args.tunnel,
+            args.tunnel || args.tailscale.is_some(),
             async {
-                signals.recv().await;
+                // While an install runs from the dashboard, Ctrl-C is meant
+                // for it (the terminal sends it to both), not for Hashi.
+                loop {
+                    signals.recv().await;
+                    if !hashi::tui::command_running() {
+                        break;
+                    }
+                }
             },
         )
         .await;
@@ -746,6 +806,106 @@ fn update(home: &std::path::Path, args: &UpdateArgs) -> Result<()> {
     Ok(())
 }
 
+/// `hashi install cloudflared|tailscale`: shows the vendor's install
+/// command for this machine and runs it only after a yes.
+fn install(args: &InstallArgs) -> Result<()> {
+    use hashi::install::{self, Plan};
+    let helper = args.helper;
+    println!("\n  ✦ hashi install {helper}\n");
+    if let Some(path) = install::locate(helper, None) {
+        println!("  {helper} is already installed at {}\n", path.display());
+        return Ok(());
+    }
+    let plan = install::plan_here(helper);
+    match &plan {
+        Plan::Download { url, why, .. } => {
+            println!("  No command to run here: {why}.");
+            println!("  Download it from:\n\n    {url}\n");
+            return Ok(());
+        }
+        Plan::Run {
+            via,
+            steps,
+            source,
+            note,
+            ..
+        } => {
+            println!("  The official install ({via}), from {source}:\n");
+            for step in steps {
+                println!("    {}", step.shown);
+            }
+            println!();
+            if let Some(note) = note {
+                println!("  note: {note}\n");
+            }
+        }
+    }
+    if !args.yes {
+        if !std::io::stdin().is_terminal() {
+            bail!("not installing without confirmation; rerun with --yes to run it");
+        }
+        eprint!("  Run it now? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("  not installed");
+            return Ok(());
+        }
+    }
+    install::run(&plan)?;
+    match install::locate(helper, None) {
+        Some(path) => println!("\n  ✓ {helper} installed at {}\n", path.display()),
+        None => println!(
+            "\n  The install finished, but {helper} is not on PATH yet; open a new terminal.\n"
+        ),
+    }
+    if helper == install::Helper::Tailscale {
+        println!("  Sign in next: {}\n", hashi::tailscale::sign_in_hint());
+    }
+    Ok(())
+}
+
+/// Doctor's lines for cloudflared and tailscale, with Tailscale's sign-in
+/// state read from `tailscale status --json` only when it is installed.
+async fn doctor_helpers(helpers: &HelperArgs) {
+    use hashi::install::{self, Helper};
+    match install::locate(Helper::Cloudflared, helpers.cloudflared_bin.as_deref()) {
+        Some(p) => println!("  ✓ {:<12} {}", "cloudflared", p.display()),
+        None => println!(
+            "  · {:<12} not installed (only needed for --tunnel): hashi install cloudflared",
+            "cloudflared"
+        ),
+    }
+    let Some(bin) = install::locate(Helper::Tailscale, helpers.tailscale_bin.as_deref()) else {
+        println!(
+            "  · {:<12} not installed (only needed for --tailscale): hashi install tailscale",
+            "tailscale"
+        );
+        return;
+    };
+    let shown = bin.display();
+    match hashi::tailscale::self_status(&bin).await {
+        Ok(me) if me.running() => match me.dns_name {
+            Some(name) => println!("  ✓ {:<12} {shown}, signed in as {name}", "tailscale"),
+            None => println!(
+                "  ! {:<12} {shown}, signed in but no DNS name: turn on MagicDNS",
+                "tailscale"
+            ),
+        },
+        Ok(me) => println!(
+            "  ! {:<12} {shown}, not connected ({}): {}",
+            "tailscale",
+            diagnostics::terminal_safe(&me.backend_state),
+            hashi::tailscale::sign_in_hint()
+        ),
+        Err(e) => println!(
+            "  · {:<12} {shown}, sign-in state unknown ({})",
+            "tailscale",
+            diagnostics::terminal_safe(&hashi::util::truncate(&e.to_string(), 80))
+        ),
+    }
+}
+
 /// Doctor's update line: always asks GitHub (ignoring the cache's age)
 /// unless `HASHI_NO_UPDATE_CHECK` is set.
 async fn doctor_update(home: &std::path::Path) {
@@ -788,10 +948,10 @@ async fn doctor_update(home: &std::path::Path) {
     }
 }
 
-async fn doctor(home: &std::path::Path, args: &AgentArgs) -> Result<()> {
+async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
     println!("\n  ✦ hashi doctor\n");
     let mut found = 0;
-    for info in server::discover_agents(&args.configs()).await {
+    for info in server::discover_agents(&args.agents.configs()).await {
         match &info.version {
             Some(v) => {
                 found += 1;
@@ -803,13 +963,7 @@ async fn doctor(home: &std::path::Path, args: &AgentArgs) -> Result<()> {
             ),
         }
     }
-    match hashi::tunnel::locate() {
-        Some(p) => println!("  ✓ {:<12} {}", "cloudflared", p.display()),
-        None => println!(
-            "  · {:<12} not installed (only needed for --tunnel)",
-            "cloudflared"
-        ),
-    }
+    doctor_helpers(&args.helpers).await;
     doctor_update(home).await;
     println!();
     if found == 0 {

@@ -62,6 +62,8 @@ async fn start() -> Tls {
         }),
         tunnel_token: None,
         update_check: false,
+        tailscale: None,
+        helpers: Default::default(),
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
     let url = running.state.runtime.local_url.clone();

@@ -2,7 +2,8 @@
 //!
 //! Hashi never downloads `cloudflared` on its own: running an unverified binary
 //! fetched at runtime is a supply-chain risk. Install it with your package
-//! manager (`brew install cloudflared`) and Hashi will find it.
+//! manager (`hashi install cloudflared` shows Cloudflare's documented command
+//! for this machine) and Hashi will find it.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,17 +18,13 @@ use tokio_util::sync::CancellationToken;
 use crate::net::TunnelTrust;
 
 /// Cloudflare's download page for `cloudflared`.
-pub const DOWNLOADS_URL: &str =
-    "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/";
+pub const DOWNLOADS_URL: &str = crate::install::CLOUDFLARED_DOWNLOADS;
 
-/// How to install `cloudflared` on this platform.
+/// How to install `cloudflared` on this machine: Cloudflare's documented
+/// command when its package manager is on `PATH`, else the download page.
 #[must_use]
 pub fn install_hint() -> String {
-    if cfg!(target_os = "macos") {
-        "brew install cloudflared".to_owned()
-    } else {
-        format!("download it from {DOWNLOADS_URL}")
-    }
+    crate::install::plan_here(crate::install::Helper::Cloudflared).hint()
 }
 
 /// Tunnel failures.
@@ -62,7 +59,14 @@ pub struct Tunnel {
 /// Finds `cloudflared`.
 #[must_use]
 pub fn locate() -> Option<PathBuf> {
-    crate::agent::locate("cloudflared")
+    locate_with(None)
+}
+
+/// Finds `cloudflared`: `custom` (`--cloudflared-bin`) when given, else the
+/// usual search.
+#[must_use]
+pub fn locate_with(custom: Option<&Path>) -> Option<PathBuf> {
+    crate::install::locate(crate::install::Helper::Cloudflared, custom)
 }
 
 /// Starts a quick tunnel to the local server and returns its random public URL.
@@ -74,8 +78,13 @@ pub fn locate() -> Option<PathBuf> {
 /// # Errors
 ///
 /// See [`TunnelError`].
-pub async fn start(port: u16, local_tls: bool, home: &Path) -> Result<Tunnel, TunnelError> {
-    let bin = locate().ok_or(TunnelError::NotInstalled)?;
+pub async fn start(
+    bin: Option<&Path>,
+    port: u16,
+    local_tls: bool,
+    home: &Path,
+) -> Result<Tunnel, TunnelError> {
+    let bin = locate_with(bin).ok_or(TunnelError::NotInstalled)?;
     let scheme = if local_tls { "https" } else { "http" };
     let mut cmd = Command::new(bin);
     cmd.arg("tunnel")
@@ -108,11 +117,12 @@ pub async fn start(port: u16, local_tls: bool, home: &Path) -> Result<Tunnel, Tu
 ///
 /// See [`TunnelError`].
 pub async fn start_named(
+    bin: Option<&Path>,
     token: &str,
     public_url: &str,
     home: &Path,
 ) -> Result<Tunnel, TunnelError> {
-    let bin = locate().ok_or(TunnelError::NotInstalled)?;
+    let bin = locate_with(bin).ok_or(TunnelError::NotInstalled)?;
     let mut cmd = Command::new(bin);
     cmd.arg("tunnel")
         .arg("--config")
@@ -163,6 +173,15 @@ pub enum StartError {
     /// `cloudflared` is not installed.
     #[error("cloudflared is not installed; {}", install_hint())]
     NotInstalled,
+    /// `tailscale` is not installed.
+    #[error("tailscale is not installed; run hashi install tailscale")]
+    TailscaleNotInstalled,
+    /// Another public route is starting or up: only one runs at a time.
+    #[error("{0} is already public; stop it first")]
+    OtherRoute(String),
+    /// This route cannot reach this server, for this reason.
+    #[error("{0}")]
+    Unsupported(String),
     /// This server has nothing a tunnel could point at.
     #[error("this server cannot start a tunnel")]
     Unavailable,
@@ -171,6 +190,8 @@ pub enum StartError {
 /// What a tunnel started by [`Control`] points at.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// `--cloudflared-bin`, when set. Otherwise `cloudflared` is looked up.
+    pub bin: Option<PathBuf>,
     /// Local listen port.
     pub port: u16,
     /// Whether Hashi serves HTTPS itself.
@@ -186,7 +207,8 @@ pub struct Settings {
     /// `CF-Connecting-IP` stays trusted for the server's whole life, as it
     /// always has.
     pub configured: bool,
-    /// Stops the tunnel on shutdown.
+    /// Stops the tunnel on shutdown. [`Control::begin`] hands each tunnel a
+    /// child of it, which [`Control::stop`] cancels.
     pub cancel: CancellationToken,
 }
 
@@ -194,6 +216,10 @@ pub struct Settings {
 struct Slot {
     status: Status,
     task: Option<JoinHandle<()>>,
+    stop: Option<CancellationToken>,
+    /// Trust stays on while down: a tunnel was configured at startup and
+    /// the owner has not stopped it.
+    keep_trust: bool,
 }
 
 /// One server's tunnel: its status, the `CF-Connecting-IP` trust switch and
@@ -215,10 +241,14 @@ impl Control {
         if settings.configured {
             trust.set(true);
         }
+        let keep_trust = settings.configured;
         Self {
             settings: Some(settings),
             trust,
-            slot: Mutex::default(),
+            slot: Mutex::new(Slot {
+                keep_trust,
+                ..Slot::default()
+            }),
         }
     }
 
@@ -247,7 +277,8 @@ impl Control {
     }
 
     /// Claims the right to start a tunnel: fails when one is starting or
-    /// up, then marks it starting and trusts `CF-Connecting-IP`.
+    /// up, then marks it starting and trusts `CF-Connecting-IP`. Returns the
+    /// settings with `cancel` replaced by this tunnel's own stop token.
     ///
     /// `on_demand` is set for a tunnel the owner asks for on a running
     /// server. It is refused when a public URL is configured or
@@ -257,7 +288,7 @@ impl Control {
     /// # Errors
     ///
     /// See [`StartError`].
-    pub fn begin(&self, on_demand: bool) -> Result<&Settings, StartError> {
+    pub fn begin(&self, on_demand: bool) -> Result<Settings, StartError> {
         let settings = self.settings.as_ref().ok_or(StartError::Unavailable)?;
         let mut slot = self.slot();
         match &slot.status {
@@ -269,22 +300,52 @@ impl Control {
             if let Some(url) = &settings.configured_url {
                 return Err(StartError::Configured(url.clone()));
             }
-            if locate().is_none() {
+            if locate_with(settings.bin.as_deref()).is_none() {
                 return Err(StartError::NotInstalled);
             }
         }
+        let stop = settings.cancel.child_token();
         slot.status = Status::Starting;
+        slot.stop = Some(stop.clone());
         self.trust.set(true);
-        Ok(settings)
+        Ok(Settings {
+            cancel: stop,
+            ..settings.clone()
+        })
+    }
+
+    /// Whether a tunnel is starting or up.
+    #[must_use]
+    pub fn active(&self) -> bool {
+        matches!(self.slot().status, Status::Starting | Status::Up(_))
+    }
+
+    /// Asks the tunnel to stop, including one configured at startup, whose
+    /// `CF-Connecting-IP` trust then ends with it. Returns whether one was
+    /// starting or up.
+    pub fn stop(&self) -> bool {
+        let mut slot = self.slot();
+        match (&slot.status, slot.stop.clone()) {
+            (Status::Starting | Status::Up(_), Some(stop)) => {
+                slot.keep_trust = false;
+                stop.cancel();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Records the tunnel's new status. Once it is down, trust goes back
     /// off unless a tunnel was configured at startup.
     pub fn set_status(&self, status: Status) {
         let down = matches!(status, Status::Down(_) | Status::Off);
-        self.slot().status = status;
-        if down && !self.settings.as_ref().is_some_and(|s| s.configured) {
-            self.trust.set(false);
+        let mut slot = self.slot();
+        slot.status = status;
+        if down {
+            slot.stop = None;
+            if !slot.keep_trust {
+                self.trust.set(false);
+            }
         }
     }
 
@@ -444,6 +505,7 @@ mod tests {
 
     fn settings(configured: bool, configured_url: Option<&str>) -> Settings {
         Settings {
+            bin: None,
             port: 7878,
             local_tls: false,
             home: std::env::temp_dir(),
@@ -511,12 +573,24 @@ mod tests {
     #[test]
     fn install_hint_names_a_command_or_the_download_page() {
         let hint = install_hint();
-        if cfg!(target_os = "macos") {
-            assert_eq!(hint, "brew install cloudflared");
-        } else {
-            assert!(hint.contains(DOWNLOADS_URL));
-        }
+        assert!(
+            hint.contains("cloudflared") || hint.contains("https://"),
+            "{hint}"
+        );
         assert!(TunnelError::NotInstalled.to_string().contains(&hint));
+    }
+
+    #[test]
+    fn stopping_ends_even_a_configured_tunnels_trust() {
+        let control = Control::new(settings(true, None), TunnelTrust::default());
+        assert!(!control.stop(), "nothing to stop yet");
+        let s = control.begin(false).unwrap();
+        control.set_status(Status::Up("https://a.trycloudflare.com".into()));
+        assert!(control.stop());
+        assert!(s.cancel.is_cancelled());
+        control.set_status(Status::Off);
+        assert!(!control.trust().get());
+        assert!(!control.active());
     }
 
     #[test]

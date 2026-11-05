@@ -136,8 +136,11 @@ Hashi listens on `127.0.0.1` by default. To reach it from elsewhere, each of the
 |---|---|
 | Cloudflare quick tunnel (random URL, new on each start) | press `t` in the dashboard, or `hashi serve --tunnel` |
 | Cloudflare named tunnel (your hostname) | `HASHI_TUNNEL_TOKEN=... hashi serve --public-url https://hashi.example.com` |
+| Tailscale Serve (your tailnet) or Funnel (the internet), at `https://<machine>.<tailnet>.ts.net` | `hashi serve --tailscale serve` or `--tailscale funnel`, or the Commands view (`5`) |
 | Hashi serves TLS itself (LAN, Tailscale, your own certificate) | `hashi serve --tls-cert cert.pem --tls-key key.pem` |
 | Behind Caddy or nginx | `hashi serve --public-url https://... --trust-proxy` |
+
+Missing `cloudflared` or `tailscale`? `hashi install cloudflared` or `hashi install tailscale` shows the vendor's own install command for your platform and runs it after you confirm.
 
 Setup for each, including Tailscale and mkcert certificates, is in [docs/remote-access.md](docs/remote-access.md).
 

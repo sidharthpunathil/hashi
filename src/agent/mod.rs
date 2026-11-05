@@ -375,7 +375,9 @@ pub fn candidate_names(name: &str, windows: bool) -> Vec<String> {
     }
 }
 
-fn is_executable(path: &Path) -> bool {
+/// Whether `path` is a file this user can run.
+#[must_use]
+pub fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -79,6 +79,11 @@ pub struct NetLimits {
     /// Trust the last `X-Forwarded-For` hop from loopback peers
     /// (`--trust-proxy`), for a reverse proxy on the same host.
     pub trust_proxy: bool,
+    /// Trust the last `X-Forwarded-For` hop from loopback peers while this
+    /// is on. The server turns it on while a Tailscale Serve or Funnel route
+    /// it started is active, since Tailscale forwards from loopback and sets
+    /// that header. Read on every request, like [`NetLimits::tunnel_trust`].
+    pub proxy_trust: TunnelTrust,
     /// Web origins allowed to call the API from a browser (`--cors-origin`).
     /// Empty means no cross-origin access.
     pub cors_origins: Vec<String>,
@@ -97,15 +102,17 @@ impl Default for NetLimits {
             trust_forwarded: false,
             tunnel_trust: TunnelTrust::default(),
             trust_proxy: false,
+            proxy_trust: TunnelTrust::default(),
             cors_origins: Vec::new(),
             allowed_hosts: Vec::new(),
         }
     }
 }
 
-/// A shared switch for trusting `CF-Connecting-IP`, flipped at runtime when
-/// a tunnel is configured or started. Off by default: without a tunnel any
-/// local process could send the header and pick its own rate-limit key.
+/// A shared switch for trusting a forwarded-address header, flipped at
+/// runtime when a tunnel or Tailscale route is configured or started. Off by
+/// default: without one, any local process could send the header and pick
+/// its own rate-limit key.
 #[derive(Debug, Clone, Default)]
 pub struct TunnelTrust(Arc<AtomicBool>);
 
@@ -174,7 +181,8 @@ fn group(ip: IpAddr) -> IpAddr {
 ///
 /// The socket peer address, unless the peer is loopback and a trusted
 /// forwarder supplied the client's address: `CF-Connecting-IP` when a tunnel
-/// is active, or the last `X-Forwarded-For` hop with `--trust-proxy`. The
+/// is active, or the last `X-Forwarded-For` hop with `--trust-proxy` or while
+/// a Tailscale route is up. The
 /// headers are ignored from any other peer, since anyone can send them. IPv6
 /// addresses are grouped by their /64.
 #[must_use]
@@ -490,6 +498,7 @@ where
     let always_trust_tunnel = limits.trust_forwarded;
     let tunnel_trust = limits.tunnel_trust.clone();
     let trust_proxy = limits.trust_proxy;
+    let proxy_trust = limits.proxy_trust.clone();
     let body_timeout = limits.body_read_timeout;
     loop {
         let (io, addr) = tokio::select! {
@@ -498,13 +507,14 @@ where
         };
         let app = app.clone();
         let tunnel_trust = tunnel_trust.clone();
+        let proxy_trust = proxy_trust.clone();
         let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
             // Read per request: a tunnel can start while a connection is open.
             let peer = Peer {
                 addr,
                 trust: Trust {
                     tunnel: always_trust_tunnel || tunnel_trust.get(),
-                    proxy: trust_proxy,
+                    proxy: trust_proxy || proxy_trust.get(),
                 },
             };
             let mut req = req.map(|body| DeadlineBody::new(body, body_timeout));
