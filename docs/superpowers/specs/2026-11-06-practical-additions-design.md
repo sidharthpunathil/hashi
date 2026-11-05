@@ -39,6 +39,8 @@ they started.
 
 ## 2. Share a project folder per token
 
+Superseded by 2026-11-06-projects-design.md: projects carry the folder, the accounts and the defaults, and tokens bind to a project.
+
 - An admin-only token and invite field, `workdir`: an absolute path to an
   existing directory. Symlinks are resolved and the result is stored.
 - Runs for that token start in this directory instead of the per-token
