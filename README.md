@@ -38,6 +38,7 @@ You could hand out an API key, or let people SSH in and run `claude -p` themselv
 
 - **It uses the agents, not just the models.** A prompt runs the real CLI in its own workspace, with the agent's tools, its file reading and its ongoing conversation. It runs under the plan you are already signed in to, so you need no API key per app.
 - **Every person or app gets their own token.** Each token can be scoped to some agents, capped per day or month, paused, expired and revoked. Nobody gets your login or a shell of their own.
+- **It can use more than one of your accounts.** Give a token a work plan, a personal plan or an API key per agent, in order. When one hits its usage limit, the prompt carries on with the next instead of failing.
 - **Your machine stays usable.** Prompts wait in a SQLite queue that survives restarts. A machine-wide run cap, a memory reserve and a per-run memory limit stop a busy sharer from swapping your laptop to death.
 - **It is one file.** A Rust binary with SQLite built in, for Linux, macOS and Windows. It needs no runtime, no database server and no container.
 
@@ -116,6 +117,18 @@ This prints a one-time link like `https://your-host/claim/hashi_inv_…` (for pe
 - **Self-service.** `/me` is a page where she pastes her token to see her status, limits and today's use.
 - **From her own agent.** Hashi is an MCP server at `/mcp`, so she can add your agents as tools in her Claude Code or Cursor. The claim page shows the exact command, plus one-click Add to Cursor and Add to VS Code buttons.
 - **One command.** Instead of clicking, she can copy the setup command from the claim page: it installs Hashi from GitHub and runs `hashi connect` with her link, so `hashi ask --remote "..."` works straight away. See [connecting to someone else's Hashi](docs/configuration.md#connecting-to-someone-elses-hashi).
+
+### Several accounts
+
+If you have more than one login for an agent (a work and a personal Claude plan, two Codex accounts, an API key on top of a subscription), add them and choose which ones each token uses:
+
+```bash
+hashi account add claude work                  # signs in with `claude auth login` in its own directory
+hashi account add codex ci --key-env CI_KEY    # an API key, read from a variable (or --key-stdin)
+hashi share alice --account claude=work,default
+```
+
+Each login account lives in `~/.hashi/accounts/<agent>/<name>/`, and the agent CLI signs in and refreshes its tokens there itself; your normal login is never touched. A token uses the first account in its list that is enabled and not at its limit. When a run hits the agent's usage limit, that account is skipped until the time the message gives (or for `--account-cooldown`, 60 minutes by default) and the prompt runs again on the next one. A stateful conversation starts fresh on the new account. People you share with never see account names. `hashi account list` shows each account's state, and `hashi doctor` lists them too. See [accounts](docs/configuration.md#accounts).
 
 ## Supported agents
 

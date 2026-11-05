@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
 use super::theme::{self, Rgb};
+use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
 use crate::api::AppState;
 use crate::events::Event;
@@ -232,13 +233,18 @@ pub struct TokenForm {
     pub mode: SessionMode,
     /// Selected agents.
     pub agents: AgentChoice,
+    /// Accounts per agent, typed as `claude=work,personal codex=team`.
+    /// Empty means every agent uses its default account.
+    pub accounts: String,
     /// Validation message shown under the name field.
     pub error: Option<String>,
 }
 
 impl TokenForm {
     /// Number of fields.
-    pub const FIELDS: usize = 4;
+    pub const FIELDS: usize = 5;
+    /// Index of the accounts text field.
+    pub const ACCOUNTS: usize = 4;
 
     fn new() -> Self {
         Self {
@@ -247,6 +253,7 @@ impl TokenForm {
             role: Role::User,
             mode: SessionMode::Stateless,
             agents: AgentChoice::EVERY,
+            accounts: String::new(),
             error: None,
         }
     }
@@ -298,13 +305,18 @@ pub struct ShareForm {
     budget: usize,
     lifetime: usize,
     link: usize,
+    /// Accounts per agent, typed as `claude=work,personal codex=team`.
+    /// Empty means every agent uses its default account.
+    pub accounts: String,
     /// Validation message shown under the label field.
     pub error: Option<String>,
 }
 
 impl ShareForm {
     /// Number of fields.
-    pub const FIELDS: usize = 7;
+    pub const FIELDS: usize = 8;
+    /// Index of the accounts text field.
+    pub const ACCOUNTS: usize = 7;
 
     fn new() -> Self {
         Self {
@@ -316,6 +328,7 @@ impl ShareForm {
             budget: 0,
             lifetime: 0,
             link: 1,
+            accounts: String::new(),
             error: None,
         }
     }
@@ -378,7 +391,7 @@ impl ShareForm {
         LINK_HOURS.get(self.link).copied().unwrap_or(24)
     }
 
-    fn to_new_invite(&self, label: String) -> NewInvite {
+    fn to_new_invite(&self, label: String, accounts: AccountMap) -> NewInvite {
         NewInvite {
             label,
             session_mode: self.mode,
@@ -391,8 +404,18 @@ impl ShareForm {
                 ..Limits::default()
             },
             link_hours: self.link_hours(),
+            accounts,
         }
     }
+}
+
+/// Longest accounts text a form accepts.
+const ACCOUNTS_CHARS: usize = 200;
+
+/// Parses a form's accounts text and checks the names exist.
+fn form_accounts(store: &crate::store::Store, text: &str) -> Result<AccountMap, String> {
+    let map = acct::parse_bindings(text)?;
+    crate::api::check_accounts(store, map).map_err(|e| e.to_string())
 }
 
 const fn link_long(hours: u32) -> &'static str {
@@ -538,6 +561,8 @@ pub struct App {
     pub usage: HashMap<String, TokenUsage>,
     /// Invites not yet claimed or expired, newest first.
     pub invites: Vec<Invite>,
+    /// Accounts added for each agent, besides its default one.
+    pub accounts: HashMap<AgentKind, usize>,
     /// Memory, run slots and admission state, from the resource guard.
     pub resources: ResourceSnapshot,
     /// Activity feed, newest first.
@@ -599,6 +624,7 @@ impl App {
             tokens: Vec::new(),
             usage: HashMap::new(),
             invites: Vec::new(),
+            accounts: HashMap::new(),
             resources: ResourceSnapshot::default(),
             feed: VecDeque::new(),
             requests_table: TableState::default().with_selected(Some(0)),
@@ -678,6 +704,13 @@ impl App {
                 self.load_detail();
             }
             Err(e) => self.notify(format!("refresh failed: {e}")),
+        }
+        if let Ok(list) = self.state.store.list_accounts() {
+            let mut counts = HashMap::new();
+            for a in list.iter().filter(|a| a.kind != acct::AccountKind::Default) {
+                *counts.entry(a.agent).or_insert(0) += 1;
+            }
+            self.accounts = counts;
         }
         self.resources = self.state.guard.snapshot();
         self.refresh_helpers();
@@ -1066,6 +1099,16 @@ impl App {
                             form.error = None;
                         }
                     }
+                    KeyCode::Backspace if form.field == ShareForm::ACCOUNTS => {
+                        form.accounts.pop();
+                        form.error = None;
+                    }
+                    KeyCode::Char(c) if form.field == ShareForm::ACCOUNTS => {
+                        if form.accounts.chars().count() < ACCOUNTS_CHARS && !c.is_control() {
+                            form.accounts.push(c);
+                            form.error = None;
+                        }
+                    }
                     KeyCode::Left => form.step(-1),
                     KeyCode::Right | KeyCode::Char(' ') => form.step(1),
                     _ => {}
@@ -1092,6 +1135,16 @@ impl App {
                             form.error = None;
                         }
                     }
+                    KeyCode::Backspace if form.field == TokenForm::ACCOUNTS => {
+                        form.accounts.pop();
+                        form.error = None;
+                    }
+                    KeyCode::Char(c) if form.field == TokenForm::ACCOUNTS => {
+                        if form.accounts.chars().count() < ACCOUNTS_CHARS && !c.is_control() {
+                            form.accounts.push(c);
+                            form.error = None;
+                        }
+                    }
                     KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => form.toggle(),
                     _ => {}
                 }
@@ -1107,6 +1160,14 @@ impl App {
             form.error = Some("Name is required, for example ci-bot".to_owned());
             return Some(Popup::NewToken(form));
         }
+        let accounts = match form_accounts(&self.state.store, &form.accounts) {
+            Ok(map) => map,
+            Err(e) => {
+                form.field = TokenForm::ACCOUNTS;
+                form.error = Some(e);
+                return Some(Popup::NewToken(form));
+            }
+        };
         let new = NewToken {
             name,
             role: form.role,
@@ -1115,6 +1176,7 @@ impl App {
             expires_in_days: None,
             note: None,
             limits: NewToken::default_limits(form.role),
+            accounts,
         };
         match self.state.store.create_token(&new) {
             Ok((token, secret)) => {
@@ -1141,7 +1203,15 @@ impl App {
             form.error = Some("Label is required, for example alice".to_owned());
             return Some(Popup::Share(form));
         }
-        let new = form.to_new_invite(label);
+        let accounts = match form_accounts(&self.state.store, &form.accounts) {
+            Ok(map) => map,
+            Err(e) => {
+                form.field = ShareForm::ACCOUNTS;
+                form.error = Some(e);
+                return Some(Popup::Share(form));
+            }
+        };
+        let new = form.to_new_invite(label, accounts);
         match self.state.store.create_invite(&new) {
             Ok((invite, code)) => {
                 self.audit("invite.create", &invite.label, link_long(new.link_hours));

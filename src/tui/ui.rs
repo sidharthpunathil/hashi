@@ -617,6 +617,14 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
         ),
         Span::styled(" queued", t::muted()),
     ]);
+    let mut counts_line = counts_line;
+    if let Some(n) = app.accounts.get(&agent).copied().filter(|n| *n > 0) {
+        counts_line.spans.extend([
+            Span::styled("   ", t::muted()),
+            Span::styled((n + 1).to_string(), strong()),
+            Span::styled(" accounts", t::muted()),
+        ]);
+    }
     frame.render_widget(Paragraph::new(counts_line), counts);
 
     let lat = app.latencies(agent, 60);
@@ -1013,6 +1021,15 @@ fn detail_head(r: &Request, tick: u64) -> Vec<Line<'static>> {
         ),
         kv("token", Span::styled(r.token_name.clone(), plain())),
         kv(
+            "account",
+            Span::styled(
+                r.account
+                    .clone()
+                    .unwrap_or_else(|| "not picked yet".to_owned()),
+                plain(),
+            ),
+        ),
+        kv(
             "model",
             Span::styled(
                 r.model.clone().unwrap_or_else(|| "default".to_owned()),
@@ -1315,15 +1332,32 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
         t::fg(t::PINK),
     ))
     .block(
-        focus_panel("tokens", focused && !app.invites.is_empty()).title_bottom(
-            Line::from(Span::styled(
-                " secrets are stored as SHA-256 hashes only ",
-                t::muted(),
-            ))
-            .right_aligned(),
-        ),
+        focus_panel("tokens", focused && !app.invites.is_empty())
+            .title_bottom(
+                Line::from(Span::styled(
+                    " secrets are stored as SHA-256 hashes only ",
+                    t::muted(),
+                ))
+                .right_aligned(),
+            )
+            .title_bottom(selected_accounts_line(app)),
     );
     frame.render_stateful_widget(table, area, &mut app.tokens_table);
+}
+
+/// The selected token's accounts, for the foot of the tokens panel.
+fn selected_accounts_line(app: &App) -> Line<'static> {
+    let Some(tk) = app.tokens_table.selected().and_then(|i| app.tokens.get(i)) else {
+        return Line::raw("");
+    };
+    Line::from(vec![
+        Span::styled(" accounts ", t::muted()),
+        Span::styled(
+            format!("{} ", crate::accounts::format_bindings(&tk.accounts)),
+            plain(),
+        ),
+    ])
+    .left_aligned()
 }
 
 // ── logs ───────────────────────────────────────────────────────────────────
@@ -2044,7 +2078,7 @@ fn form_error(error: Option<&String>, indent: usize) -> Line<'static> {
 
 fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
     const W: usize = 16;
-    let rect = centered(area, 72, 17);
+    let rect = centered(area, 72, 18);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(
@@ -2080,6 +2114,17 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
             W,
             form_toggle(form.link_label(), f(6)),
         ),
+        form_field(
+            f(ShareForm::ACCOUNTS),
+            "accounts",
+            W,
+            form_text(
+                &form.accounts,
+                f(ShareForm::ACCOUNTS),
+                "default (or claude=work,personal)",
+                tick,
+            ),
+        ),
         Line::raw(""),
         Line::from(Span::styled(
             "  The link works once and creates a user token for them.",
@@ -2103,7 +2148,7 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
 
 fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
     const W: usize = 10;
-    let rect = centered(area, 60, 14);
+    let rect = centered(area, 60, 15);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(f(0), "name", W, form_text(&form.name, f(0), "my-app", tick)),
@@ -2111,6 +2156,17 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
         form_field(f(1), "role", W, form_toggle(form.role.as_str(), f(1))),
         form_field(f(2), "session", W, form_toggle(form.mode.as_str(), f(2))),
         form_field(f(3), "agents", W, form_toggle(&form.agents.label(), f(3))),
+        form_field(
+            f(TokenForm::ACCOUNTS),
+            "accounts",
+            W,
+            form_text(
+                &form.accounts,
+                f(TokenForm::ACCOUNTS),
+                "default (or claude=work,personal)",
+                tick,
+            ),
+        ),
         Line::raw(""),
         Line::from(Span::styled(
             match form.mode {

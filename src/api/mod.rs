@@ -17,6 +17,7 @@
 //! | `PATCH`  | `/v1/tokens/{id}`     | admin | Pause, resume, extend, set limits  |
 //! | `DELETE` | `/v1/tokens/{id}`     | admin | Revoke a token                     |
 //! | `GET`    | `/v1/audit`           | admin | Recent sharing and access changes  |
+//! | `GET`    | `/v1/accounts`        | admin | Accounts per agent and their state |
 //! | `GET`    | `/v1/invites`         | admin | List invite links                  |
 //! | `POST`   | `/v1/invites`         | admin | Create a one-time invite link      |
 //! | `DELETE` | `/v1/invites/{id}`    | admin | Cancel a pending invite            |
@@ -40,7 +41,8 @@ pub use ask::{
 };
 pub use invites::{CreateInviteBody, snippets, validate_new_invite};
 pub use tokens::{
-    CreateTokenBody, LimitsPatch, UpdateTokenBody, validate_limits, validate_new_token,
+    CreateTokenBody, LimitsPatch, UpdateTokenBody, check_accounts, validate_limits,
+    validate_new_token,
 };
 
 use std::collections::HashMap;
@@ -243,6 +245,7 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
             axum::routing::patch(tokens::update).delete(tokens::revoke),
         )
         .route("/v1/audit", get(tokens::audit))
+        .route("/v1/accounts", get(accounts))
         .route("/v1/invites", get(invites::list).post(invites::create))
         .route("/v1/invites/{id}", delete(invites::cancel))
         .route("/v1/claim/preview", post(invites::preview))
@@ -632,6 +635,60 @@ async fn stats(
         "stats": state.store.stats()?,
         "resources": state.guard.snapshot(),
     })))
+}
+
+/// One account as `GET /v1/accounts` shows it.
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub fn account_json(
+    store: &Store,
+    a: &crate::store::AccountState,
+    now: i64,
+) -> ApiResult<serde_json::Value> {
+    let status = a.status(now);
+    let (today, total) = store.account_runs(a.agent, &a.name, now)?;
+    Ok(json!({
+        "agent": a.agent,
+        "name": a.name,
+        "kind": a.kind,
+        "state": status.as_str(),
+        "limitedUntil": match status {
+            crate::store::AccountStatus::Limited(until) => crate::util::rfc3339(until),
+            _ => None,
+        },
+        "lastUsed": a.last_used.and_then(crate::util::rfc3339),
+        "createdAt": crate::util::rfc3339(a.created_at),
+        "runsToday": today,
+        "runs": total,
+        "tokens": store.tokens_using_account(a.agent, &a.name)?,
+    }))
+}
+
+/// `GET /v1/accounts`: every account with its state and counts, plus how
+/// many accounts each agent has besides its default. Never any credential.
+async fn accounts(
+    State(state): State<AppState>,
+    Admin(_): Admin,
+) -> ApiResult<Json<serde_json::Value>> {
+    let now = now_ms();
+    let all = state.store.list_accounts()?;
+    let mut list = Vec::with_capacity(all.len());
+    for a in &all {
+        list.push(account_json(&state.store, a, now)?);
+    }
+    let per_agent: serde_json::Map<String, serde_json::Value> = AgentKind::ALL
+        .iter()
+        .map(|k| {
+            let n = all
+                .iter()
+                .filter(|a| a.agent == *k && a.kind != crate::accounts::AccountKind::Default)
+                .count();
+            (k.as_str().to_owned(), json!(n))
+        })
+        .collect();
+    Ok(Json(json!({ "accounts": list, "perAgent": per_agent })))
 }
 
 #[cfg(test)]

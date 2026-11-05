@@ -105,6 +105,9 @@ pub struct ServerConfig {
     pub tailscale: Option<TailscaleMode>,
     /// Helper executables and the Tailscale port.
     pub helpers: Helpers,
+    /// How long an account that hit its limit is skipped when its message
+    /// gives no reset time.
+    pub account_cooldown: std::time::Duration,
 }
 
 /// A running server.
@@ -811,6 +814,7 @@ pub fn ensure_admin(store: &Store) -> Result<Option<String>> {
         expires_in_days: None,
         note: Some("created on first start".to_owned()),
         limits: crate::token::Limits::default(),
+        accounts: crate::accounts::AccountMap::new(),
     })?;
     Ok(Some(secret.raw))
 }
@@ -978,6 +982,8 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         concurrency: cfg.concurrency,
         limits: cfg.limits.clone(),
         workspace: cfg.home.join("workspaces"),
+        home: cfg.home.clone(),
+        account_cooldown: cfg.account_cooldown,
     });
     let mut tasks = queue::spawn_workers(
         Arc::clone(&store),

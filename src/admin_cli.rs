@@ -1,10 +1,15 @@
 //! Offline admin commands that work straight on the database: tokens,
-//! invites and the audit log. Every change is audited with actor `cli`.
+//! invites, accounts and the audit log. Every change is audited with actor
+//! `cli`.
 
-use anyhow::{Result, bail};
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
 use clap::builder::TypedValueParser;
 use clap::{Args, Subcommand};
-use hashi::agent::AgentKind;
+use hashi::accounts::{self as acct, AccountKind, AccountMap};
+use hashi::agent::{AgentConfig, AgentKind};
 use hashi::store::{NewToken, Revoke, Store};
 use hashi::token::{Limits, Role, SessionMode, Token};
 use hashi::util::{human_age, now_ms, rfc3339};
@@ -50,6 +55,23 @@ impl LimitArgs {
     }
 }
 
+/// One `--account <agent>=<name>[,<name>...]` value.
+type Binding = (AgentKind, Vec<String>);
+
+fn parse_account(s: &str) -> Result<Binding, String> {
+    acct::parse_binding(s)
+}
+
+/// `base` with each `--account` binding replacing that agent's list,
+/// checked against the accounts that exist.
+fn bindings(store: &Store, base: AccountMap, flags: Vec<Binding>) -> Result<AccountMap> {
+    let mut map = base;
+    for (agent, names) in flags {
+        map.insert(agent, names);
+    }
+    hashi::api::check_accounts(store, map).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 fn parse_budget(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim_start_matches('$')
@@ -84,6 +106,10 @@ pub enum TokenCommand {
         /// Who or what the token is for.
         #[arg(long)]
         note: Option<String>,
+        /// Accounts this token uses for an agent, in order, for example
+        /// claude=work,personal (repeatable). Default: each agent's own login.
+        #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
+        accounts: Vec<Binding>,
         #[command(flatten)]
         limits: LimitArgs,
     },
@@ -108,6 +134,14 @@ pub enum TokenCommand {
         /// Remove every limit before applying the limit flags.
         #[arg(long)]
         clear_limits: bool,
+        /// Set the accounts for an agent, in order, for example
+        /// claude=work,personal (repeatable).
+        #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
+        accounts: Vec<Binding>,
+        /// Put every agent back on its default account before applying
+        /// --account.
+        #[arg(long)]
+        clear_accounts: bool,
         #[command(flatten)]
         limits: LimitArgs,
     },
@@ -147,6 +181,10 @@ pub struct ShareArgs {
     /// Port of the local server, used for a local-only link.
     #[arg(long, default_value_t = 7878, env = "HASHI_PORT")]
     pub port: u16,
+    /// Accounts the token uses for an agent, in order, for example
+    /// claude=work,personal (repeatable).
+    #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
+    pub accounts: Vec<Binding>,
     #[command(flatten)]
     pub limits: LimitArgs,
 }
@@ -198,8 +236,10 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             agents,
             expires_in_days,
             note,
+            accounts,
             limits,
         } => {
+            let accounts = bindings(store, AccountMap::new(), accounts)?;
             let role = if admin { Role::Admin } else { Role::User };
             let new = NewToken {
                 name: clean_label(&name)?,
@@ -217,6 +257,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                 } else {
                     NewToken::default_limits(role)
                 },
+                accounts,
             };
             let (t, secret) = store.create_token(&new)?;
             store.audit("cli", "token.create", &t.name, t.role.as_str())?;
@@ -227,8 +268,8 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
         TokenCommand::List => {
             let now = now_ms();
             println!(
-                "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10}",
-                "NAME", "PREFIX", "ROLE", "STATUS", "SESSION", "AGENTS", "TODAY", "LAST USED"
+                "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} ACCOUNTS",
+                "NAME", "PREFIX", "ROLE", "STATUS", "SESSION", "AGENTS", "TODAY", "LAST USED",
             );
             for t in store.list_tokens()? {
                 let agents = t
@@ -246,7 +287,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     None => usage.today_requests.to_string(),
                 };
                 println!(
-                    "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10}",
+                    "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} {}",
                     t.name,
                     t.prefix,
                     t.role.as_str(),
@@ -254,7 +295,8 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     t.session_mode.as_str(),
                     agents,
                     today,
-                    used
+                    used,
+                    acct::format_bindings(&t.accounts)
                 );
             }
         }
@@ -265,6 +307,8 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             note,
             expires_in_days,
             clear_limits,
+            accounts,
+            clear_accounts,
             limits,
         } => {
             let mut t = find_token(store, &id)?;
@@ -297,6 +341,15 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                 };
                 t.limits = limits.apply(base);
                 changes.push("limits".to_owned());
+            }
+            if clear_accounts || !accounts.is_empty() {
+                let base = if clear_accounts {
+                    AccountMap::new()
+                } else {
+                    t.accounts.clone()
+                };
+                t.accounts = bindings(store, base, accounts)?;
+                changes.push(format!("accounts {}", acct::format_bindings(&t.accounts)));
             }
             if changes.is_empty() {
                 bail!("nothing to update; see `hashi token update --help`");
@@ -349,6 +402,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
 pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
     let mut limits = args.limits.apply(Limits::default());
     limits.max_pending = limits.max_pending.or(Some(3));
+    let accounts = bindings(store, AccountMap::new(), args.accounts)?;
     let (invite, code) = store.create_invite(&hashi::store::NewInvite {
         label: clean_label(&args.label)?,
         session_mode: if args.stateful {
@@ -360,6 +414,7 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         token_expires_in_days: args.expires_in_days,
         limits,
         link_hours: args.link_hours,
+        accounts,
     })?;
     store.audit(
         "cli",
@@ -451,4 +506,561 @@ pub fn audit(store: &Store, limit: u32) -> Result<()> {
         );
     }
     Ok(())
+}
+
+// ── accounts ───────────────────────────────────────────────────────────────
+
+/// Agent executables used to sign accounts in and check them, with the
+/// same flags and variables as `hashi serve`.
+#[derive(Debug, Args, Clone, Default)]
+pub struct BinArgs {
+    /// Path to the Claude Code executable.
+    #[arg(long, env = "HASHI_CLAUDE_BIN")]
+    claude_bin: Option<PathBuf>,
+    /// Path to the Codex executable.
+    #[arg(long, env = "HASHI_CODEX_BIN")]
+    codex_bin: Option<PathBuf>,
+    /// Path to the Gemini CLI executable.
+    #[arg(long, env = "HASHI_GEMINI_BIN")]
+    gemini_bin: Option<PathBuf>,
+    /// Path to the opencode executable.
+    #[arg(long, env = "HASHI_OPENCODE_BIN")]
+    opencode_bin: Option<PathBuf>,
+    /// Path to the Qwen Code executable.
+    #[arg(long, env = "HASHI_QWEN_BIN")]
+    qwen_bin: Option<PathBuf>,
+}
+
+impl BinArgs {
+    fn bin(&self, agent: AgentKind) -> PathBuf {
+        let custom = match agent {
+            AgentKind::Claude => self.claude_bin.clone(),
+            AgentKind::Codex => self.codex_bin.clone(),
+            AgentKind::Gemini => self.gemini_bin.clone(),
+            AgentKind::Opencode => self.opencode_bin.clone(),
+            AgentKind::Qwen => self.qwen_bin.clone(),
+            AgentKind::Cursor => None,
+        };
+        custom.unwrap_or_else(|| AgentConfig::default_for(agent).bin)
+    }
+}
+
+/// `hashi account ...`
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Add an account: a login directory Hashi owns (signed in with the
+    /// agent's own command), or an API key.
+    Add {
+        /// Agent the account is for.
+        agent: AgentKind,
+        /// Name, 1 to 32 characters from a-z, 0-9 and -.
+        name: String,
+        /// login (the default without a key), api-key, or oauth-token (Claude
+        /// Code only, from `claude setup-token`).
+        #[arg(long)]
+        kind: Option<AccountKind>,
+        /// Read the key from standard input; on a terminal it is not shown.
+        #[arg(long, conflicts_with = "key_env")]
+        key_stdin: bool,
+        /// Read the key from this environment variable.
+        #[arg(long, value_name = "VAR")]
+        key_env: Option<String>,
+        /// Run the sign-in command without asking first (still only on a
+        /// terminal).
+        #[arg(long, short = 'y')]
+        yes: bool,
+        #[command(flatten)]
+        bins: BinArgs,
+    },
+    /// Sign an existing login account in again.
+    Login {
+        /// Agent the account is for.
+        agent: AgentKind,
+        /// Account name.
+        name: String,
+        /// Run the sign-in command without asking first.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        #[command(flatten)]
+        bins: BinArgs,
+    },
+    /// List accounts with their state and use.
+    List {
+        #[command(flatten)]
+        bins: BinArgs,
+    },
+    /// Stop using an account until it is enabled again.
+    Disable {
+        /// Agent the account is for.
+        agent: AgentKind,
+        /// Account name.
+        name: String,
+    },
+    /// Use a disabled account again.
+    Enable {
+        /// Agent the account is for.
+        agent: AgentKind,
+        /// Account name.
+        name: String,
+    },
+    /// Delete an account, its directory and its key, and take it off every
+    /// token and invite.
+    Remove {
+        /// Agent the account is for.
+        agent: AgentKind,
+        /// Account name.
+        name: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
+/// Asks a yes or no question on the terminal. No means no.
+fn confirm(question: &str) -> bool {
+    eprint!("{question} [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Reads a key from `--key-env`, or from standard input: without echo on a
+/// terminal, as one line otherwise. The key is never printed or logged.
+fn read_key(key_env: Option<&str>) -> Result<String> {
+    let raw = match key_env {
+        Some(var) => std::env::var(var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .with_context(|| format!("{var} is not set"))?,
+        None if std::io::stdin().is_terminal() => {
+            eprint!("Paste the key (it is not shown), then press Enter: ");
+            let key = read_hidden();
+            eprintln!();
+            key?
+        }
+        None => {
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .context("reading the key from standard input")?;
+            line
+        }
+    };
+    acct::clean_key(&raw).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Reads one line from the terminal in raw mode, so nothing is echoed.
+fn read_hidden() -> Result<String> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    crossterm::terminal::enable_raw_mode().context("switching the terminal to raw mode")?;
+    let mut key = String::new();
+    let result = loop {
+        match event::read() {
+            Ok(Event::Key(k)) if k.kind != KeyEventKind::Release => match k.code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Esc => break Err(anyhow::anyhow!("cancelled")),
+                KeyCode::Char('c' | 'd') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break Err(anyhow::anyhow!("cancelled"));
+                }
+                KeyCode::Backspace => {
+                    key.pop();
+                }
+                KeyCode::Char(c) => key.push(c),
+                _ => {}
+            },
+            Ok(Event::Paste(text)) => key.push_str(&text),
+            Ok(_) => {}
+            Err(e) => break Err(e.into()),
+        }
+    };
+    let _ = crossterm::terminal::disable_raw_mode();
+    result.map(|()| key)
+}
+
+/// The account variable and directory, and the sign-in command line, as
+/// shown to the owner.
+fn sign_in_line(home: &Path, agent: AgentKind, name: &str, bin: &Path) -> Option<String> {
+    let sign = acct::sign_in(agent)?;
+    let var = acct::dir_var(agent)?;
+    let dir = acct::account_dir(home, agent, name);
+    let mut parts = vec![format!("{var}={}", shell_quote(&dir.to_string_lossy()))];
+    parts.extend(sign.env.iter().map(|(k, v)| format!("{k}={v}")));
+    parts.push(shell_quote(&bin.to_string_lossy()));
+    parts.extend(sign.args.iter().map(|a| (*a).to_owned()));
+    Some(parts.join(" "))
+}
+
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ':' | '~'))
+    {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// A command run with the account's directory and none of the owner's
+/// credential variables or Hashi's own secrets.
+fn account_command(home: &Path, agent: AgentKind, name: &str, bin: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    for (key, _) in std::env::vars_os() {
+        let upper = key.to_string_lossy().to_ascii_uppercase();
+        if hashi::agent::runner::is_hashi_secret(&key)
+            || acct::credential_vars(agent).contains(&upper.as_str())
+        {
+            cmd.env_remove(&key);
+        }
+    }
+    if let Some(var) = acct::dir_var(agent) {
+        cmd.env(var, acct::account_dir(home, agent, name));
+    }
+    cmd
+}
+
+/// Runs the sign-in command on the owner's terminal, only after they
+/// confirm and only when standard input is a terminal. Otherwise prints it.
+fn sign_in(home: &Path, agent: AgentKind, name: &str, yes: bool, bins: &BinArgs) -> Result<()> {
+    let bin = bins.bin(agent);
+    let Some(line) = sign_in_line(home, agent, name, &bin) else {
+        bail!(
+            "{} has no sign-in command Hashi knows",
+            agent.display_name()
+        );
+    };
+    let Some(sign) = acct::sign_in(agent) else {
+        bail!(
+            "{} has no sign-in command Hashi knows",
+            agent.display_name()
+        );
+    };
+    println!("sign-in command:\n  {line}");
+    if let Some(hint) = sign.hint {
+        println!("  ({hint})");
+    }
+    if !std::io::stdin().is_terminal() {
+        println!("run it in a terminal, then check with `hashi account list`");
+        return Ok(());
+    }
+    if !yes && !confirm("Run it now?") {
+        println!("not run; run the command above when you are ready");
+        return Ok(());
+    }
+    let status = account_command(home, agent, name, &bin)
+        .args(sign.args)
+        .envs(sign.env.iter().copied())
+        .status()
+        .with_context(|| format!("starting {}", bin.display()))?;
+    if !status.success() {
+        eprintln!("the sign-in command exited with {status}");
+    }
+    let state = signed_in(home, agent, name, AccountKind::Login, &bin);
+    println!("signed in: {state}");
+    Ok(())
+}
+
+/// Whether an account is signed in, as far as can be checked: Claude Code
+/// answers `claude auth status --json`; for the other CLIs, whether they
+/// wrote anything into the account directory; for a key account, whether
+/// its key file is there.
+fn signed_in(home: &Path, agent: AgentKind, name: &str, kind: AccountKind, bin: &Path) -> String {
+    match kind {
+        AccountKind::Default => "-".to_owned(),
+        AccountKind::ApiKey | AccountKind::OauthToken => {
+            if acct::read_key(home, agent, name).is_ok() {
+                "key set".to_owned()
+            } else {
+                "no key".to_owned()
+            }
+        }
+        AccountKind::Login => match acct::status_args(agent) {
+            Some(args) => match run_status(account_command(home, agent, name, bin).args(args)) {
+                Some(true) => "yes".to_owned(),
+                Some(false) => "no".to_owned(),
+                None => "unknown".to_owned(),
+            },
+            None if acct::has_files(&acct::account_dir(home, agent, name)) => {
+                "files present".to_owned()
+            }
+            None => "no".to_owned(),
+        },
+    }
+}
+
+/// Runs a status command with a ten second limit. `Some(true)` when it
+/// reports a login: a `loggedIn` field when its output is JSON with one,
+/// else a zero exit.
+fn run_status(cmd: &mut std::process::Command) -> Option<bool> {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = serde_json::from_str::<serde_json::Value>(text.trim())
+        .ok()
+        .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool));
+    Some(field.unwrap_or(out.status.success()))
+}
+
+fn account_name(name: &str) -> Result<()> {
+    acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Runs a `hashi account` command.
+///
+/// # Errors
+///
+/// Fails on invalid input, file system or database errors.
+pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
+    match cmd {
+        AccountCommand::Add {
+            agent,
+            name,
+            kind,
+            key_stdin,
+            key_env,
+            yes,
+            bins,
+        } => {
+            account_name(&name)?;
+            let keyed = key_stdin || key_env.is_some();
+            let kind = match kind {
+                Some(AccountKind::Default) => bail!("the default account is always there"),
+                Some(AccountKind::Login) if keyed => {
+                    bail!("a login account has no key; drop --key-stdin and --key-env")
+                }
+                Some(k) => k,
+                None if keyed => AccountKind::ApiKey,
+                None => AccountKind::Login,
+            };
+            if !acct::supports(agent, kind) {
+                bail!(
+                    "{} does not support {kind} accounts{}",
+                    agent.display_name(),
+                    match agent {
+                        AgentKind::Cursor => "; add an API key with --kind api-key",
+                        AgentKind::Opencode | AgentKind::Qwen => "; add a login account",
+                        _ => "",
+                    }
+                );
+            }
+            if store
+                .get_account(agent, &name)?
+                .is_some_and(|a| a.kind != AccountKind::Default)
+            {
+                bail!("{agent} already has an account named {name}");
+            }
+            // The key is read before anything is created, so a mistyped
+            // key leaves nothing behind.
+            let key = kind
+                .is_key()
+                .then(|| read_key(key_env.as_deref()))
+                .transpose()?;
+            // A row left by a limit mark on a since removed account.
+            store.remove_account(agent, &name)?;
+            store.add_account(agent, &name, kind)?;
+            let made = match &key {
+                Some(key) => acct::write_key(home, agent, &name, key)
+                    .map(|()| acct::account_dir(home, agent, &name)),
+                None => acct::create_dir(home, agent, &name),
+            };
+            let dir = match made {
+                Ok(dir) => dir,
+                Err(e) => {
+                    store.remove_account(agent, &name)?;
+                    return Err(e).context("creating the account directory");
+                }
+            };
+            store.audit(
+                "cli",
+                "account.add",
+                &format!("{agent}:{name}"),
+                kind.as_str(),
+            )?;
+            println!(
+                "added {} account {name} ({kind}) in {}",
+                agent.display_name(),
+                dir.display()
+            );
+            if kind == AccountKind::Login {
+                sign_in(home, agent, &name, yes, &bins)?;
+            }
+            println!(
+                "use it with: hashi token update <id> --account {agent}={name}  (or --account on token create and share)"
+            );
+        }
+        AccountCommand::Login {
+            agent,
+            name,
+            yes,
+            bins,
+        } => {
+            account_name(&name)?;
+            match store.get_account(agent, &name)? {
+                Some(a) if a.kind == AccountKind::Login => {}
+                Some(a) if a.kind != AccountKind::Default => {
+                    bail!("{agent}:{name} is a {} account, not a login", a.kind)
+                }
+                _ => bail!("no {agent} account named {name}"),
+            }
+            acct::create_dir(home, agent, &name).context("preparing the account directory")?;
+            sign_in(home, agent, &name, yes, &bins)?;
+        }
+        AccountCommand::List { bins } => {
+            let now = now_ms();
+            let accounts = store.list_accounts()?;
+            if accounts.is_empty() {
+                println!(
+                    "no accounts yet; every agent uses your own login (add one with hashi account add)"
+                );
+                return Ok(());
+            }
+            println!(
+                "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} TOKENS",
+                "AGENT", "NAME", "KIND", "SIGNED IN", "STATE", "LAST USED", "TODAY"
+            );
+            for a in accounts {
+                let state = match a.status(now) {
+                    hashi::store::AccountStatus::Limited(until) => {
+                        format!("limited until {}", rfc3339(until).unwrap_or_default())
+                    }
+                    s => s.as_str().to_owned(),
+                };
+                let used = a
+                    .last_used
+                    .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u)));
+                let (today, _) = store.account_runs(a.agent, &a.name, now)?;
+                println!(
+                    "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {}",
+                    a.agent.as_str(),
+                    a.name,
+                    a.kind.as_str(),
+                    signed_in(home, a.agent, &a.name, a.kind, &bins.bin(a.agent)),
+                    state,
+                    used,
+                    today,
+                    store.tokens_using_account(a.agent, &a.name)?
+                );
+            }
+        }
+        AccountCommand::Disable { agent, name } => set_disabled(store, agent, &name, true)?,
+        AccountCommand::Enable { agent, name } => set_disabled(store, agent, &name, false)?,
+        AccountCommand::Remove { agent, name, yes } => {
+            account_name(&name)?;
+            if store
+                .get_account(agent, &name)?
+                .is_none_or(|a| a.kind == AccountKind::Default)
+            {
+                bail!("no {agent} account named {name}");
+            }
+            let using = store.tokens_using_account(agent, &name)?;
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!("pass --yes to remove {agent}:{name} without being asked");
+                }
+                if !confirm(&format!(
+                    "Remove {agent}:{name}, its directory and key, and take it off {using} token(s)?"
+                )) {
+                    println!("not removed");
+                    return Ok(());
+                }
+            }
+            let removed = store.remove_account(agent, &name)?;
+            let dir = acct::remove_dir(home, agent, &name);
+            store.audit("cli", "account.remove", &format!("{agent}:{name}"), "")?;
+            println!(
+                "removed {agent}:{name}; taken off {} token(s) and {} invite(s)",
+                removed.tokens, removed.invites
+            );
+            if let Err(e) = dir {
+                eprintln!("warning: could not delete its directory: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_disabled(store: &Store, agent: AgentKind, name: &str, disabled: bool) -> Result<()> {
+    if name == acct::DEFAULT {
+        bail!("the default account cannot be disabled; leave it out of a token's list instead");
+    }
+    if store
+        .get_account(agent, name)?
+        .is_none_or(|a| a.kind == AccountKind::Default)
+    {
+        bail!("no {agent} account named {name}");
+    }
+    store.set_account_disabled(agent, name, disabled)?;
+    let action = if disabled { "disabled" } else { "enabled" };
+    store.audit(
+        "cli",
+        &format!("account.{}", &action[..action.len() - 1]),
+        &format!("{agent}:{name}"),
+        "",
+    )?;
+    println!("{action} {agent}:{name}");
+    Ok(())
+}
+
+/// `hashi doctor`'s account lines: the accounts each agent has besides the
+/// default. Reads the database only when it exists.
+pub fn doctor_accounts(home: &Path) {
+    let none = || {
+        println!(
+            "  · {:<12} none: every agent uses your own login (hashi account add)",
+            "accounts"
+        );
+    };
+    if !home.join("hashi.db").exists() {
+        none();
+        return;
+    }
+    let Ok(store) = hashi::server::open_store(home) else {
+        println!("  ! {:<12} could not open the database", "accounts");
+        return;
+    };
+    let now = now_ms();
+    let list: Vec<_> = store
+        .list_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.kind != AccountKind::Default)
+        .collect();
+    if list.is_empty() {
+        none();
+        return;
+    }
+    for agent in AgentKind::ALL {
+        let names: Vec<String> = list
+            .iter()
+            .filter(|a| a.agent == agent)
+            .map(|a| format!("{} ({}, {})", a.name, a.kind, a.status(now).as_str()))
+            .collect();
+        if !names.is_empty() {
+            println!(
+                "  ✓ {:<12} {}: {}",
+                "accounts",
+                agent.as_str(),
+                names.join(", ")
+            );
+        }
+    }
 }

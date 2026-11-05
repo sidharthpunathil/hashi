@@ -135,6 +135,25 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
     })
 }
 
+/// Claude Code's limit messages: the plan's session, weekly and Opus
+/// limits, an API key out of credit, and a rejected 429.
+const LIMIT_MESSAGES: [&str; 5] = [
+    "hit your session limit",
+    "weekly limit",
+    "opus limit",
+    "credit balance is too low",
+    "request rejected (429)",
+];
+
+/// Whether a failed run's error says this account is at its limit, and when
+/// it resets if the message says. See [`super::limit_hit`].
+#[must_use]
+pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
+    super::limit::contains_any(error, &LIMIT_MESSAGES)
+        .then(|| super::limit::hit(error))
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +331,28 @@ mod tests {
             parse_output("not json"),
             Err(AgentError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn limit_messages_are_recognised() {
+        for msg in [
+            "Claude AI usage limit reached: You've hit your session limit \u{b7} resets 3pm",
+            "You've reached your weekly limit",
+            "Opus limit reached, try again later",
+            "Credit balance is too low",
+            "API Error: Request rejected (429) \u{b7} rate limited",
+        ] {
+            assert!(limit_hit(msg).is_some(), "{msg}");
+        }
+        assert!(limit_hit("simulated failure").is_none());
+        assert!(limit_hit("Invalid API key").is_none());
+    }
+
+    #[test]
+    fn limit_reset_is_read_when_given() {
+        let hit = limit_hit("You've hit your session limit, try again in 2 hours").unwrap();
+        let left = hit.unwrap() - time::OffsetDateTime::now_utc();
+        assert!((7_100..=7_200).contains(&left.whole_seconds()), "{left}");
+        assert_eq!(limit_hit("weekly limit"), Some(None));
     }
 }

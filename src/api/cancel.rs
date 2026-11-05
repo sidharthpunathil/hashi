@@ -43,6 +43,6 @@ pub(super) async fn delete(
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let req = cancel_request(&state, &token, &id).await?;
-    let (code, v) = request_json(&state.store, req)?;
+    let (code, v) = request_json(&state.store, req, reads_any_request(&token))?;
     Ok((code, Json(v)))
 }

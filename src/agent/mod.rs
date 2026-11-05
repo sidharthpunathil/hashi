@@ -12,6 +12,7 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod gemini;
+pub mod limit;
 pub mod opencode;
 pub mod qwen;
 pub mod runner;
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 pub use runner::Limits;
 
 /// The coding agents Hashi can drive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     /// Anthropic's Claude Code CLI (`claude`).
@@ -247,6 +248,28 @@ pub enum AgentError {
     Io(#[from] std::io::Error),
 }
 
+/// Environment changes for a run on a non-default account: inherited
+/// variables to remove, then variables to set (an account directory or an
+/// API key). `Debug` never shows the values that are set.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct EnvOverride {
+    /// Inherited variables removed from the child, matched without regard
+    /// to case.
+    pub remove: Vec<&'static str>,
+    /// Variables set on the child after the backend's own.
+    pub set: Vec<(String, String)>,
+}
+
+impl fmt::Debug for EnvOverride {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.set.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("EnvOverride")
+            .field("remove", &self.remove)
+            .field("set", &names)
+            .finish()
+    }
+}
+
 /// Runs one prompt against `kind` in `workdir`.
 ///
 /// # Errors
@@ -260,7 +283,25 @@ pub async fn execute(
     workdir: &Path,
     limits: Limits,
 ) -> Result<AgentOutput, AgentError> {
-    let (args, env): (Vec<OsString>, Vec<(String, String)>) = match kind {
+    execute_as(kind, cfg, inv, workdir, limits, None).await
+}
+
+/// Like [`execute`], on an account: `account` removes the owner's
+/// credential variables and sets the account's own. `None` is the default
+/// account, which runs exactly as [`execute`] does.
+///
+/// # Errors
+///
+/// As for [`execute`].
+pub async fn execute_as(
+    kind: AgentKind,
+    cfg: &AgentConfig,
+    inv: Invocation<'_>,
+    workdir: &Path,
+    limits: Limits,
+    account: Option<&EnvOverride>,
+) -> Result<AgentOutput, AgentError> {
+    let (args, mut env): (Vec<OsString>, Vec<(String, String)>) = match kind {
         AgentKind::Claude => (claude::build_args(cfg, inv), claude::env(workdir)),
         AgentKind::Codex => (codex::build_args(cfg, inv), codex::env(workdir)),
         AgentKind::Gemini => (gemini::build_args(cfg, inv), gemini::env(workdir)),
@@ -268,7 +309,14 @@ pub async fn execute(
         AgentKind::Qwen => (qwen::build_args(cfg, inv), qwen::env(workdir)),
         AgentKind::Cursor => (cursor::build_args(cfg, inv), cursor::env(workdir)),
     };
-    let raw = runner::run(&cfg.bin, &args, &env, workdir, limits).await?;
+    let remove: &[&str] = match account {
+        Some(acc) => {
+            env.extend(acc.set.iter().cloned());
+            &acc.remove
+        }
+        None => &[],
+    };
+    let raw = runner::run_with(&cfg.bin, &args, &env, remove, workdir, limits).await?;
     let parsed = match kind {
         AgentKind::Claude => claude::parse_output(&raw.stdout),
         AgentKind::Codex => codex::parse_output(&raw.stdout),
@@ -286,6 +334,21 @@ pub async fn execute(
             detail: runner::summarize(&raw.stderr, &raw.stdout).unwrap_or_else(|| err.to_string()),
         }),
         Err(err) => Err(err),
+    }
+}
+
+/// Whether `error`, the text of a failed run, says the account ran into its
+/// usage limit. `Some(Some(t))` when the message also says when the limit
+/// resets, `Some(None)` when it does not, and `None` for any other failure.
+#[must_use]
+pub fn limit_hit(kind: AgentKind, error: &str) -> Option<Option<time::OffsetDateTime>> {
+    match kind {
+        AgentKind::Claude => claude::limit_hit(error),
+        AgentKind::Codex => codex::limit_hit(error),
+        AgentKind::Gemini => gemini::limit_hit(error),
+        AgentKind::Opencode => opencode::limit_hit(error),
+        AgentKind::Qwen => qwen::limit_hit(error),
+        AgentKind::Cursor => cursor::limit_hit(error),
     }
 }
 

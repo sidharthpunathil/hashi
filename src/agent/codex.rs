@@ -119,6 +119,34 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
     }
 }
 
+/// Codex's limit messages. "You’ve hit your usage limit" is printed with a
+/// curly apostrophe, which matching ignores.
+const LIMIT_MESSAGES: [&str; 3] = ["hit your usage limit", "out of credits", "spend cap"];
+
+/// Whether a failed run's error says this account is at its limit, and when
+/// it resets if the message says. See [`super::limit_hit`].
+#[must_use]
+pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
+    if !super::limit::contains_any(error, &LIMIT_MESSAGES) {
+        return None;
+    }
+    let now = time::OffsetDateTime::now_utc();
+    Some(super::limit::local_offset().and_then(|offset| reset_at(error, now, offset)))
+}
+
+/// The reset time in Codex's " Try again at {t}." suffix, which is local
+/// time: `%-I:%M %p` for today, `%b %-d{st|nd|rd|th}, %Y %-I:%M %p` for
+/// another day. "Try again later." and anything unreadable give `None`, so
+/// the cooldown applies.
+fn reset_at(
+    error: &str,
+    now: time::OffsetDateTime,
+    offset: time::UtcOffset,
+) -> Option<time::OffsetDateTime> {
+    let rest = super::limit::after_marker(error, "try again at ")?;
+    super::limit::local_clock(&rest, now, offset).filter(|t| *t > now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +221,45 @@ mod tests {
             parse_output("{\"type\":\"turn.started\"}"),
             Err(AgentError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn limit_messages_are_recognised() {
+        for msg in [
+            "You\u{2019}ve hit your usage limit. Upgrade to Pro or try again later.",
+            "You've hit your usage limit.",
+            "You are out of credits",
+            "This workspace reached its spend cap",
+        ] {
+            assert!(limit_hit(msg).is_some(), "{msg}");
+        }
+        assert!(limit_hit("please sign in again").is_none());
+    }
+
+    #[test]
+    fn limit_reset_is_read_from_the_try_again_at_suffix() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(); // 08:00 UTC
+        let utc = time::UtcOffset::UTC;
+        let today = "You\u{2019}ve hit your usage limit. Try again at 3:45 PM.";
+        let t = reset_at(today, now, utc).unwrap();
+        assert_eq!((t - now).whole_minutes(), 7 * 60 + 45);
+        let other = "You\u{2019}ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again at Jan 16th, 2027 9:05 AM.";
+        let t = reset_at(other, now, utc).unwrap();
+        assert_eq!((t - now).whole_minutes(), 25 * 60 + 5);
+        let minus5 = time::UtcOffset::from_hms(-5, 0, 0).unwrap();
+        let t = reset_at(today, now, minus5).unwrap();
+        assert_eq!((t - now).whole_minutes(), 12 * 60 + 45);
+        assert_eq!(
+            reset_at(
+                "You\u{2019}ve hit your usage limit. Try again later.",
+                now,
+                utc
+            ),
+            None
+        );
+        assert_eq!(
+            limit_hit("You\u{2019}ve hit your usage limit. Try again later."),
+            Some(None)
+        );
     }
 }

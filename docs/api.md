@@ -25,6 +25,7 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 | `DELETE` | `/v1/invites/{id}` | admin | Cancel a pending invite |
 | `POST` | `/v1/claim/preview`, `/v1/claim/redeem` | invite code | What an invite grants; use it once |
 | `GET` | `/v1/audit` | admin | Recent sharing and access changes |
+| `GET` | `/v1/accounts` | admin | Accounts per agent, their state and use |
 | `POST` | `/mcp` | token | MCP server (JSON-RPC over streamable HTTP). `GET /mcp` answers 405 |
 | `GET` | `/claim/{code}`, `/me` | | Pages for the people you share with |
 
@@ -50,7 +51,9 @@ It returns `200` with the result when the run finished within `wait`, or `202` w
 }
 ```
 
-A `stateful` token resumes its own conversation with each agent on every prompt. `DELETE /v1/session/{agent}` starts it over.
+A `stateful` token resumes its own conversation with each agent on every prompt. `DELETE /v1/session/{agent}` starts it over, on every account.
+
+For an admin token, the result also has `account`: the account that ran the prompt (`default` for your own login). Other tokens never see it.
 
 ## `DELETE /v1/ask/{id}`
 
@@ -116,16 +119,39 @@ With Open WebUI: open **Admin Settings**, then **Connections**, and add an OpenA
 | `expiresInDays` | 1 to 3650 | never expires |
 | `note` | string, up to 200 chars | none |
 | `limits` | object, see below | `maxPending: 3` for `user` tokens, none for admins |
+| `accounts` | object, agent to an ordered list of account names | every agent uses `default` |
 
 The response contains the raw `token` exactly once. Only its SHA-256 hash is stored.
 
+`accounts` looks like `{"claude": ["work", "personal"], "codex": ["ci"]}`. Each name must be an account added with `hashi account add`, or `default` for your own login; an unknown name is refused with `400`. A run uses the first listed account that is enabled and not at its limit, and fails over to the next one when it hits the agent's limit. Token listings and `PATCH` responses show `accounts` to admins; `/v1/me`, MCP and the claim page never do.
+
 `limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd` and `maxPending`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code and opencode do, so budgets bound only those two.
 
-`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry) and `limits`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it).
+`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits` and `accounts`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`.
 
 ## `POST /v1/invites`
 
-Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits` and `linkHours` (`1`, `24` or `168`, default `24`). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once.
+Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`) and `accounts` (as for tokens). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once.
+
+## `GET /v1/accounts`
+
+Admin only. Lists every account with its state and use; keys and login files are never part of it.
+
+```json
+{
+  "accounts": [
+    {
+      "agent": "claude", "name": "work", "kind": "login",
+      "state": "limited", "limitedUntil": "2026-11-06T15:00:00Z",
+      "lastUsed": "2026-11-06T14:02:11Z", "createdAt": "2026-11-01T09:00:00Z",
+      "runsToday": 12, "runs": 140, "tokens": 3
+    }
+  ],
+  "perAgent": { "claude": 1, "codex": 0, "gemini": 0, "opencode": 0, "qwen": 0, "cursor": 0 }
+}
+```
+
+`kind` is `login`, `api-key`, `oauth-token` or `default` (your own login, listed once a token that names it has used it). `state` is `ready`, `limited` (with `limitedUntil`) or `disabled`. `tokens` counts the tokens whose list includes the account, and `perAgent` the accounts each agent has besides `default`.
 
 ## MCP
 

@@ -7,8 +7,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Admin, ApiError, ApiResult, AppState, MAX_TOKENS};
+use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
-use crate::store::{NewToken, Revoke};
+use crate::store::{NewToken, Revoke, Store};
 use crate::token::{Limits, Role, SessionMode};
 use crate::util::now_ms;
 
@@ -37,6 +38,10 @@ pub struct CreateTokenBody {
     /// `admin` token is unlimited.
     #[serde(default)]
     pub limits: Option<Limits>,
+    /// Accounts per agent, in order, for example `{"claude": ["work",
+    /// "personal"]}`. An agent left out uses its default account.
+    #[serde(default)]
+    pub accounts: Option<AccountMap>,
 }
 
 /// Body of `PATCH /v1/tokens/{id}`. Omitted fields are left as they are.
@@ -60,6 +65,10 @@ pub struct UpdateTokenBody {
     /// current value, and only an explicit `null` removes it.
     #[serde(default)]
     pub limits: Option<LimitsPatch>,
+    /// Replaces the accounts map; `{}` puts every agent back on its
+    /// default account.
+    #[serde(default)]
+    pub accounts: Option<AccountMap>,
 }
 
 /// The `limits` object of `PATCH /v1/tokens/{id}`.
@@ -145,7 +154,28 @@ pub fn validate_limits(limits: Limits) -> ApiResult<Limits> {
     Ok(limits)
 }
 
-/// Validates a create request and turns it into store input.
+/// Checks an accounts map: valid names, no repeats, and every account
+/// added with `hashi account add` (`default` always exists).
+///
+/// # Errors
+///
+/// Returns [`ApiError::BadRequest`] naming the unknown accounts, or
+/// [`ApiError::Internal`] on database errors.
+pub fn check_accounts(store: &Store, map: AccountMap) -> ApiResult<AccountMap> {
+    let map = acct::normalize(map).map_err(ApiError::BadRequest)?;
+    let unknown = store.unknown_accounts(&map)?;
+    if !unknown.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "unknown account(s): {}; add them first with `hashi account add`",
+            unknown.join(", ")
+        )));
+    }
+    Ok(map)
+}
+
+/// Validates a create request and turns it into store input. Account names
+/// are checked for shape here and for existence by [`check_accounts`].
+///
 ///
 /// # Errors
 ///
@@ -178,6 +208,8 @@ pub fn validate_new_token(body: CreateTokenBody) -> ApiResult<NewToken> {
         expires_in_days: body.expires_in_days,
         note: validate_note(body.note)?,
         limits,
+        accounts: acct::normalize(body.accounts.unwrap_or_default())
+            .map_err(ApiError::BadRequest)?,
     })
 }
 
@@ -205,7 +237,8 @@ pub(super) async fn create(
     body: Result<Json<CreateTokenBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
-    let new = validate_new_token(body)?;
+    let mut new = validate_new_token(body)?;
+    new.accounts = check_accounts(&state.store, new.accounts)?;
     if state.store.list_tokens()?.len() >= MAX_TOKENS {
         return Err(ApiError::Conflict("token limit reached, revoke one first"));
     }
@@ -273,6 +306,13 @@ pub(super) async fn update(
     if let Some(patch) = body.limits {
         token.limits = validate_limits(patch.apply(token.limits))?;
         changes.push("limits".to_owned());
+    }
+    if let Some(map) = body.accounts {
+        token.accounts = check_accounts(&state.store, map)?;
+        changes.push(format!(
+            "accounts {}",
+            acct::format_bindings(&token.accounts)
+        ));
     }
     if changes.is_empty() {
         return Err(ApiError::BadRequest("nothing to update".to_owned()));
@@ -376,7 +416,40 @@ mod tests {
             expires_in_days: None,
             note: None,
             limits: None,
+            accounts: None,
         }
+    }
+
+    #[test]
+    fn account_maps_are_checked_for_shape() {
+        let ok = validate_new_token(CreateTokenBody {
+            accounts: Some(acct::parse_bindings("claude=work,default").unwrap()),
+            ..body("x")
+        })
+        .unwrap();
+        assert_eq!(ok.accounts[&AgentKind::Claude], ["work", "default"]);
+        let twice = AccountMap::from([(AgentKind::Claude, vec!["a".to_owned(), "a".to_owned()])]);
+        assert!(
+            validate_new_token(CreateTokenBody {
+                accounts: Some(twice),
+                ..body("x")
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_accounts_are_rejected() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .add_account(AgentKind::Claude, "work", acct::AccountKind::Login)
+            .unwrap();
+        let known = acct::parse_bindings("claude=work,default").unwrap();
+        assert_eq!(check_accounts(&store, known.clone()).unwrap(), known);
+        let err = check_accounts(&store, acct::parse_bindings("claude=work,ghost").unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("claude:ghost"), "{err}");
     }
 
     #[test]

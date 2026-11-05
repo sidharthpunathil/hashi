@@ -134,6 +134,9 @@ struct RequestView {
     usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<i64>,
+    /// The account that ran it, for admins only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
     created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
@@ -141,11 +144,13 @@ struct RequestView {
 }
 
 /// Renders a request as API JSON, with 200 when finished and 202 otherwise.
+/// The account that ran it is included only when `admin` is set: token
+/// holders never see account names.
 ///
 /// # Errors
 ///
 /// Fails on database errors.
-pub fn request_json(store: &Store, r: Request) -> ApiResult<(StatusCode, Value)> {
+pub fn request_json(store: &Store, r: Request, admin: bool) -> ApiResult<(StatusCode, Value)> {
     let position = (r.status == RequestStatus::Queued)
         .then(|| store.queue_position(&r))
         .transpose()?;
@@ -157,6 +162,7 @@ pub fn request_json(store: &Store, r: Request) -> ApiResult<(StatusCode, Value)>
     let view = RequestView {
         poll: format!("/v1/ask/{}", r.id),
         duration_ms: r.duration_ms(),
+        account: if admin { r.account } else { None },
         created_at: rfc3339(r.created_at),
         completed_at: r.completed_at.and_then(rfc3339),
         id: r.id,
@@ -392,7 +398,7 @@ pub(super) async fn ask(
         Some(secs) => wait_until_done(&state, &token.id, &req.id, secs, MAX_WAIT_SECS).await?,
         None => req,
     };
-    let (code, v) = request_json(&state.store, req)?;
+    let (code, v) = request_json(&state.store, req, reads_any_request(&token))?;
     Ok((code, Json(v)))
 }
 
@@ -424,7 +430,7 @@ pub(super) async fn poll(
         }
         _ => req,
     };
-    let (code, v) = request_json(&state.store, req)?;
+    let (code, v) = request_json(&state.store, req, reads_any_request(&token))?;
     Ok((code, Json(v)))
 }
 
