@@ -2,6 +2,8 @@
 //! limit, and which tokens and invites use them. The credentials themselves
 //! never touch the database (see [`crate::accounts`]).
 
+use std::collections::{BTreeSet, HashMap};
+
 use rusqlite::{OptionalExtension, Row, params};
 use serde::Serialize;
 
@@ -353,6 +355,31 @@ impl Store {
             .count())
     }
 
+    /// How many tokens list each account, by agent and name: what
+    /// [`Store::tokens_using_account`] answers for one account, for every
+    /// account from one read of the tokens table. Accounts no token lists
+    /// are absent.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn account_token_counts(&self) -> Result<HashMap<(AgentKind, String), usize>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT accounts FROM tokens")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            for (agent, names) in acct::decode(&row?) {
+                // A token counts once per account, even if listed twice.
+                let names: BTreeSet<String> = names.into_iter().collect();
+                for name in names {
+                    *counts.entry((agent, name)).or_insert(0) += 1;
+                }
+            }
+        }
+        Ok(counts)
+    }
+
     /// The `agent:name` entries of `map` that are not accounts. `default`
     /// always exists.
     ///
@@ -557,6 +584,12 @@ mod tests {
             s.tokens_using_account(AgentKind::Claude, "work").unwrap(),
             2
         );
+        let counts = s.account_token_counts().unwrap();
+        for (name, n) in [("work", 2), ("home", 2)] {
+            assert_eq!(counts[&(AgentKind::Claude, name.to_owned())], n);
+            assert_eq!(s.tokens_using_account(AgentKind::Claude, name).unwrap(), n);
+        }
+        assert_eq!(counts.len(), 2);
 
         let r = s.remove_account(AgentKind::Claude, "work").unwrap();
         assert_eq!(
