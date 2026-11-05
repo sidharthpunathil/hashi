@@ -617,3 +617,86 @@ async fn the_long_poll_cap_applies() {
     }
     h.running.shutdown().await;
 }
+
+/// A machine with no free memory: every request stays queued.
+fn held(cfg: &mut ServerConfig) {
+    cfg.resources = hashi::guard::ResourceSettings::with_probe(std::sync::Arc::new(
+        hashi::guard::ManualProbe::new(64 << 30, 0),
+    ));
+}
+
+/// The error object and the `[DONE]` a cut stream ends with.
+fn cut_stream_error(body: &str) -> Value {
+    let data: Vec<String> = sse_lines(body)
+        .into_iter()
+        .filter_map(|l| l.strip_prefix("data: ").map(str::to_owned))
+        .collect();
+    assert_eq!(data.last().map(String::as_str), Some("[DONE]"), "{body}");
+    serde_json::from_str(&data[data.len() - 2]).unwrap()
+}
+
+#[tokio::test]
+async fn a_stream_on_a_held_request_ends_at_its_deadline() {
+    let h = harness_with(|cfg| {
+        held(cfg);
+        cfg.limits.timeout = Duration::from_secs(1);
+    })
+    .await;
+    let user = h.user_token(json!({})).await;
+    let started = std::time::Instant::now();
+    let (status, _, body) = tokio::time::timeout(
+        Duration::from_secs(60),
+        h.chat_stream(
+            &user,
+            json!({ "model": "claude", "messages": user_says("hi"), "stream": true }),
+        ),
+    )
+    .await
+    .expect("the stream ends by its deadline");
+    assert_eq!(status, StatusCode::OK);
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(11), "{took:?}");
+    let e = cut_stream_error(&body);
+    openai_error(&e, "server_error", "stream_timeout");
+    assert!(body.contains(": queued"), "{body}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stream_ends_when_its_token_is_paused() {
+    let h = harness_with(held).await;
+    let user = h.user_token(json!({ "name": "pausable" })).await;
+    let (_, tokens) = h.get("/v1/tokens", Some(&h.admin)).await;
+    let id = tokens["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "pausable")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pause = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        h.call(
+            reqwest::Method::PATCH,
+            &format!("/v1/tokens/{id}"),
+            Some(&h.admin),
+            Some(json!({ "paused": true })),
+        )
+        .await
+    };
+    let stream = tokio::time::timeout(
+        Duration::from_secs(10),
+        h.chat_stream(
+            &user,
+            json!({ "model": "claude", "messages": user_says("hi"), "stream": true }),
+        ),
+    );
+    let ((status, v), streamed) = tokio::join!(pause, stream);
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let (_, _, body) = streamed.expect("the stream ends once the token is paused");
+    let e = cut_stream_error(&body);
+    openai_error(&e, "permission_error", "token_paused");
+    h.running.shutdown().await;
+}
