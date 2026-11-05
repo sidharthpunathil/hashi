@@ -136,6 +136,13 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     (
+        "account clear-limit",
+        Entry::InPopup {
+            row: Action::Accounts,
+            key: "c",
+        },
+    ),
+    (
         "account remove",
         Entry::InPopup {
             row: Action::Accounts,

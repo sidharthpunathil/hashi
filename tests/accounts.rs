@@ -253,6 +253,31 @@ fn tokens_and_invites_take_accounts_and_removal_takes_them_off() {
     cli.ok(&["account", "disable", "claude", "work"]);
     assert!(cli.ok(&["account", "list"]).contains("disabled"));
     cli.ok(&["account", "enable", "claude", "work"]);
+
+    // A limit far in the future (here two weeks) is cleared on request.
+    {
+        let store = hashi::server::open_store(&cli.home()).unwrap();
+        let until = hashi::util::now_ms() + 14 * 86_400_000;
+        store
+            .mark_account_limited(hashi::agent::AgentKind::Claude, "work", until)
+            .unwrap();
+    }
+    assert!(cli.ok(&["account", "list"]).contains("limited until"));
+    let out = cli.ok(&["account", "clear-limit", "claude", "work"]);
+    assert!(out.contains("cleared the limit on claude:work"), "{out}");
+    assert!(!cli.ok(&["account", "list"]).contains("limited until"));
+    assert!(
+        cli.ok(&["account", "clear-limit", "claude", "work"])
+            .contains("was not limited")
+    );
+    assert!(
+        cli.ok(&["account", "clear-limit", "claude", "default"])
+            .contains("was not limited")
+    );
+    assert!(
+        cli.fails(&["account", "clear-limit", "claude", "ghost"])
+            .contains("no claude account")
+    );
     assert!(
         cli.fails(&["account", "disable", "claude", "default"])
             .contains("cannot be disabled")

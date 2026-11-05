@@ -730,6 +730,14 @@ pub enum AccountCommand {
         /// Account name.
         name: String,
     },
+    /// Clear an account's limited mark, so it takes runs again now instead
+    /// of at the reset time Hashi was told.
+    ClearLimit {
+        /// Agent the account is for.
+        agent: AgentKind,
+        /// Account name (`default` for the owner's own login).
+        name: String,
+    },
     /// Delete an account, its directory and its key, and take it off every
     /// token and invite.
     Remove {
@@ -1000,6 +1008,13 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
         AccountCommand::Enable { agent, name } => {
             acct::ops::set_disabled(store, agent, &name, false, "cli")?;
             println!("enabled {agent}:{name}");
+        }
+        AccountCommand::ClearLimit { agent, name } => {
+            if acct::ops::clear_limit(store, agent, &name, "cli")? {
+                println!("cleared the limit on {agent}:{name}");
+            } else {
+                println!("{agent}:{name} was not limited");
+            }
         }
         AccountCommand::Remove { agent, name, yes } => {
             let using = acct::ops::check_removable(store, agent, &name)?;

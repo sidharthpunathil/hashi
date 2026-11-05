@@ -1551,6 +1551,43 @@ fn a_key_account_is_added_with_its_key_masked_and_never_rendered() {
 }
 
 #[test]
+fn c_in_the_accounts_popup_clears_a_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    let store = &app.state.store;
+    store
+        .add_account(
+            AgentKind::Claude,
+            "work",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    store
+        .mark_account_limited(AgentKind::Claude, "work", hashi::util::now_ms() + 3_600_000)
+        .unwrap();
+    select_action(&mut app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 160, 44).contains("clear limit"));
+    app.on_key(key(KeyCode::Char('c')));
+    let a = app
+        .state
+        .store
+        .get_account(AgentKind::Claude, "work")
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.limited_until, None);
+    assert!(matches!(app.popup, Some(Popup::Accounts { .. })));
+    assert!(
+        app.state
+            .store
+            .list_audit(5)
+            .unwrap()
+            .iter()
+            .any(|e| e.action == "account.clear-limit" && e.actor == "dashboard")
+    );
+}
+
+#[test]
 fn the_account_form_checks_the_name_and_the_key() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = App::new(state_at(dir.path()), None, false);

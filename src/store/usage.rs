@@ -104,6 +104,10 @@ impl Store {
     pub fn replace_usage(&self, agent: AgentKind, name: &str, windows: &[Window]) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        // A poll that finished after the account was removed.
+        if !super::accounts::account_known(&tx, agent, name)? {
+            return Ok(());
+        }
         tx.execute(
             "DELETE FROM usage WHERE agent = ?1 AND account = ?2",
             params![agent.as_str(), name],
@@ -123,6 +127,10 @@ impl Store {
     pub fn record_usage(&self, agent: AgentKind, name: &str, windows: &[Window]) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        // A run that finished after the account was removed.
+        if !super::accounts::account_known(&tx, agent, name)? {
+            return Ok(());
+        }
         for w in windows {
             insert_window(&tx, agent, name, w)?;
         }
@@ -182,7 +190,8 @@ impl Store {
     }
 
     /// Records a read of an account's usage. A successful read clears the
-    /// note; `plan` is kept when the read gives none.
+    /// note; `plan` is kept when the read gives none. Nothing is recorded
+    /// for an account that no longer exists.
     ///
     /// # Errors
     ///
@@ -198,7 +207,9 @@ impl Store {
         let now = now_ms();
         self.conn()?.execute(
             "INSERT INTO usage_polls (agent, account, attempted_at, ok_at, plan, note)
-             VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN ?3 END, ?5, ?6)
+             SELECT ?1, ?2, ?3, CASE WHEN ?4 THEN ?3 END, ?5, ?6
+             WHERE ?2 = 'default'
+                 OR EXISTS (SELECT 1 FROM accounts WHERE agent = ?1 AND name = ?2)
              ON CONFLICT(agent, account) DO UPDATE SET attempted_at = ?3,
                  ok_at = CASE WHEN ?4 THEN ?3 ELSE ok_at END,
                  plan = COALESCE(?5, plan), note = ?6",
@@ -250,18 +261,31 @@ impl Store {
     }
 
     /// Marks an account limited until `until_ms` without recording a use,
-    /// for a poll that says the limit is reached.
+    /// for a poll that says the limit is reached. The time is capped at
+    /// [`crate::agent::limit::MAX_RESET`] from now, and replaces the mark
+    /// already there: a fresh poll knows better than an older reading, so a
+    /// far-future time once seen cannot keep the account limited forever.
+    /// An account other than `default` without a row is left alone.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn set_account_limited(&self, agent: AgentKind, name: &str, until_ms: i64) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT INTO accounts (agent, name, kind, limited_until, created_at)
-             VALUES (?1, ?2, 'default', ?3, ?4)
-             ON CONFLICT(agent, name) DO UPDATE SET limited_until = MAX(COALESCE(limited_until, 0), ?3)",
-            params![agent.as_str(), name, until_ms, now_ms()],
+        let now = now_ms();
+        let until = super::accounts::cap_limit(until_ms, now);
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE accounts SET limited_until = ?3 WHERE agent = ?1 AND name = ?2",
+            params![agent.as_str(), name, until],
         )?;
+        if n == 0 && name == crate::accounts::DEFAULT {
+            conn.execute(
+                "INSERT INTO accounts (agent, name, kind, limited_until, created_at)
+                 VALUES (?1, ?2, 'default', ?3, ?4)
+                 ON CONFLICT(agent, name) DO UPDATE SET limited_until = ?3",
+                params![agent.as_str(), name, until, now],
+            )?;
+        }
         Ok(())
     }
 
@@ -389,9 +413,21 @@ mod tests {
         Window::new(key, key, used, resets_at, Some(300), source)
     }
 
+    /// A store with the Claude login account `work`.
+    fn with_work() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        s.add_account(
+            AgentKind::Claude,
+            "work",
+            crate::accounts::AccountKind::Login,
+        )
+        .unwrap();
+        s
+    }
+
     #[test]
     fn polls_replace_and_runs_add() {
-        let s = Store::open_in_memory().unwrap();
+        let s = with_work();
         let now = now_ms();
         let later = Some(now + 3_600_000);
         s.replace_usage(
@@ -434,7 +470,7 @@ mod tests {
 
     #[test]
     fn error_windows_go_when_a_run_succeeds() {
-        let s = Store::open_in_memory().unwrap();
+        let s = with_work();
         let now = now_ms();
         s.record_usage(
             AgentKind::Claude,
@@ -481,10 +517,10 @@ mod tests {
             .unwrap();
         let a = s.get_account(AgentKind::Codex, "team").unwrap().unwrap();
         assert_eq!((a.limited_until, a.last_used), (Some(until), None));
-        // An earlier mark never shortens a later one.
+        // A fresh poll replaces the mark, earlier or not.
         s.set_account_limited(AgentKind::Codex, "team", until - 30_000)
             .unwrap();
         let a = s.get_account(AgentKind::Codex, "team").unwrap().unwrap();
-        assert_eq!(a.limited_until, Some(until));
+        assert_eq!(a.limited_until, Some(until - 30_000));
     }
 }

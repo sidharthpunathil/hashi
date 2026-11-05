@@ -964,6 +964,18 @@ impl App {
                     Err(e) => self.notify(format!("{e:#}")),
                 }
             }
+            (KeyCode::Char('c'), Some(a)) => {
+                match acct::ops::clear_limit(&self.state.store, a.agent, &a.name, ACTOR) {
+                    Ok(true) => {
+                        self.state
+                            .bus
+                            .log(format!("account limit cleared: {}:{}", a.agent, a.name));
+                        self.notify(format!("cleared the limit on {}:{}", a.agent, a.name));
+                    }
+                    Ok(false) => self.notify(format!("{}:{} was not limited", a.agent, a.name)),
+                    Err(e) => self.notify(format!("{e:#}")),
+                }
+            }
             (KeyCode::Char('x'), Some(a)) => {
                 match acct::ops::check_removable(&self.state.store, a.agent, &a.name) {
                     Ok(tokens) => {

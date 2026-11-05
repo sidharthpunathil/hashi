@@ -1,7 +1,8 @@
 //! Hourly housekeeping while the server runs: prunes finished requests past
 //! retention (never the current month), old audit records and spent invites,
-//! and access requests decided or expired 30 days ago, then returns free
-//! pages to the file system.
+//! and access requests decided or expired 30 days ago, and the rows of
+//! accounts that no longer exist, then returns free pages to the file
+//! system.
 //!
 //! Startup already prunes once, so the first pass runs an hour after start.
 
@@ -25,6 +26,13 @@ pub const INTERVAL: Duration = Duration::from_secs(3_600);
 /// Fails on database errors. Pruning is kept even if compacting fails.
 pub fn run_once(store: &Store, retention_days: u32) -> Result<Pruned, StoreError> {
     let pruned = store.prune_all(retention_days)?;
+    // Usage, reads and conversations of accounts removed while a run or a
+    // poll on them was still going.
+    match store.prune_orphan_account_rows() {
+        Ok(0) => {}
+        Ok(n) => info!(rows = n, "maintenance removed rows of removed accounts"),
+        Err(e) => warn!(error = %e, "could not remove rows of removed accounts"),
+    }
     if let Err(e) = store.compact() {
         warn!(error = %e, "could not compact the database");
     }
