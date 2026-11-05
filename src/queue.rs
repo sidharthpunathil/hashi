@@ -3,6 +3,10 @@
 //! Requests live in SQLite, so a crash never loses work: on startup anything
 //! left `running` is re-queued. Workers drain their agent's queue, then park
 //! on a [`Notify`] until the API enqueues more (with a periodic fallback poll).
+//!
+//! Before claiming anything, a worker takes a slot from the shared
+//! [`ResourceGuard`] and checks memory and disk. Held work stays `queued`, so
+//! it keeps its place in line and runs once the machine has room.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,6 +20,7 @@ use tracing::{info, warn};
 
 use crate::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
 use crate::events::{Bus, Event};
+use crate::guard::ResourceGuard;
 use crate::store::{Request, Store};
 use crate::util::{now_ms, truncate};
 
@@ -63,12 +68,14 @@ impl Dispatcher {
     }
 }
 
-/// Spawns `concurrency` workers per agent. They stop when `cancel` fires.
+/// Spawns `concurrency` workers per agent, all sharing `guard`. They stop
+/// when `cancel` fires.
 pub fn spawn_workers(
     store: Arc<Store>,
     bus: Bus,
     dispatcher: &Dispatcher,
     cfg: Arc<QueueConfig>,
+    guard: Arc<ResourceGuard>,
     cancel: CancellationToken,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
@@ -79,6 +86,7 @@ pub fn spawn_workers(
                 store: Arc::clone(&store),
                 bus: bus.clone(),
                 cfg: Arc::clone(&cfg),
+                guard: Arc::clone(&guard),
                 notify: dispatcher.handle(agent),
             };
             set.spawn(worker.run(cancel.clone()));
@@ -92,25 +100,53 @@ struct Worker {
     store: Arc<Store>,
     bus: Bus,
     cfg: Arc<QueueConfig>,
+    guard: Arc<ResourceGuard>,
     notify: Arc<Notify>,
 }
 
 impl Worker {
     async fn run(self, cancel: CancellationToken) {
         loop {
-            match self.store.claim_next(self.agent) {
-                Ok(Some(req)) => {
-                    tokio::select! {
-                        () = cancel.cancelled() => {
-                            // Leave it `running`; recovery re-queues it on next start.
-                            return;
+            let has_work = self.store.has_queued(self.agent).unwrap_or_else(|e| {
+                warn!(agent = %self.agent, error = %e, "failed to check the queue");
+                false
+            });
+            if has_work {
+                // A slot first, so held requests are never claimed.
+                let permit = tokio::select! {
+                    () = cancel.cancelled() => return,
+                    p = self.guard.acquire() => p,
+                };
+                if let Some(mut permit) = permit {
+                    if let Err(hold) = self.guard.check() {
+                        drop(permit);
+                        self.guard.hold(&hold);
+                        tokio::select! {
+                            () = cancel.cancelled() => return,
+                            () = tokio::time::sleep(self.guard.config().retry_after) => {}
                         }
-                        () = self.process(req) => {}
+                        continue;
                     }
-                    continue;
+                    self.guard.clear_hold();
+                    match self.store.claim_next(self.agent) {
+                        Ok(Some(req)) => {
+                            self.guard.start(&mut permit);
+                            tokio::select! {
+                                () = cancel.cancelled() => {
+                                    // Dropping the run kills its process tree. Leave
+                                    // the request `running`; recovery re-queues it on
+                                    // the next start.
+                                    return;
+                                }
+                                () = self.process(req) => {}
+                            }
+                            continue;
+                        }
+                        // Another worker for this agent got there first.
+                        Ok(None) => {}
+                        Err(e) => warn!(agent = %self.agent, error = %e, "failed to claim work"),
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => warn!(agent = %self.agent, error = %e, "failed to claim work"),
             }
             tokio::select! {
                 () = cancel.cancelled() => return,
@@ -197,7 +233,10 @@ impl Worker {
             model: req.model.as_deref(),
         };
 
-        let out = agent::execute(self.agent, cfg, inv, &workdir, self.cfg.limits)
+        let mut limits = self.cfg.limits.clone();
+        limits.nice = self.guard.config().nice;
+        limits.memory = Some(self.guard.watch());
+        let out = agent::execute(self.agent, cfg, inv, &workdir, limits)
             .await
             .map_err(|e| e.to_string())?;
 

@@ -63,6 +63,9 @@ async fn harness() -> Harness {
         agents,
         default_agent: AgentKind::Cursor,
         concurrency: 1,
+        resources: hashi::guard::ResourceSettings::with_probe(std::sync::Arc::new(
+            hashi::guard::ManualProbe::roomy(),
+        )),
         limits: Limits {
             timeout: Duration::from_secs(10),
             ..Limits::default()

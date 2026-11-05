@@ -80,6 +80,27 @@ pub fn human_duration(d: Duration) -> String {
     }
 }
 
+/// Human friendly byte count in binary units: `512 B`, `640 KiB`, `512 MiB`, `3.2 GiB`.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn human_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    const TIB: u64 = GIB * 1024;
+    if n < KIB {
+        format!("{n} B")
+    } else if n < MIB {
+        format!("{} KiB", n / KIB)
+    } else if n < GIB {
+        format!("{} MiB", n / MIB)
+    } else if n < TIB {
+        format!("{:.1} GiB", n as f64 / GIB as f64)
+    } else {
+        format!("{:.1} TiB", n as f64 / TIB as f64)
+    }
+}
+
 /// Human friendly age of a millisecond timestamp relative to now: `4s`, `3m`, `2h`, `5d`.
 #[must_use]
 pub fn human_age(ms: i64) -> String {
@@ -119,6 +140,14 @@ mod tests {
         assert_eq!(human_duration(Duration::from_millis(12_400)), "12.4s");
         assert_eq!(human_duration(Duration::from_secs(185)), "3m 05s");
         assert_eq!(human_duration(Duration::from_secs(7_800)), "2h 10m");
+    }
+
+    #[test]
+    fn human_bytes_picks_binary_units() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(640 * 1024), "640 KiB");
+        assert_eq!(human_bytes(512 * 1024 * 1024), "512 MiB");
+        assert_eq!(human_bytes(16 * 1024 * 1024 * 1024 / 5), "3.2 GiB");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use super::theme::{self, Rgb};
 use crate::agent::AgentKind;
 use crate::api::AppState;
 use crate::events::Event;
+use crate::guard::ResourceSnapshot;
 use crate::store::{Invite, NewInvite, NewToken, Request, Revoke, Stats, TokenUsage};
 use crate::token::{Limits, Role, SessionMode, Token, TokenStatus};
 use crate::util::{now_ms, one_line, truncate};
@@ -392,6 +393,8 @@ pub struct App {
     pub usage: HashMap<String, TokenUsage>,
     /// Invites not yet claimed or expired, newest first.
     pub invites: Vec<Invite>,
+    /// Memory, run slots and admission state, from the resource guard.
+    pub resources: ResourceSnapshot,
     /// Activity feed, newest first.
     pub feed: VecDeque<FeedItem>,
     /// Selection in the requests table.
@@ -434,6 +437,7 @@ impl App {
             tokens: Vec::new(),
             usage: HashMap::new(),
             invites: Vec::new(),
+            resources: ResourceSnapshot::default(),
             feed: VecDeque::new(),
             requests_table: TableState::default().with_selected(Some(0)),
             tokens_table: TableState::default().with_selected(Some(0)),
@@ -504,6 +508,7 @@ impl App {
             }
             Err(e) => self.notify(format!("refresh failed: {e}")),
         }
+        self.resources = self.state.guard.snapshot();
         self.last_refresh = Some(Instant::now());
     }
 
@@ -579,6 +584,12 @@ impl App {
                     short(&id),
                     truncate(&one_line(error.as_deref().unwrap_or("unknown error")), 120)
                 ),
+            },
+            Event::Held { reason, detail } => FeedItem {
+                at: now_ms(),
+                glyph: "!",
+                color: theme::AMBER,
+                text: format!("held: {reason}, queued work waits ({detail})"),
             },
             Event::TunnelReady(url) => {
                 self.tunnel = TunnelState::Up(url.clone());

@@ -548,6 +548,19 @@ impl Store {
         Ok(())
     }
 
+    /// Whether `agent` has any queued request.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn has_queued(&self, agent: AgentKind) -> Result<bool> {
+        Ok(self.conn()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE status = 'queued' AND agent = ?1)",
+            [agent.as_str()],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Atomically moves the oldest queued request for `agent` to `running`.
     ///
     /// # Errors

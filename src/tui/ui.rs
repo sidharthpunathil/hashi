@@ -14,9 +14,10 @@ use ratatui::widgets::{
 use super::app::{App, FeedItem, Popup, ShareForm, Tab, TokenForm, TokensFocus, TunnelState};
 use super::theme::{self as t, Rgb};
 use crate::agent::AgentKind;
+use crate::guard::HoldReason;
 use crate::store::{Request, RequestStatus};
 use crate::token::{Role, SessionMode, Token, TokenStatus};
-use crate::util::{human_age, human_duration, one_line, truncate};
+use crate::util::{human_age, human_bytes, human_duration, one_line, truncate};
 
 const PANEL: Rgb = Rgb(22, 16, 42);
 const SELECT: Rgb = Rgb(46, 32, 92);
@@ -331,14 +332,19 @@ fn render_overview(app: &App, frame: &mut Frame, area: Rect) {
     let rows = shown.len().div_ceil(3).max(1);
     let card_h: u16 = if rows == 1 { 9 } else { 7 };
     let rows_u16 = u16::try_from(rows).unwrap_or(1);
-    let [tiles, agents, bottom] = Layout::vertical([
+    let [tiles, memory, agents, bottom] = Layout::vertical([
         Constraint::Length(4),
+        Constraint::Length(1),
         Constraint::Length(card_h * rows_u16),
         Constraint::Fill(1),
     ])
     .areas(area);
 
     render_tiles(app, frame, tiles);
+    frame.render_widget(
+        Paragraph::new(memory_line(app, usize::from(memory.width))),
+        memory,
+    );
 
     let per_row = shown.len().div_ceil(rows).max(1);
     let row_areas = Layout::vertical(vec![Constraint::Length(card_h); rows]).split(agents);
@@ -420,6 +426,57 @@ fn render_tiles(app: &App, frame: &mut Frame, area: Rect) {
         ];
         frame.render_widget(Paragraph::new(text).block(block), *area);
     }
+}
+
+/// One line: a memory gauge, used / total, run slots and why work is held.
+fn memory_line(app: &App, width: usize) -> Line<'static> {
+    let r = &app.resources;
+    let mut spans = vec![Span::styled(" memory ", t::muted())];
+    match (r.memory_total, r.memory_available) {
+        (Some(total), Some(avail)) if total > 0 => {
+            let used = total.saturating_sub(avail);
+            let bar = if width >= 100 { 20 } else { 10 };
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let filled = ((used as f64 / total as f64) * bar as f64).round() as usize;
+            let filled = filled.min(bar);
+            let color = if r.held == Some(HoldReason::Memory) || avail <= r.reserve {
+                t::ROSE
+            } else if avail <= r.reserve.saturating_mul(3) / 2 {
+                t::AMBER
+            } else {
+                t::MINT
+            };
+            spans.push(Span::styled("━".repeat(filled), t::fg(color)));
+            spans.push(Span::styled("─".repeat(bar - filled), t::fg(t::DUSK)));
+            spans.push(Span::styled(
+                format!(" {} / {}", human_bytes(used), human_bytes(total)),
+                plain(),
+            ));
+        }
+        _ => spans.push(Span::styled("unknown", t::muted())),
+    }
+    spans.push(Span::styled("   running ", t::muted()));
+    spans.push(Span::styled(
+        format!("{}/{}", r.running, r.max_running),
+        if r.max_running > 0 && r.running >= r.max_running {
+            t::bold(t::AMBER)
+        } else {
+            strong()
+        },
+    ));
+    spans.push(Span::styled(
+        format!("   reserve {}", human_bytes(r.reserve)),
+        t::muted(),
+    ));
+    if let Some(reason) = r.held {
+        spans.push(Span::styled("   ", plain()));
+        spans.push(Span::styled(format!("held: {reason}"), t::bold(t::ROSE)));
+    }
+    Line::from(spans)
 }
 
 fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {

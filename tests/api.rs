@@ -9,10 +9,12 @@
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hashi::agent::{AgentConfig, AgentKind, Limits};
 use hashi::events::Bus;
+use hashi::guard::{GIB, ManualProbe, Probe, ResourceSettings, Size};
 use hashi::server::{self, Running, ServerConfig};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -86,6 +88,9 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         agents,
         default_agent: AgentKind::Claude,
         concurrency: 1,
+        resources: hashi::guard::ResourceSettings::with_probe(std::sync::Arc::new(
+            hashi::guard::ManualProbe::roomy(),
+        )),
         limits: Limits {
             timeout: Duration::from_secs(10),
             ..Limits::default()
@@ -913,5 +918,239 @@ printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n'
     );
     assert_ne!(a, b, "agents must not share a working directory");
     assert!(a.ends_with("/claude") && b.ends_with("/codex"), "{a} {b}");
+    h.running.shutdown().await;
+}
+
+// ── resource guard ─────────────────────────────────────────────────────────
+
+fn guarded(
+    probe: &Arc<ManualProbe>,
+    tweak: impl FnOnce(&mut ResourceSettings),
+) -> ResourceSettings {
+    let p: Arc<dyn Probe> = probe.clone();
+    let mut s = ResourceSettings {
+        retry_after: Some(Duration::from_millis(100)),
+        sample_every: Some(Duration::from_millis(100)),
+        ..ResourceSettings::with_probe(p)
+    };
+    tweak(&mut s);
+    s
+}
+
+#[tokio::test]
+async fn low_memory_holds_work_in_the_queue_until_it_frees() {
+    // A 16 GiB machine keeps 3.2 GiB free; only 1 GiB is available.
+    let probe = Arc::new(ManualProbe::new(16 * GIB, GIB));
+    let settings = guarded(&probe, |_| {});
+    let h = harness_with(|c| c.resources = settings).await;
+    let token = h.user_token(json!({})).await;
+    let (status, v) = h.post("/v1/ask", &token, json!({"message": "held"})).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+    let poll = v["poll"].as_str().unwrap().to_owned();
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (_, v) = h.get(&poll, Some(&token)).await;
+    assert_eq!(v["status"], "queued", "{v}");
+    assert_eq!(v["position"], 1, "{v}");
+    let (_, stats) = h.get("/v1/stats", Some(&h.admin)).await;
+    assert_eq!(stats["resources"]["held"], "memory", "{stats}");
+    assert_eq!(stats["resources"]["running"], 0, "{stats}");
+
+    probe.set_available(10 * GIB);
+    let (status, v) = h.get(&format!("{poll}?wait=10"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "completed", "{v}");
+    let (_, stats) = h.get("/v1/stats", Some(&h.admin)).await;
+    assert!(stats["resources"]["held"].is_null(), "{stats}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn low_disk_holds_work_too() {
+    let probe = Arc::new(ManualProbe::roomy());
+    probe.set_disk_free(100 * 1024 * 1024);
+    let settings = guarded(&probe, |_| {});
+    let h = harness_with(|c| c.resources = settings).await;
+    let token = h.user_token(json!({})).await;
+    let (_, v) = h.post("/v1/ask", &token, json!({"message": "held"})).await;
+    let poll = v["poll"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (_, v) = h.get(&poll, Some(&token)).await;
+    assert_eq!(v["status"], "queued", "{v}");
+    let (_, stats) = h.get("/v1/stats", Some(&h.admin)).await;
+    assert_eq!(stats["resources"]["held"], "disk", "{stats}");
+    probe.set_disk_free(100 * GIB);
+    let (_, v) = h.get(&format!("{poll}?wait=10"), Some(&token)).await;
+    assert_eq!(v["status"], "completed", "{v}");
+    h.running.shutdown().await;
+}
+
+/// Runs a slow Claude prompt and a quick Codex prompt together and reports
+/// whether their run intervals overlapped.
+async fn claude_and_codex_overlap(max_running: usize) -> bool {
+    let probe = Arc::new(ManualProbe::roomy());
+    let settings = guarded(&probe, |s| s.max_running = Some(max_running));
+    let h = harness_with(|c| c.resources = settings).await;
+    let token = h.user_token(json!({})).await;
+    let slow = h.post(
+        "/v1/ask",
+        &token,
+        json!({"message": "slow one", "wait": 15}),
+    );
+    let quick = h.post(
+        "/v1/ask",
+        &token,
+        json!({"message": "quick", "agent": "codex", "wait": 15}),
+    );
+    let ((_, a), (_, b)) = tokio::join!(slow, quick);
+    assert_eq!(
+        (a["status"].as_str(), b["status"].as_str()),
+        (Some("completed"), Some("completed"))
+    );
+    let store = &h.running.state.store;
+    let a = store
+        .get_request(a["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let b = store
+        .get_request(b["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let span = |r: &hashi::store::Request| (r.started_at.unwrap(), r.completed_at.unwrap());
+    let ((a0, a1), (b0, b1)) = (span(&a), span(&b));
+    h.running.shutdown().await;
+    a0 < b1 && b0 < a1
+}
+
+#[tokio::test]
+async fn max_running_one_serialises_agents() {
+    assert!(
+        !claude_and_codex_overlap(1).await,
+        "runs overlapped with max_running = 1"
+    );
+}
+
+#[tokio::test]
+async fn max_running_two_lets_agents_overlap() {
+    assert!(
+        claude_and_codex_overlap(2).await,
+        "runs did not overlap with max_running = 2"
+    );
+}
+
+#[tokio::test]
+async fn watchdog_stops_a_run_over_its_memory_limit() {
+    let probe = Arc::new(ManualProbe::roomy());
+    probe.set_tree_memory(Some(5 * GIB));
+    let settings = guarded(&probe, |s| {
+        s.run_memory_limit = Some(Size::Bytes(2 * GIB));
+    });
+    let h = harness_with(|c| c.resources = settings).await;
+    let token = h.user_token(json!({})).await;
+    let started = std::time::Instant::now();
+    let (_, v) = h
+        .post(
+            "/v1/ask",
+            &token,
+            json!({"message": "slow one", "wait": 10}),
+        )
+        .await;
+    assert_eq!(v["status"], "failed", "{v}");
+    assert_eq!(
+        v["error"], "run exceeded its memory limit (5.0 GiB of 2.0 GiB)",
+        "{v}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the run was not stopped early"
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn timeout_kills_the_whole_process_tree() {
+    let mut pidfile = PathBuf::new();
+    let h = harness_with(|c| {
+        let dir = c.home.parent().unwrap().join("orphan");
+        std::fs::create_dir_all(&dir).unwrap();
+        pidfile = dir.join("grandchild.pid");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Fake Claude)'; exit 0; fi\n\
+             sleep 600 >/dev/null 2>&1 &\n\
+             echo $! > '{}'\n\
+             sleep 600\n",
+            pidfile.display()
+        );
+        if let Some(claude) = c.agents.get_mut(&AgentKind::Claude) {
+            claude.bin = write_script(&dir, "claude", &script);
+        }
+        c.limits.timeout = Duration::from_secs(1);
+    })
+    .await;
+    let token = h.user_token(json!({})).await;
+    let (_, v) = h
+        .post("/v1/ask", &token, json!({"message": "spawn", "wait": 10}))
+        .await;
+    assert_eq!(v["status"], "failed", "{v}");
+    assert!(v["error"].as_str().unwrap().contains("timed out"), "{v}");
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    let pid = pid.trim();
+    let mut gone = false;
+    for _ in 0..50 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !alive {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !gone {
+        // Do not leave a stray process behind on the test machine.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
+    }
+    assert!(gone, "grandchild {pid} outlived its run");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn machine_figures_are_for_admins_only() {
+    let h = harness().await;
+    let (status, v) = h.get("/v1/stats", Some(&h.admin)).await;
+    assert_eq!(status, StatusCode::OK);
+    let r = &v["resources"];
+    for key in [
+        "memoryTotal",
+        "memoryAvailable",
+        "reserve",
+        "running",
+        "maxRunning",
+        "held",
+        "diskFree",
+    ] {
+        assert!(r.get(key).is_some(), "resources.{key} missing: {v}");
+    }
+    assert_eq!(r["memoryTotal"], 64 * GIB);
+
+    let token = h.user_token(json!({})).await;
+    assert_eq!(
+        h.get("/v1/stats", Some(&token)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, status) = h.get("/v1/status", None).await;
+    let (_, me) = h.get("/v1/me", Some(&token)).await;
+    for body in [status, me] {
+        let text = body.to_string();
+        assert!(body.get("resources").is_none(), "{text}");
+        for needle in ["memory", "Memory", "diskFree", "reserve"] {
+            assert!(!text.contains(needle), "`{needle}` leaked: {text}");
+        }
+    }
     h.running.shutdown().await;
 }

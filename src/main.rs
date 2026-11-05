@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use hashi::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
 use hashi::diagnostics::{self, RedactingMakeWriter};
 use hashi::events::{Bus, Event};
+use hashi::guard::{ResourceSettings, Size, parse_nonzero_size, parse_size};
 use hashi::server::{self, ServerConfig};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -168,10 +169,32 @@ struct ServeArgs {
     /// Agent used when a request does not name one.
     #[arg(long, default_value = "claude", env = "HASHI_DEFAULT_AGENT")]
     default_agent: AgentKind,
-    /// Concurrent runs per agent.
+    /// Concurrent runs per agent (the total is still capped by --max-running).
     #[arg(long, default_value_t = 1, env = "HASHI_CONCURRENCY",
           value_parser = clap::value_parser!(u16).range(1..=16))]
     concurrency: u16,
+    /// Most agent runs at once, across all agents.
+    /// Default: total memory in GiB / 8, between 1 and the CPU count.
+    #[arg(long, env = "HASHI_MAX_RUNNING",
+          value_parser = clap::value_parser!(u16).range(1..=256))]
+    max_running: Option<u16>,
+    /// Memory kept free for you; new runs wait while less would be left
+    /// (for example 4G or 20%; 0 disables). Default: the larger of 2G and 20%.
+    #[arg(long, env = "HASHI_MEMORY_RESERVE", value_parser = parse_size)]
+    memory_reserve: Option<Size>,
+    /// Memory one run's whole process tree may use before it is stopped
+    /// (for example 4G or 40%). Default: the larger of 2G and 40%.
+    #[arg(long, env = "HASHI_RUN_MEMORY_LIMIT", value_parser = parse_nonzero_size)]
+    run_memory_limit: Option<Size>,
+    /// Free disk space kept under the Hashi home; new runs wait below it
+    /// (for example 1G or 5%; 0 disables).
+    #[arg(long, default_value = "1G", env = "HASHI_DISK_FLOOR", value_parser = parse_size)]
+    disk_floor: Size,
+    /// Niceness for agent runs, so your own work wins (0 to 19; 0 disables).
+    /// On Windows any value above 0 means below-normal priority.
+    #[arg(long, default_value_t = hashi::guard::DEFAULT_NICE, env = "HASHI_NICE",
+          value_parser = clap::value_parser!(u8).range(0..=19))]
+    nice: u8,
     /// Per-request time limit in seconds.
     #[arg(long, default_value_t = 300, env = "HASHI_TIMEOUT")]
     timeout: u64,
@@ -304,6 +327,14 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         agents: args.agents.configs(),
         default_agent: args.default_agent,
         concurrency: usize::from(args.concurrency),
+        resources: ResourceSettings {
+            max_running: args.max_running.map(usize::from),
+            memory_reserve: args.memory_reserve,
+            run_memory_limit: args.run_memory_limit,
+            disk_floor: Some(args.disk_floor),
+            nice: Some(args.nice),
+            ..ResourceSettings::default()
+        },
         limits: Limits {
             timeout: Duration::from_secs(args.timeout),
             ..Limits::default()
@@ -398,6 +429,7 @@ fn print_event(ev: &Event) {
                 error.as_deref().unwrap_or("unknown error")
             );
         }
+        Event::Held { reason, detail } => println!("  ! held     {reason}: {detail}"),
         Event::TunnelReady(url) => println!("  ⌁ public   {url}"),
         Event::TunnelDown(why) => println!("  ! tunnel   {why}"),
         Event::Log(msg) => println!("  · {msg}"),
@@ -427,7 +459,12 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
         timeout: Duration::from_secs(args.timeout),
         ..Limits::default()
     };
-    let out = agent::execute(args.agent, cfg, inv, &workdir, limits).await?;
+    // The agent runs in its own process group, so the terminal's Ctrl-C does
+    // not reach it. Dropping the run on Ctrl-C kills its whole tree instead.
+    let out = tokio::select! {
+        out = agent::execute(args.agent, cfg, inv, &workdir, limits) => out?,
+        _ = tokio::signal::ctrl_c() => bail!("interrupted"),
+    };
     println!("{}", out.text);
     if let Some(u) = out.usage {
         eprintln!(

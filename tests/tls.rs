@@ -46,6 +46,9 @@ async fn start() -> Tls {
         agents,
         default_agent: AgentKind::Claude,
         concurrency: 1,
+        resources: hashi::guard::ResourceSettings::with_probe(std::sync::Arc::new(
+            hashi::guard::ManualProbe::roomy(),
+        )),
         limits: Limits::default(),
         rate_limit: 0,
         queue_limit: 10,

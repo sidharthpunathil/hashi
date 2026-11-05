@@ -215,6 +215,18 @@ pub enum AgentError {
     /// The run produced more output than allowed and was killed.
     #[error("agent output exceeded {0} bytes")]
     OutputTooLarge(usize),
+    /// The run's process tree used more memory than allowed and was killed.
+    #[error(
+        "run exceeded its memory limit ({} of {})",
+        crate::util::human_bytes(*.used),
+        crate::util::human_bytes(*.limit)
+    )]
+    MemoryLimit {
+        /// Measured resident memory of the whole tree, in bytes.
+        used: u64,
+        /// Allowed bytes.
+        limit: u64,
+    },
     /// The agent exited unsuccessfully.
     #[error("agent exited with {status}: {detail}")]
     Exit {

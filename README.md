@@ -50,7 +50,7 @@ curl http://127.0.0.1:7878/v1/ask \
 
 | | |
 |---|---|
-| **Six agents, one API** | Claude Code, Codex, Gemini CLI, opencode, Qwen Code and Cursor CLI. Send `"agent": "gemini"` and so on. Each agent has its own worker queue, so a long Claude run never blocks a Codex prompt. |
+| **Six agents, one API** | Claude Code, Codex, Gemini CLI, opencode, Qwen Code and Cursor CLI. Send `"agent": "gemini"` and so on. Each agent has its own worker queue, so a long Claude run never blocks a Codex prompt (within the machine-wide `--max-running` cap). |
 | **Tokens you can hand out** | Create a token per app. Scope it to one agent, make it expire, revoke it from the dashboard. Only a SHA-256 hash is stored. |
 | **Conversations that continue** | A `stateful` token resumes its own Claude or Codex session on every prompt. `DELETE /v1/session/{agent}` starts over. |
 | **Answers in one request** | Pass `"wait": 60` to hold the request open until the agent finishes. Or take the `202`, then poll. |
@@ -233,7 +233,7 @@ Every endpoint except `/healthz` and `/v1/status` needs `Authorization: Bearer <
 | `POST` | `/v1/ask` | token | Queue a prompt |
 | `GET` | `/v1/ask/{id}` | token | Read a result. Add `?wait=30` to long-poll |
 | `DELETE` | `/v1/session/{agent}` | token | Forget this token's conversation with an agent |
-| `GET` | `/v1/stats` | admin | Request counters |
+| `GET` | `/v1/stats` | admin | Request counters, plus memory, disk and run slots under `resources` |
 | `GET` | `/v1/tokens` | admin | List tokens |
 | `POST` | `/v1/tokens` | admin | Create a token |
 | `PATCH` | `/v1/tokens/{id}` | admin | Pause, resume, extend, rename or set limits |
@@ -352,6 +352,7 @@ Anyone holding a token can make your agent run on your computer with your accoun
 - **Sandboxed by default.** Codex runs with `sandbox_mode="read-only"`. Claude Code runs in print mode with its normal permission rules and a turn limit. Loosen these deliberately with `--codex-sandbox` and `--claude-permission-mode`.
 - **Isolated workspaces.** Every token gets its own working directory for each agent, under `~/.hashi/workspaces/<token>/<agent>/`. One agent with write access can never plant project config (such as hook definitions in `.claude/settings.json` or `.gemini/settings.json`) that a different agent would load.
 - **Limits.** Bodies over 64 KB and prompts over 32 KB are refused. Each run is killed after its timeout (default 5 minutes) or once it prints more than 10 MB. There is a per-token rate limit (default 60 requests per minute) and a global queue cap.
+- **Protecting your machine.** People you share with decide when agents start, so Hashi keeps your computer usable whatever a token does. Runs across all agents are capped (`--max-running`, from your memory and CPU count). Before a run starts, Hashi checks that it would still leave your memory reserve free and that the disk under `~/.hashi` is above its floor; if not, the request waits in the queue, keeping its place, and the dashboard shows "held: low memory" or "held: disk". While a run is active its whole process tree (the agent plus every shell or server it spawns) is measured every 2 seconds and stopped above `--run-memory-limit`, failing that request with the measured and allowed sizes. Each run gets its own process group on Unix (the process tree on Windows), so a timeout, memory stop, output overflow or shutdown kills everything it started, and agents run at a lower priority (`--nice 10`). Memory and disk figures appear only in the dashboard and the admin `GET /v1/stats`, never on `/v1/status`, `/v1/me` or MCP.
 - **Private data.** `~/.hashi` is created `0700` and the database `0600`.
 - **Loopback first.** Binding to a non-loopback address without TLS prints a warning. Tunnels and HTTPS are opt-in.
 - **Sharing is bounded.** Invite links are single-use, hashed and short-lived, and create `user` tokens only. Usage caps and pause apply to HTTP and MCP alike, and every change is audited.
@@ -378,6 +379,11 @@ Every flag also reads an environment variable.
 | | `HASHI_REDUCED_MOTION` | off. Set to `1` to freeze dashboard animation |
 | `--default-agent` | `HASHI_DEFAULT_AGENT` | `claude` |
 | `--concurrency` | `HASHI_CONCURRENCY` | `1` run per agent |
+| `--max-running` | `HASHI_MAX_RUNNING` | total memory in GiB / 8, between 1 and the CPU count. Runs at once across all agents |
+| `--memory-reserve` | `HASHI_MEMORY_RESERVE` | the larger of `2G` and `20%`. Kept free for you; new runs wait while less would be left (`0` disables) |
+| `--run-memory-limit` | `HASHI_RUN_MEMORY_LIMIT` | the larger of `2G` and `40%`. One run's whole process tree is stopped above this |
+| `--disk-floor` | `HASHI_DISK_FLOOR` | `1G`. New runs wait while the volume holding the Hashi home has less free (`0` disables) |
+| `--nice` | `HASHI_NICE` | `10`. Lower priority for agent runs, `0` to `19` (`0` disables; on Windows any value above `0` means below-normal priority) |
 | `--timeout` | `HASHI_TIMEOUT` | `300` seconds |
 | `--rate-limit` | `HASHI_RATE_LIMIT` | `60` per minute per token (`0` disables) |
 | `--queue-limit` | `HASHI_QUEUE_LIMIT` | `100` pending requests |
@@ -389,7 +395,7 @@ Every flag also reads an environment variable.
 | `--claude-permission-mode` | `HASHI_CLAUDE_PERMISSION_MODE` | Claude's default |
 | `--codex-sandbox` | `HASHI_CODEX_SANDBOX` | `read-only` |
 
-Pass these to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Running bare `hashi` starts the server with defaults and environment variables. Logs always go to `~/.hashi/logs/hashi.log` with secrets redacted (rotated past 5 MB, three old files kept), and with `--headless` also to stderr. Set `HASHI_LOG=hashi=debug` for more detail.
+Sizes take binary units or a share of the total: `512M`, `4G`, `1.5G`, `25%`. Pass these to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Running bare `hashi` starts the server with defaults and environment variables. Logs always go to `~/.hashi/logs/hashi.log` with secrets redacted (rotated past 5 MB, three old files kept), and with `--headless` also to stderr. Set `HASHI_LOG=hashi=debug` for more detail.
 
 ### Other commands
 
