@@ -683,3 +683,191 @@ async fn me_reports_usage() {
     assert!((v["usage"]["todayCostUsd"].as_f64().unwrap() - 0.01).abs() < 1e-9);
     h.running.shutdown().await;
 }
+
+// ── sharing: invites and claim pages ──────────────────────────────────────
+
+async fn new_invite(h: &Harness, body: Value) -> (String, Value) {
+    let (status, v) = h.post("/v1/invites", &h.admin, body).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let url = v["url"].as_str().unwrap().to_owned();
+    let code = url.rsplit('/').next().unwrap().to_owned();
+    (code, v)
+}
+
+async fn claim(h: &Harness, step: &str, code: &str) -> (StatusCode, Value) {
+    h.call(
+        reqwest::Method::POST,
+        &format!("/v1/claim/{step}"),
+        None,
+        Some(json!({"code": code})),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn invite_flow_creates_scoped_token() {
+    let h = harness().await;
+    let (code, _) = new_invite(
+        &h,
+        json!({"label": "alice", "agents": ["codex"], "limits": {"dailyRequests": 5}}),
+    )
+    .await;
+    let (status, preview) = claim(&h, "preview", &code).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["label"], "alice");
+    assert_eq!(preview["server"], "Test Hashi");
+    assert!(
+        !preview.to_string().contains("hashi_"),
+        "preview must not leak secrets"
+    );
+
+    let (status, r) = claim(&h, "redeem", &code).await;
+    assert_eq!(status, StatusCode::CREATED, "{r}");
+    let token = r["token"].as_str().unwrap().to_owned();
+    assert!(r["snippets"]["curl"].as_str().unwrap().contains(&token));
+    assert_eq!(
+        r["limits"]["maxPending"], 3,
+        "invites default to 3 in flight"
+    );
+
+    let (_, me) = h.get("/v1/me", Some(&token)).await;
+    assert_eq!(
+        (me["role"].as_str(), me["agents"].clone()),
+        (Some("user"), json!(["codex"]))
+    );
+    let (status, _) = h
+        .post(
+            "/v1/ask",
+            &token,
+            json!({"message": "hi", "agent": "claude"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = h
+        .post(
+            "/v1/ask",
+            &token,
+            json!({"message": "hi", "agent": "codex", "wait": 10}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h.get("/v1/tokens", Some(&token)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "invited tokens are never admins"
+    );
+
+    let (_, audit) = h.get("/v1/audit", Some(&h.admin)).await;
+    let actions: Vec<&str> = audit["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect();
+    assert!(actions.contains(&"invite.create") && actions.contains(&"invite.claim"));
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn second_redeem_is_409() {
+    let h = harness().await;
+    let (code, _) = new_invite(&h, json!({"label": "bob"})).await;
+    assert_eq!(claim(&h, "redeem", &code).await.0, StatusCode::CREATED);
+    let (status, v) = claim(&h, "redeem", &code).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("already_claimed"))
+    );
+    assert_eq!(claim(&h, "preview", &code).await.0, StatusCode::CONFLICT);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn invite_without_public_url_is_local_only() {
+    let h = harness().await;
+    let (_, v) = new_invite(&h, json!({"label": "carol"})).await;
+    assert_eq!(v["localOnly"], true);
+    assert!(
+        v["url"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{}/claim/hashi_inv_", h.base))
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn invite_uses_configured_public_url() {
+    let h = harness_with(|c| c.public_url = Some("https://hashi.example.com".into())).await;
+    let (_, v) = new_invite(&h, json!({"label": "dan"})).await;
+    assert_eq!(v["localOnly"], false);
+    assert!(
+        v["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://hashi.example.com/claim/hashi_inv_")
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_invite_is_404() {
+    let h = harness().await;
+    let (code, v) = new_invite(&h, json!({"label": "erin"})).await;
+    let id = v["invite"]["id"].as_str().unwrap().to_owned();
+    let (status, _) = h
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/v1/invites/{id}"),
+            Some(&h.admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, v) = claim(&h, "redeem", &code).await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("invite_not_found"))
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn invite_rejects_bad_input() {
+    let h = harness().await;
+    for body in [
+        json!({"label": ""}),
+        json!({"label": "x", "linkHours": 5}),
+        json!({"label": "x", "role": "admin"}),
+        json!({"label": "x", "limits": {"maxPending": 0}}),
+    ] {
+        let (status, v) = h.post("/v1/invites", &h.admin, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    }
+    let (status, _) = claim(&h, "redeem", "not-a-code").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn claim_page_has_strict_csp() {
+    let h = harness().await;
+    for path in ["/claim/hashi_inv_whatever", "/me", "/assets/hashi.js"] {
+        let res = h
+            .http
+            .get(format!("{}{path}", h.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let csp = res.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(csp.contains("default-src 'none'") && csp.contains("script-src 'self'"));
+        assert_eq!(res.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(res.headers()["cache-control"], "no-store");
+    }
+    h.running.shutdown().await;
+}

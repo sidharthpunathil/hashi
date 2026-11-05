@@ -14,13 +14,21 @@
 //! | `PATCH`  | `/v1/tokens/{id}`     | admin | Pause, resume, extend, set limits  |
 //! | `DELETE` | `/v1/tokens/{id}`     | admin | Revoke a token                     |
 //! | `GET`    | `/v1/audit`           | admin | Recent sharing and access changes  |
+//! | `GET`    | `/v1/invites`         | admin | List invite links                  |
+//! | `POST`   | `/v1/invites`         | admin | Create a one-time invite link      |
+//! | `DELETE` | `/v1/invites/{id}`    | admin | Cancel a pending invite            |
+//! | `POST`   | `/v1/claim/preview`   | code  | What an invite would grant         |
+//! | `POST`   | `/v1/claim/redeem`    | code  | Use an invite, get a token once    |
+//! | `GET`    | `/claim/{code}`, `/me`|       | Pages for people you share with    |
 //!
 //! "any" accepts paused and expired tokens, so they can see why they stopped.
 
 mod ask;
+mod invites;
 mod tokens;
 
 pub use ask::{AskBody, SubmitInput, me_json, request_json, submit, wait_until_done};
+pub use invites::{CreateInviteBody, snippets, validate_new_invite};
 pub use tokens::{CreateTokenBody, UpdateTokenBody, validate_limits, validate_new_token};
 
 use std::collections::HashMap;
@@ -146,6 +154,11 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(tokens::update).delete(tokens::revoke),
         )
         .route("/v1/audit", get(tokens::audit))
+        .route("/v1/invites", get(invites::list).post(invites::create))
+        .route("/v1/invites/{id}", delete(invites::cancel))
+        .route("/v1/claim/preview", post(invites::preview))
+        .route("/v1/claim/redeem", post(invites::redeem))
+        .merge(crate::web::routes())
         .fallback(|| async { ApiError::NotFound("no such route") })
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(cors)
@@ -165,6 +178,10 @@ async fn security_headers(mut res: Response) -> Response {
         HeaderValue::from_static("no-referrer"),
     );
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(crate::web::CSP),
+    );
     res
 }
 

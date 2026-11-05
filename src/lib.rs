@@ -11,3 +11,4 @@ pub mod token;
 pub mod tui;
 pub mod tunnel;
 pub mod util;
+pub mod web;

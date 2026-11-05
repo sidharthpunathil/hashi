@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>Hashi invite</title>
+  <link rel="stylesheet" href="/assets/hashi.css">
+</head>
+<body data-page="claim">
+  <main class="card">
+    <header class="brand">
+      <svg viewBox="0 0 64 40" width="56" height="35" aria-hidden="true">
+        <defs><linearGradient id="sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c4dff"/><stop offset="1" stop-color="#f9b4f6"/></linearGradient></defs>
+        <path d="M14 26a18 18 0 0 1 36 0z" fill="url(#sun)"/>
+        <path class="bridge" d="M4 36 12 30V18h4v10c5-3 11-4 16-4s11 1 16 4V18h4v12l8 6H44a4 4 0 0 0-8 0h-8a4 4 0 0 0-8 0z"/>
+      </svg>
+      <div><h1>You're invited</h1><p class="muted" id="server">to a Hashi bridge</p></div>
+    </header>
+
+    <section id="loading"><p class="muted">Checking your link…</p></section>
+
+    <section id="error" hidden>
+      <p class="bad" id="error-text"></p>
+      <p class="muted">Ask the person who shared it for a new link.</p>
+    </section>
+
+    <section id="preview" hidden>
+      <p>This link gives <strong id="label"></strong> their own access to the coding agents on this machine.</p>
+      <dl class="facts">
+        <dt>Agents</dt><dd id="agents"></dd>
+        <dt>Conversation</dt><dd id="session"></dd>
+        <dt>Limits</dt><dd id="limits"></dd>
+        <dt>Access lasts</dt><dd id="lifetime"></dd>
+        <dt>Link expires</dt><dd id="link-expires"></dd>
+      </dl>
+      <p class="notice" id="notice"></p>
+      <button id="claim" class="primary">Get my access</button>
+      <p class="muted small">The link works once. Your token is shown a single time on the next screen.</p>
+    </section>
+
+    <section id="done" hidden>
+      <p class="good">✓ You're in. Save this token now, it cannot be shown again.</p>
+      <div class="secret"><code id="token"></code><button data-copy="token">Copy</button></div>
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="curl" aria-selected="true">curl</button>
+        <button role="tab" data-tab="python">Python</button>
+        <button role="tab" data-tab="typescript">TypeScript</button>
+        <button role="tab" data-tab="claudeCodeMcp">Claude Code MCP</button>
+        <button role="tab" data-tab="mcpJson">MCP JSON</button>
+      </div>
+      <div class="snippet"><pre><code id="snippet"></code></pre><button data-copy="snippet">Copy</button></div>
+      <p class="muted small">Check your limits and usage any time at <a id="me-link" href="/me">My access</a>.</p>
+    </section>
+  </main>
+  <script src="/assets/hashi.js"></script>
+</body>
+</html>

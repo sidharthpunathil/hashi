@@ -15,7 +15,7 @@ mod audit;
 mod invites;
 
 pub use audit::AuditEntry;
-pub use invites::{Invite, InviteState, NewInvite, Redeemed};
+pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
 
 use crate::agent::{AgentKind, Usage};
 use crate::token::{self, GeneratedToken, Limits, Role, SessionMode, Token};

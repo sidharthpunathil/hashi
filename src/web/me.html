@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>My access</title>
+  <link rel="stylesheet" href="/assets/hashi.css">
+</head>
+<body data-page="me">
+  <main class="card">
+    <header class="brand">
+      <svg viewBox="0 0 64 40" width="56" height="35" aria-hidden="true">
+        <defs><linearGradient id="sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c4dff"/><stop offset="1" stop-color="#f9b4f6"/></linearGradient></defs>
+        <path d="M14 26a18 18 0 0 1 36 0z" fill="url(#sun)"/>
+        <path class="bridge" d="M4 36 12 30V18h4v10c5-3 11-4 16-4s11 1 16 4V18h4v12l8 6H44a4 4 0 0 0-8 0h-8a4 4 0 0 0-8 0z"/>
+      </svg>
+      <div><h1>My access</h1><p class="muted" id="server">Check what your token can do</p></div>
+    </header>
+
+    <form id="login">
+      <label for="token-input">Your token</label>
+      <input id="token-input" type="password" autocomplete="off" spellcheck="false" placeholder="hashi_…" required>
+      <label class="check"><input id="remember" type="checkbox"> Remember in this tab</label>
+      <button class="primary" type="submit">Show my access</button>
+      <p class="bad" id="login-error" hidden></p>
+    </form>
+
+    <section id="access" hidden>
+      <p><strong id="name"></strong> <span class="pill" id="status"></span></p>
+      <dl class="facts">
+        <dt>Agents</dt><dd id="agents"></dd>
+        <dt>Conversation</dt><dd id="session"></dd>
+        <dt>Expires</dt><dd id="expires"></dd>
+        <dt>In flight</dt><dd id="pending"></dd>
+      </dl>
+      <div id="meters"></div>
+      <p class="muted small" id="resets"></p>
+      <button id="forget">Forget token</button>
+    </section>
+  </main>
+  <script src="/assets/hashi.js"></script>
+</body>
+</html>
