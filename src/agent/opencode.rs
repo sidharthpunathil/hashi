@@ -53,8 +53,19 @@ pub fn env(workdir: &Path) -> Vec<(String, String)> {
         ("PWD".to_owned(), dir.to_string_lossy().into_owned()),
         ("OPENCODE_DISABLE_AUTOUPDATE".to_owned(), "1".to_owned()),
         ("OPENCODE_DISABLE_PROJECT_CONFIG".to_owned(), "1".to_owned()),
+        ("OPENCODE_CONFIG_CONTENT".to_owned(), PERMISSIONS.to_owned()),
     ]
 }
+
+/// Inline config that makes opencode read-only, like Codex's default sandbox.
+///
+/// opencode allows most tools, including `bash` and `edit`, unless told
+/// otherwise, and it has no OS sandbox. Inline config loads after the global
+/// and project files (packages/core/src/config.ts, "Inline config ...
+/// runtime overrides"), so these denials win over the owner's own settings
+/// for Hashi runs. Reading files in the workspace stays allowed.
+pub const PERMISSIONS: &str =
+    r#"{"permission":{"bash":"deny","edit":"deny","external_directory":"deny","webfetch":"deny"}}"#;
 
 /// Builds the argument vector for a headless `opencode run`.
 ///
@@ -367,6 +378,25 @@ mod tests {
         assert_eq!(get("PWD"), Some(expected.to_string_lossy().as_ref()));
         assert_eq!(get("OPENCODE_DISABLE_AUTOUPDATE"), Some("1"));
         assert_eq!(get("OPENCODE_DISABLE_PROJECT_CONFIG"), Some("1"));
+    }
+
+    #[test]
+    fn env_denies_shell_edits_and_network() {
+        let workspace = tempfile::tempdir().unwrap();
+        let env = env(workspace.path());
+        let raw = &env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap()
+            .1;
+        let cfg: serde_json::Value = serde_json::from_str(raw).unwrap();
+        for tool in ["bash", "edit", "external_directory", "webfetch"] {
+            assert_eq!(cfg["permission"][tool], "deny", "{tool} must be denied");
+        }
+        assert!(
+            cfg["permission"].get("read").is_none(),
+            "reads stay allowed"
+        );
     }
 
     #[test]

@@ -71,7 +71,7 @@ Hashi drives whichever of these you have installed and signed in to. `hashi doct
 | Claude Code | `claude` | `claude` | print mode, normal permission rules, 10-turn limit | tokens and cost |
 | Codex | `codex` | `codex` | `exec`, read-only sandbox | tokens |
 | Gemini CLI | `gemini` | `gemini` | `--approval-mode default` (tools that need approval are denied), no relaunch | tokens |
-| opencode (2.2+) | `opencode` | `opencode` | `run --standalone`, permission asks rejected, project config ignored | tokens and cost |
+| opencode (2.2+) | `opencode` | `opencode` | `run --standalone`; `bash`, `edit`, web fetches and paths outside the workspace denied; project config ignored | tokens and cost |
 | Qwen Code | `qwen` | `qwen` | `--approval-mode default` (shell and edits denied), no relaunch | tokens |
 | Cursor CLI | `cursor` | `cursor-agent` or `agent` | print mode, sandbox on, never `--force`, so changes are proposed and not applied | text only |
 
