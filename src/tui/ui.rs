@@ -7,15 +7,15 @@ use ratatui::layout::{Alignment, Constraint, Layout, Margin, Offset, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Shadow, Sparkline, Table, Tabs, Wrap,
+    Block, BorderType, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Shadow, Sparkline, Table, Tabs, Wrap,
 };
 
-use super::app::{App, FeedItem, Popup, Tab, TokenForm, TunnelState};
+use super::app::{App, FeedItem, Popup, ShareForm, Tab, TokenForm, TokensFocus, TunnelState};
 use super::theme::{self as t, Rgb};
 use crate::agent::AgentKind;
 use crate::store::{Request, RequestStatus};
-use crate::token::{Role, SessionMode};
+use crate::token::{Role, SessionMode, Token, TokenStatus};
 use crate::util::{human_age, human_duration, one_line, truncate};
 
 const PANEL: Rgb = Rgb(22, 16, 42);
@@ -242,9 +242,29 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
             ("?", "help"),
             ("q", "quit"),
         ],
+        Tab::Tokens if app.tokens_focus == TokensFocus::Invites => &[
+            ("↑↓", "select"),
+            ("x", "cancel invite"),
+            ("i", "tokens"),
+            ("s", "share"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
+        Tab::Tokens if !app.invites.is_empty() => &[
+            ("↑↓", "select"),
+            ("n", "new"),
+            ("s", "share"),
+            ("p", "pause"),
+            ("d", "revoke"),
+            ("i", "invites"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
         Tab::Tokens => &[
             ("↑↓", "select"),
-            ("n", "new token"),
+            ("n", "new"),
+            ("s", "share"),
+            ("p", "pause"),
             ("d", "revoke"),
             ("?", "help"),
             ("q", "quit"),
@@ -794,9 +814,137 @@ fn detail_text(r: &Request, tick: u64) -> Text<'static> {
 // ── tokens ─────────────────────────────────────────────────────────────────
 
 fn render_tokens(app: &mut App, frame: &mut Frame, area: Rect) {
+    if app.invites.is_empty() {
+        render_token_table(app, frame, area);
+        return;
+    }
+    let rows = u16::try_from(app.invites.len()).unwrap_or(u16::MAX).min(5);
+    let [top, bottom] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(rows + 3)]).areas(area);
+    render_token_table(app, frame, top);
+    render_invites(app, frame, bottom);
+}
+
+/// Panel title that marks the focused table with a symbol as well as colour.
+fn focus_panel(title: &str, focused: bool) -> Block<'_> {
+    let (mark, accent) = if focused {
+        ("▸ ", t::PINK)
+    } else {
+        ("  ", t::VIOLET)
+    };
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(if focused {
+            t::fg(t::PURPLE)
+        } else {
+            t::border()
+        })
+        .title(Line::from(vec![
+            Span::styled(" ", t::border()),
+            Span::styled(mark, t::bold(t::PINK)),
+            Span::styled(title, t::bold(accent)),
+            Span::styled(" ", t::border()),
+        ]))
+        .padding(Padding::horizontal(1))
+}
+
+fn token_status_span(tk: &Token, now: i64) -> Span<'static> {
+    match tk.status(now) {
+        TokenStatus::Active => Span::styled("● active", t::fg(t::MINT)),
+        TokenStatus::Paused => Span::styled("‖ paused", t::bold(t::AMBER)),
+        TokenStatus::Expired => Span::styled("○ expired", t::fg(t::ROSE)),
+    }
+}
+
+fn today_span(app: &App, tk: &Token) -> Span<'static> {
+    let used = app.usage.get(&tk.id).map_or(0, |u| u.today_requests);
+    match tk.limits.daily_requests {
+        Some(cap) => {
+            let style = if used >= u64::from(cap) {
+                t::bold(t::AMBER)
+            } else {
+                plain()
+            };
+            Span::styled(format!("{used}/{cap}"), style)
+        }
+        None => Span::styled(used.to_string(), plain()),
+    }
+}
+
+/// Time until `ms` from now: `in 23h`, `in 6d`.
+fn human_until(ms: i64) -> String {
+    let secs = ((ms - crate::util::now_ms()) / 1000).max(0);
+    match secs {
+        0..60 => format!("in {secs}s"),
+        60..3_600 => format!("in {}m", secs / 60),
+        3_600..86_400 => format!("in {}h", secs / 3_600),
+        _ => format!("in {}d", secs / 86_400),
+    }
+}
+
+fn render_invites(app: &mut App, frame: &mut Frame, area: Rect) {
+    let focused = app.tokens_focus == TokensFocus::Invites;
+    let header =
+        Row::new(["label", "expires", "created"].map(|h| Cell::from(h).style(t::bold(t::MIST))));
+    let rows: Vec<Row> = app
+        .invites
+        .iter()
+        .map(|inv| {
+            Row::new(vec![
+                Cell::from(Line::from(vec![
+                    Span::styled("◌ ", t::fg(t::ORCHID)),
+                    Span::styled(inv.label.clone(), strong()),
+                ])),
+                Cell::from(Span::styled(human_until(inv.expires_at), plain())),
+                Cell::from(Span::styled(
+                    format!("{} ago", human_age(inv.created_at)),
+                    t::muted(),
+                )),
+            ])
+        })
+        .collect();
+    let mut table = Table::new(
+        rows,
+        [
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ],
+    )
+    .header(header)
+    .column_spacing(2)
+    .block(
+        focus_panel("pending invites", focused).title_bottom(
+            Line::from(Span::styled(
+                if focused {
+                    " x cancel   i back to tokens "
+                } else {
+                    " i to select "
+                },
+                t::muted(),
+            ))
+            .right_aligned(),
+        ),
+    )
+    .highlight_spacing(HighlightSpacing::Always);
+    if focused {
+        table = table
+            .row_highlight_style(Style::new().bg(SELECT.into()))
+            .highlight_symbol(Span::styled("▌", t::fg(t::PINK)));
+        frame.render_stateful_widget(table, area, &mut app.invites_table);
+    } else {
+        frame.render_widget(table.highlight_symbol(" "), area);
+    }
+}
+
+fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
+    let now = crate::util::now_ms();
+    let focused = app.tokens_focus == TokensFocus::Tokens;
     let header = Row::new(
         [
             "name",
+            "status",
+            "today",
             "prefix",
             "role",
             "session",
@@ -848,6 +996,8 @@ fn render_tokens(app: &mut App, frame: &mut Frame, area: Rect) {
             );
             Row::new(vec![
                 Cell::from(Span::styled(tk.name.clone(), strong())),
+                Cell::from(token_status_span(tk, now)),
+                Cell::from(today_span(app, tk)),
                 Cell::from(Span::styled(
                     format!("{}…", tk.prefix),
                     t::fg(t::DUSK.lighten(0.3)),
@@ -872,6 +1022,8 @@ fn render_tokens(app: &mut App, frame: &mut Frame, area: Rect) {
         rows,
         [
             Constraint::Fill(1),
+            Constraint::Length(9),
+            Constraint::Length(7),
             Constraint::Length(16),
             Constraint::Length(7),
             Constraint::Length(9),
@@ -883,10 +1035,17 @@ fn render_tokens(app: &mut App, frame: &mut Frame, area: Rect) {
     )
     .header(header.bottom_margin(1))
     .column_spacing(2)
-    .row_highlight_style(Style::new().bg(SELECT.into()))
-    .highlight_symbol(Span::styled("▌", t::fg(t::PINK)))
+    .row_highlight_style(if focused {
+        Style::new().bg(SELECT.into())
+    } else {
+        Style::new()
+    })
+    .highlight_symbol(Span::styled(
+        if focused { "▌" } else { " " },
+        t::fg(t::PINK),
+    ))
     .block(
-        panel("tokens", t::VIOLET).title_bottom(
+        focus_panel("tokens", focused && !app.invites.is_empty()).title_bottom(
             Line::from(Span::styled(
                 " secrets are stored as SHA-256 hashes only ",
                 t::muted(),
@@ -972,8 +1131,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
     let area = frame.area();
     match popup {
         Popup::Help => {
-            let rect = centered(area, 58, 19);
-            let rows: [(&str, &str); 12] = [
+            let rows: [(&str, &str); 16] = [
                 ("1 2 3 4", "jump to a view"),
                 ("tab / ←→", "next / previous view"),
                 ("↑↓ / j k", "move selection"),
@@ -981,6 +1139,10 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 ("c", "copy the API base URL"),
                 ("n", "new token (Tokens view)"),
                 ("d", "revoke token (Tokens view)"),
+                ("p", "pause or resume token (Tokens view)"),
+                ("s", "share: create an invite link (Tokens view)"),
+                ("i", "switch between tokens and invites"),
+                ("x", "cancel pending invite (Tokens view)"),
                 ("r", "refresh now"),
                 ("?", "this help"),
                 ("q", "quit (asks first if work is running)"),
@@ -996,6 +1158,8 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                     ])
                 })
                 .collect();
+            let height = u16::try_from(rows.len()).unwrap_or(16) + 7;
+            let rect = centered(area, 62, height);
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 "press any key to close",
@@ -1084,58 +1248,215 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
             frame.render_widget(Clear, rect);
             frame.render_widget(Paragraph::new(lines).block(modal("revoke token")), rect);
         }
+        Popup::ConfirmCancelInvite { label, .. } => {
+            let rect = centered(area, 56, 8);
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled("Cancel the invite for ", plain()),
+                    Span::styled(label.clone(), t::bold(t::PINK)),
+                    Span::styled("?", plain()),
+                ]),
+                Line::from(Span::styled("The link will stop working.", t::muted())),
+                Line::raw(""),
+                key_hint(&[("y", "cancel invite"), ("n", "keep")]),
+            ];
+            frame.render_widget(Clear, rect);
+            frame.render_widget(Paragraph::new(lines).block(modal("cancel invite")), rect);
+        }
+        Popup::InviteReveal {
+            label,
+            url,
+            link_hours,
+            local_only,
+        } => {
+            let height = if *local_only { 15 } else { 12 };
+            let width = u16::try_from(url.chars().count() + 10)
+                .unwrap_or(u16::MAX)
+                .max(80);
+            let rect = centered(area, width, height);
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Send this link to the person you are sharing with:",
+                    plain(),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    format!(" {url} "),
+                    Style::new()
+                        .fg(t::PINK.into())
+                        .bg(SELECT.into())
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+                Line::from(vec![
+                    Span::styled("◌ ", t::fg(t::ORCHID)),
+                    Span::styled(
+                        format!(
+                            "Works once, expires in {}. Opening it gives them their own token.",
+                            super::app::link_short(*link_hours)
+                        ),
+                        t::muted(),
+                    ),
+                ]),
+            ];
+            if *local_only {
+                lines.push(Line::raw(""));
+                lines.push(Line::from(vec![
+                    Span::styled("! ", t::bold(t::AMBER)),
+                    Span::styled(
+                        "No public URL: this link only works on this machine.",
+                        t::fg(t::AMBER),
+                    ),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    "  Restart with --tunnel or --public-url to share it.",
+                    t::muted(),
+                )));
+            }
+            lines.push(Line::raw(""));
+            lines.push(key_hint(&[("c", "copy"), ("enter", "done")]));
+            let title = format!("Invite for {label}");
+            frame.render_widget(Clear, rect);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(modal(&title)),
+                rect,
+            );
+        }
+        Popup::Share(form) => render_share_form(frame, area, form, app.tick),
         Popup::NewToken(form) => render_token_form(frame, area, form, app.tick),
     }
 }
 
-fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
-    let rect = centered(area, 60, 14);
-    let field = |i: usize, label: &str, value: Vec<Span<'static>>| {
-        let focused = form.field == i;
-        let mut spans = vec![
-            Span::styled(if focused { "› " } else { "  " }, t::bold(t::PINK)),
-            Span::styled(
-                format!("{label:<10}"),
-                if focused { strong() } else { t::muted() },
-            ),
-        ];
-        spans.extend(value);
-        Line::from(spans)
-    };
-    let toggle = |s: &str, focused: bool| {
-        let style = if focused { t::bold(t::ORCHID) } else { plain() };
-        vec![
-            Span::styled("‹ ", t::fg(t::DUSK)),
-            Span::styled(s.to_owned(), style),
-            Span::styled(" ›", t::fg(t::DUSK)),
-        ]
-    };
-    let cursor = if form.field == 0 && (tick / 5).is_multiple_of(2) {
+/// One form row: focus marker, label column and value.
+fn form_field(
+    focused: bool,
+    label: &str,
+    width: usize,
+    value: Vec<Span<'static>>,
+) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(if focused { "› " } else { "  " }, t::bold(t::PINK)),
+        Span::styled(
+            format!("{label:<width$}"),
+            if focused { strong() } else { t::muted() },
+        ),
+    ];
+    spans.extend(value);
+    Line::from(spans)
+}
+
+/// A `‹ value ›` choice.
+fn form_toggle(s: &str, focused: bool) -> Vec<Span<'static>> {
+    let style = if focused { t::bold(t::ORCHID) } else { plain() };
+    vec![
+        Span::styled("‹ ", t::fg(t::DUSK)),
+        Span::styled(s.to_owned(), style),
+        Span::styled(" ›", t::fg(t::DUSK)),
+    ]
+}
+
+/// A text input with a blinking cursor, or a placeholder when empty and unfocused.
+fn form_text(
+    value: &str,
+    focused: bool,
+    placeholder: &'static str,
+    tick: u64,
+) -> Vec<Span<'static>> {
+    if value.is_empty() && !focused {
+        return vec![Span::styled(placeholder, t::fg(t::DUSK))];
+    }
+    let cursor = if focused && (tick / 5).is_multiple_of(2) {
         "▏"
     } else {
         " "
     };
-    let name = if form.name.is_empty() && form.field != 0 {
-        vec![Span::styled("my-app", t::fg(t::DUSK))]
-    } else {
-        vec![
-            Span::styled(form.name.clone(), t::bold(t::PINK)),
-            Span::styled(cursor, t::fg(t::PINK)),
-        ]
-    };
-    let feedback = match &form.error {
+    vec![
+        Span::styled(value.to_owned(), t::bold(t::PINK)),
+        Span::styled(cursor, t::fg(t::PINK)),
+    ]
+}
+
+fn form_error(error: Option<&String>, indent: usize) -> Line<'static> {
+    match error {
         Some(err) => Line::from(vec![
-            Span::raw("            "),
+            Span::raw(" ".repeat(indent)),
             Span::styled(format!("✗ {err}"), t::fg(t::ROSE)),
         ]),
         None => Line::raw(""),
-    };
+    }
+}
+
+fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
+    const W: usize = 16;
+    let rect = centered(area, 72, 17);
+    let f = |i: usize| form.field == i;
     let lines = vec![
-        field(0, "name", name),
-        feedback,
-        field(1, "role", toggle(form.role.as_str(), form.field == 1)),
-        field(2, "session", toggle(form.mode.as_str(), form.field == 2)),
-        field(3, "agents", toggle(form.agents.label(), form.field == 3)),
+        form_field(
+            f(0),
+            "label",
+            W,
+            form_text(&form.label, f(0), "alice", tick),
+        ),
+        form_error(form.error.as_ref(), W + 2),
+        form_field(f(1), "agents", W, form_toggle(form.agents.label(), f(1))),
+        form_field(f(2), "session", W, form_toggle(form.mode.as_str(), f(2))),
+        form_field(
+            f(3),
+            "daily prompts",
+            W,
+            form_toggle(&form.daily_label(), f(3)),
+        ),
+        form_field(
+            f(4),
+            "daily budget",
+            W,
+            form_toggle(&form.budget_label(), f(4)),
+        ),
+        form_field(
+            f(5),
+            "token lifetime",
+            W,
+            form_toggle(form.lifetime_label(), f(5)),
+        ),
+        form_field(
+            f(6),
+            "link valid for",
+            W,
+            form_toggle(form.link_label(), f(6)),
+        ),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  The link works once and creates a user token for them.",
+            t::muted(),
+        )),
+        Line::from(Span::styled(
+            "  At most 3 of their prompts run at a time.",
+            t::muted(),
+        )),
+        Line::raw(""),
+        key_hint(&[
+            ("↑↓", "field"),
+            ("←→", "change"),
+            ("enter", "create link"),
+            ("esc", "cancel"),
+        ]),
+    ];
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines).block(modal("share")), rect);
+}
+
+fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
+    const W: usize = 10;
+    let rect = centered(area, 60, 14);
+    let f = |i: usize| form.field == i;
+    let lines = vec![
+        form_field(f(0), "name", W, form_text(&form.name, f(0), "my-app", tick)),
+        form_error(form.error.as_ref(), W + 2),
+        form_field(f(1), "role", W, form_toggle(form.role.as_str(), f(1))),
+        form_field(f(2), "session", W, form_toggle(form.mode.as_str(), f(2))),
+        form_field(f(3), "agents", W, form_toggle(form.agents.label(), f(3))),
         Line::raw(""),
         Line::from(Span::styled(
             match form.mode {

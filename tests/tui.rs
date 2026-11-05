@@ -329,3 +329,220 @@ fn reduced_motion_freezes_animation() {
     }
     assert_eq!(app.tick, 0);
 }
+
+fn add_user(app: &mut App, name: &str) {
+    app.state
+        .store
+        .create_token(&NewToken {
+            name: name.into(),
+            role: Role::User,
+            session_mode: SessionMode::Stateless,
+            agents: AgentKind::ALL.to_vec(),
+            expires_in_days: None,
+            note: None,
+            limits: Default::default(),
+        })
+        .unwrap();
+    app.refresh();
+}
+
+fn select_token(app: &mut App, name: &str) {
+    let i = app.tokens.iter().position(|t| t.name == name).unwrap();
+    app.tokens_table.select(Some(i));
+}
+
+fn token_id(app: &App, name: &str) -> String {
+    app.tokens
+        .iter()
+        .find(|t| t.name == name)
+        .unwrap()
+        .id
+        .clone()
+}
+
+fn toast(app: &App) -> String {
+    app.toast
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .unwrap_or_default()
+}
+
+fn share_invite(app: &mut App, label: &str) {
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('s')));
+    for c in label.chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Enter));
+}
+
+#[test]
+fn pause_key_toggles_token() {
+    let mut app = App::new(state(), None, false);
+    add_user(&mut app, "alice");
+    app.on_key(key(KeyCode::Char('3')));
+    select_token(&mut app, "alice");
+    let id = token_id(&app, "alice");
+
+    app.on_key(key(KeyCode::Char('p')));
+    assert!(app.state.store.get_token(&id).unwrap().unwrap().paused);
+    assert!(toast(&app).contains("paused"));
+    assert!(draw(&mut app, 140, 40).contains("‖ paused"));
+
+    app.on_key(key(KeyCode::Char('p')));
+    assert!(!app.state.store.get_token(&id).unwrap().unwrap().paused);
+    assert!(toast(&app).contains("resumed"));
+
+    let audit = app.state.store.list_audit(10).unwrap();
+    assert_eq!(audit.len(), 2);
+    assert!(
+        audit
+            .iter()
+            .all(|e| e.actor == "dashboard" && e.action == "token.update" && e.target == "alice")
+    );
+    assert!(audit.iter().any(|e| e.detail == "paused"));
+    assert!(audit.iter().any(|e| e.detail == "resumed"));
+}
+
+#[test]
+fn last_admin_cannot_be_paused_from_ui() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    select_token(&mut app, "admin");
+    app.on_key(key(KeyCode::Char('p')));
+    let id = token_id(&app, "admin");
+    assert!(!app.state.store.get_token(&id).unwrap().unwrap().paused);
+    assert!(toast(&app).contains("last active admin"));
+}
+
+#[test]
+fn share_form_creates_invite_and_shows_link() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('s')));
+    assert!(matches!(app.popup, Some(Popup::Share(_))));
+    assert!(draw(&mut app, 140, 40).contains("link valid for"));
+    for c in "alice".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    // Set a daily cap of 25 prompts.
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Down));
+    }
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::InviteReveal {
+        url, local_only, ..
+    }) = &app.popup
+    else {
+        panic!("expected invite reveal popup")
+    };
+    assert!(url.contains("/claim/hashi_inv_"));
+    assert!(*local_only);
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("Invite for alice"));
+    assert!(out.contains("/claim/hashi_inv_"));
+    assert!(out.contains("expires in 24h"));
+    assert!(out.contains("only works on this machine"));
+
+    let invites = app.state.store.list_invites().unwrap();
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0].label, "alice");
+    assert_eq!(invites[0].limits.daily_requests, Some(25));
+    assert_eq!(invites[0].limits.max_pending, Some(3));
+    let audit = app.state.store.list_audit(10).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.actor == "dashboard" && e.action == "invite.create" && e.target == "alice")
+    );
+
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.popup.is_none());
+}
+
+#[test]
+fn share_form_requires_label() {
+    let mut app = App::new(state(), None, false);
+    share_invite(&mut app, "");
+    assert!(matches!(app.popup, Some(Popup::Share(_))));
+    assert!(draw(&mut app, 140, 40).contains("Label is required"));
+    assert!(app.state.store.list_invites().unwrap().is_empty());
+    app.on_key(key(KeyCode::Char('b')));
+    assert!(!draw(&mut app, 140, 40).contains("Label is required"));
+}
+
+#[test]
+fn pending_invites_are_listed_and_cancellable() {
+    let mut app = App::new(state(), None, false);
+    share_invite(&mut app, "bob-laptop");
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.popup.is_none());
+    app.refresh();
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("pending invites"));
+    assert!(out.contains("bob-laptop"));
+
+    // x does nothing until the invites table has focus.
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(app.popup.is_none());
+    app.on_key(key(KeyCode::Char('i')));
+    assert!(draw(&mut app, 140, 40).contains("cancel invite"));
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(matches!(app.popup, Some(Popup::ConfirmCancelInvite { .. })));
+    assert!(draw(&mut app, 140, 40).contains("Cancel the invite for"));
+    app.on_key(key(KeyCode::Char('y')));
+    assert!(app.state.store.list_invites().unwrap().is_empty());
+    assert!(app.invites.is_empty());
+    assert!(!draw(&mut app, 140, 40).contains("pending invites"));
+    let audit = app.state.store.list_audit(10).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.action == "invite.cancel" && e.target == "bob-laptop")
+    );
+}
+
+#[test]
+fn tokens_table_shows_status_and_usage() {
+    let mut app = App::new(state(), None, false);
+    let (capped, _) = app
+        .state
+        .store
+        .create_token(&NewToken {
+            name: "capped".into(),
+            role: Role::User,
+            session_mode: SessionMode::Stateless,
+            agents: AgentKind::ALL.to_vec(),
+            expires_in_days: None,
+            note: None,
+            limits: hashi::token::Limits {
+                daily_requests: Some(100),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    for i in 0..2 {
+        let id = format!("{i:08}-1111-4000-8000-000000000000");
+        app.state
+            .store
+            .insert_request(NewRequest {
+                id: &id,
+                token: &capped,
+                agent: AgentKind::Claude,
+                model: None,
+                message: "hi",
+            })
+            .unwrap();
+    }
+    app.on_key(key(KeyCode::Char('3')));
+    app.refresh();
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("status"));
+    assert!(out.contains("today"));
+    assert!(out.contains("● active"));
+    assert!(out.contains("2/100"));
+    // The fixture's admin sent three prompts today and has no daily cap.
+    let admin_row = out.lines().find(|l| l.contains(" admin ")).unwrap();
+    assert!(admin_row.contains(" 3 "));
+}

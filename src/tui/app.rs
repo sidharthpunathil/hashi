@@ -10,8 +10,8 @@ use super::theme::{self, Rgb};
 use crate::agent::AgentKind;
 use crate::api::AppState;
 use crate::events::Event;
-use crate::store::{NewToken, Request, Revoke, Stats};
-use crate::token::{Role, SessionMode, Token};
+use crate::store::{Invite, NewInvite, NewToken, Request, Revoke, Stats, TokenUsage};
+use crate::token::{Limits, Role, SessionMode, Token, TokenStatus};
 use crate::util::{now_ms, one_line, truncate};
 
 /// Top-level views.
@@ -65,12 +65,15 @@ pub enum AgentChoice {
 }
 
 impl AgentChoice {
+    const ALL: [Self; 3] = [Self::Both, Self::Claude, Self::Codex];
+
     fn next(self) -> Self {
-        match self {
-            Self::Both => Self::Claude,
-            Self::Claude => Self::Codex,
-            Self::Codex => Self::Both,
-        }
+        self.shift(1)
+    }
+
+    fn shift(self, by: isize) -> Self {
+        let i = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);
+        Self::ALL[cycle(i, Self::ALL.len(), by)]
     }
 
     /// Label for the form.
@@ -145,6 +148,156 @@ impl TokenForm {
     }
 }
 
+/// Daily prompt cap choices for an invite.
+const DAILY_PROMPTS: [Option<u32>; 4] = [None, Some(25), Some(100), Some(500)];
+/// Daily budget choices for an invite, in USD.
+const DAILY_BUDGET: [Option<f64>; 3] = [None, Some(5.0), Some(20.0)];
+/// Token lifetime choices for an invite, in days.
+const LIFETIME_DAYS: [Option<u32>; 4] = [None, Some(1), Some(7), Some(30)];
+/// How long an invite link stays valid, in hours.
+const LINK_HOURS: [u32; 3] = [1, 24, 168];
+/// Prompts an invited token may have in flight at once.
+const INVITE_MAX_PENDING: u32 = 3;
+
+/// State of the "share" (invite) form.
+#[derive(Debug, Clone)]
+pub struct ShareForm {
+    /// Label being typed: who the invite is for.
+    pub label: String,
+    /// Focused field, `0..FIELDS`.
+    pub field: usize,
+    /// Selected agents.
+    pub agents: AgentChoice,
+    /// Selected session mode.
+    pub mode: SessionMode,
+    daily: usize,
+    budget: usize,
+    lifetime: usize,
+    link: usize,
+    /// Validation message shown under the label field.
+    pub error: Option<String>,
+}
+
+impl ShareForm {
+    /// Number of fields.
+    pub const FIELDS: usize = 7;
+
+    fn new() -> Self {
+        Self {
+            label: String::new(),
+            field: 0,
+            agents: AgentChoice::Both,
+            mode: SessionMode::Stateless,
+            daily: 0,
+            budget: 0,
+            lifetime: 0,
+            link: 1,
+            error: None,
+        }
+    }
+
+    fn step(&mut self, by: isize) {
+        match self.field {
+            1 => self.agents = self.agents.shift(by),
+            2 => {
+                self.mode = match self.mode {
+                    SessionMode::Stateless => SessionMode::Stateful,
+                    SessionMode::Stateful => SessionMode::Stateless,
+                }
+            }
+            3 => self.daily = cycle(self.daily, DAILY_PROMPTS.len(), by),
+            4 => self.budget = cycle(self.budget, DAILY_BUDGET.len(), by),
+            5 => self.lifetime = cycle(self.lifetime, LIFETIME_DAYS.len(), by),
+            6 => self.link = cycle(self.link, LINK_HOURS.len(), by),
+            _ => {}
+        }
+    }
+
+    /// Daily prompt cap, as shown in the form.
+    #[must_use]
+    pub fn daily_label(&self) -> String {
+        DAILY_PROMPTS
+            .get(self.daily)
+            .copied()
+            .flatten()
+            .map_or_else(|| "none".to_owned(), |n| format!("{n} a day"))
+    }
+
+    /// Daily budget, as shown in the form.
+    #[must_use]
+    pub fn budget_label(&self) -> String {
+        DAILY_BUDGET
+            .get(self.budget)
+            .copied()
+            .flatten()
+            .map_or_else(|| "none".to_owned(), |b| format!("${b:.0} a day"))
+    }
+
+    /// Token lifetime, as shown in the form.
+    #[must_use]
+    pub fn lifetime_label(&self) -> &'static str {
+        match LIFETIME_DAYS.get(self.lifetime).copied().flatten() {
+            None => "never expires",
+            Some(1) => "1 day",
+            Some(7) => "7 days",
+            Some(_) => "30 days",
+        }
+    }
+
+    /// Link validity, as shown in the form.
+    #[must_use]
+    pub fn link_label(&self) -> &'static str {
+        link_long(self.link_hours())
+    }
+
+    fn link_hours(&self) -> u32 {
+        LINK_HOURS.get(self.link).copied().unwrap_or(24)
+    }
+
+    fn to_new_invite(&self, label: String) -> NewInvite {
+        NewInvite {
+            label,
+            session_mode: self.mode,
+            agents: self.agents.agents(),
+            token_expires_in_days: LIFETIME_DAYS.get(self.lifetime).copied().flatten(),
+            limits: Limits {
+                daily_requests: DAILY_PROMPTS.get(self.daily).copied().flatten(),
+                daily_budget_usd: DAILY_BUDGET.get(self.budget).copied().flatten(),
+                max_pending: Some(INVITE_MAX_PENDING),
+                ..Limits::default()
+            },
+            link_hours: self.link_hours(),
+        }
+    }
+}
+
+const fn link_long(hours: u32) -> &'static str {
+    match hours {
+        1 => "1 hour",
+        24 => "24 hours",
+        _ => "7 days",
+    }
+}
+
+/// Short form of a link validity: `1h`, `24h`, `7d`.
+#[must_use]
+pub fn link_short(hours: u32) -> String {
+    if hours >= 48 && hours.is_multiple_of(24) {
+        format!("{}d", hours / 24)
+    } else {
+        format!("{hours}h")
+    }
+}
+
+/// Which table has focus in the Tokens view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokensFocus {
+    /// The tokens table.
+    Tokens,
+    /// The pending invites table.
+    Invites,
+}
+
 /// Modal overlays.
 #[derive(Debug, Clone)]
 pub enum Popup {
@@ -170,6 +323,26 @@ pub enum Popup {
         id: String,
         /// Token name.
         name: String,
+    },
+    /// Invite creation form.
+    Share(ShareForm),
+    /// A freshly created invite link.
+    InviteReveal {
+        /// Who the invite is for.
+        label: String,
+        /// The full claim URL.
+        url: String,
+        /// How long the link stays valid.
+        link_hours: u32,
+        /// Set when there is no public URL, so the link only works locally.
+        local_only: bool,
+    },
+    /// Invite cancellation confirmation.
+    ConfirmCancelInvite {
+        /// Invite id.
+        id: String,
+        /// Invite label.
+        label: String,
     },
 }
 
@@ -216,12 +389,20 @@ pub struct App {
     pub recent: Vec<Request>,
     /// All tokens.
     pub tokens: Vec<Token>,
+    /// Today's and this month's use, by token id.
+    pub usage: HashMap<String, TokenUsage>,
+    /// Invites not yet claimed or expired, newest first.
+    pub invites: Vec<Invite>,
     /// Activity feed, newest first.
     pub feed: VecDeque<FeedItem>,
     /// Selection in the requests table.
     pub requests_table: TableState,
     /// Selection in the tokens table.
     pub tokens_table: TableState,
+    /// Selection in the pending invites table.
+    pub invites_table: TableState,
+    /// Which table in the Tokens view has focus.
+    pub tokens_focus: TokensFocus,
     /// Scroll offset of the request detail pane.
     pub detail_scroll: u16,
     /// Active modal.
@@ -252,9 +433,13 @@ impl App {
             agent_stats: HashMap::new(),
             recent: Vec::new(),
             tokens: Vec::new(),
+            usage: HashMap::new(),
+            invites: Vec::new(),
             feed: VecDeque::new(),
             requests_table: TableState::default().with_selected(Some(0)),
             tokens_table: TableState::default().with_selected(Some(0)),
+            invites_table: TableState::default().with_selected(Some(0)),
+            tokens_focus: TokensFocus::Tokens,
             detail_scroll: 0,
             popup: bootstrap.map(|secret| Popup::Reveal {
                 title: "Your admin token".to_owned(),
@@ -283,21 +468,40 @@ impl App {
             for a in AgentKind::ALL {
                 per.insert(a, store.agent_stats(a)?);
             }
+            let now = now_ms();
+            let tokens = store.list_tokens()?;
+            let mut usage = HashMap::new();
+            for tk in &tokens {
+                usage.insert(tk.id.clone(), store.token_usage(&tk.id, now)?);
+            }
+            let invites: Vec<Invite> = store
+                .list_invites()?
+                .into_iter()
+                .filter(|i| i.status(now) == "pending")
+                .collect();
             Ok::<_, crate::store::StoreError>((
                 stats,
                 per,
                 store.recent_requests(RECENT_LIMIT)?,
-                store.list_tokens()?,
+                tokens,
+                usage,
+                invites,
             ))
         })();
         match loaded {
-            Ok((stats, per, recent, tokens)) => {
+            Ok((stats, per, recent, tokens, usage, invites)) => {
                 self.stats = stats;
                 self.agent_stats = per;
                 self.recent = recent;
                 self.tokens = tokens;
+                self.usage = usage;
+                self.invites = invites;
                 clamp(&mut self.requests_table, self.recent.len());
                 clamp(&mut self.tokens_table, self.tokens.len());
+                clamp(&mut self.invites_table, self.invites.len());
+                if self.invites.is_empty() {
+                    self.tokens_focus = TokensFocus::Tokens;
+                }
             }
             Err(e) => self.notify(format!("refresh failed: {e}")),
         }
@@ -459,12 +663,38 @@ impl App {
             KeyCode::Char('n') if self.tab == Tab::Tokens => {
                 self.popup = Some(Popup::NewToken(TokenForm::new()))
             }
-            KeyCode::Char('d') if self.tab == Tab::Tokens => {
-                if let Some(t) = self
-                    .tokens_table
-                    .selected()
-                    .and_then(|i| self.tokens.get(i))
-                {
+            KeyCode::Char('s') if self.tab == Tab::Tokens => {
+                self.popup = Some(Popup::Share(ShareForm::new()));
+            }
+            KeyCode::Char('i') if self.tab == Tab::Tokens => {
+                if self.invites.is_empty() {
+                    self.notify("no pending invites");
+                } else {
+                    self.tokens_focus = match self.tokens_focus {
+                        TokensFocus::Tokens => TokensFocus::Invites,
+                        TokensFocus::Invites => TokensFocus::Tokens,
+                    };
+                }
+            }
+            KeyCode::Char('x')
+                if self.tab == Tab::Tokens && self.tokens_focus == TokensFocus::Invites =>
+            {
+                if let Some(inv) = self.selected_invite() {
+                    self.popup = Some(Popup::ConfirmCancelInvite {
+                        id: inv.id.clone(),
+                        label: inv.label.clone(),
+                    });
+                }
+            }
+            KeyCode::Char('p')
+                if self.tab == Tab::Tokens && self.tokens_focus == TokensFocus::Tokens =>
+            {
+                self.toggle_pause();
+            }
+            KeyCode::Char('d')
+                if self.tab == Tab::Tokens && self.tokens_focus == TokensFocus::Tokens =>
+            {
+                if let Some(t) = self.selected_token() {
                     self.popup = Some(Popup::ConfirmRevoke {
                         id: t.id.clone(),
                         name: t.name.clone(),
@@ -502,6 +732,58 @@ impl App {
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
                 _ => Some(Popup::ConfirmRevoke { id, name }),
             },
+            Popup::ConfirmCancelInvite { id, label } => match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.cancel_invite(&id, &label);
+                    None
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
+                _ => Some(Popup::ConfirmCancelInvite { id, label }),
+            },
+            Popup::InviteReveal {
+                label,
+                url,
+                link_hours,
+                local_only,
+            } => {
+                match key.code {
+                    KeyCode::Char('c') => self.copy(&url, "invite link copied to clipboard"),
+                    KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => return None,
+                    _ => {}
+                }
+                Some(Popup::InviteReveal {
+                    label,
+                    url,
+                    link_hours,
+                    local_only,
+                })
+            }
+            Popup::Share(mut form) => {
+                match key.code {
+                    KeyCode::Esc => return None,
+                    KeyCode::Enter => return self.create_invite(form),
+                    KeyCode::Down | KeyCode::Tab => {
+                        form.field = (form.field + 1) % ShareForm::FIELDS
+                    }
+                    KeyCode::Up | KeyCode::BackTab => {
+                        form.field = (form.field + ShareForm::FIELDS - 1) % ShareForm::FIELDS;
+                    }
+                    KeyCode::Backspace if form.field == 0 => {
+                        form.label.pop();
+                        form.error = None;
+                    }
+                    KeyCode::Char(c) if form.field == 0 => {
+                        if form.label.chars().count() < 100 && !c.is_control() {
+                            form.label.push(c);
+                            form.error = None;
+                        }
+                    }
+                    KeyCode::Left => form.step(-1),
+                    KeyCode::Right | KeyCode::Char(' ') => form.step(1),
+                    _ => {}
+                }
+                Some(Popup::Share(form))
+            }
             Popup::NewToken(mut form) => {
                 match key.code {
                     KeyCode::Esc => return None,
@@ -564,6 +846,97 @@ impl App {
         }
     }
 
+    fn create_invite(&mut self, mut form: ShareForm) -> Option<Popup> {
+        let label = form.label.trim().to_owned();
+        if label.is_empty() {
+            form.field = 0;
+            form.error = Some("Label is required, for example alice".to_owned());
+            return Some(Popup::Share(form));
+        }
+        let new = form.to_new_invite(label);
+        match self.state.store.create_invite(&new) {
+            Ok((invite, code)) => {
+                self.audit("invite.create", &invite.label, link_long(new.link_hours));
+                self.state
+                    .bus
+                    .log(format!("invite created: {}", invite.label));
+                self.refresh();
+                Some(Popup::InviteReveal {
+                    url: format!("{}/claim/{code}", self.state.runtime.base_url()),
+                    label: invite.label,
+                    link_hours: new.link_hours,
+                    local_only: self.state.runtime.public_url().is_none(),
+                })
+            }
+            Err(e) => {
+                self.notify(format!("could not create invite: {e}"));
+                None
+            }
+        }
+    }
+
+    fn cancel_invite(&mut self, id: &str, label: &str) {
+        match self.state.store.cancel_invite(id) {
+            Ok(true) => {
+                self.audit("invite.cancel", label, "");
+                self.state.bus.log(format!("invite cancelled: {label}"));
+                self.notify(format!("cancelled invite for {label}"));
+            }
+            Ok(false) => self.notify("invite already claimed or expired"),
+            Err(e) => self.notify(format!("cancel failed: {e}")),
+        }
+        self.refresh();
+    }
+
+    fn toggle_pause(&mut self) {
+        let Some(mut tk) = self.selected_token().cloned() else {
+            return;
+        };
+        let now = now_ms();
+        if !tk.paused && tk.is_admin() && tk.status(now) == TokenStatus::Active {
+            let others = self
+                .tokens
+                .iter()
+                .filter(|o| o.id != tk.id && o.is_admin() && o.status(now) == TokenStatus::Active)
+                .count();
+            if others == 0 {
+                self.notify("cannot pause the last active admin token");
+                return;
+            }
+        }
+        tk.paused = !tk.paused;
+        let detail = if tk.paused { "paused" } else { "resumed" };
+        match self.state.store.save_token_policy(&tk) {
+            Ok(()) => {
+                self.audit("token.update", &tk.name, detail);
+                self.state.bus.log(format!("token {detail}: {}", tk.name));
+                self.notify(format!("{detail} {}", tk.name));
+            }
+            Err(e) => self.notify(format!("could not update {}: {e}", tk.name)),
+        }
+        self.refresh();
+    }
+
+    fn audit(&mut self, action: &str, target: &str, detail: &str) {
+        if let Err(e) = self.state.store.audit("dashboard", action, target, detail) {
+            self.notify(format!("audit log failed: {e}"));
+        }
+    }
+
+    fn selected_token(&self) -> Option<&Token> {
+        self.tokens_table
+            .selected()
+            .and_then(|i| self.tokens.get(i))
+    }
+
+    /// The invite highlighted in the pending invites table.
+    #[must_use]
+    pub fn selected_invite(&self) -> Option<&Invite> {
+        self.invites_table
+            .selected()
+            .and_then(|i| self.invites.get(i))
+    }
+
     fn revoke(&mut self, id: &str, name: &str) {
         match self.state.store.revoke_token(id) {
             Ok(Revoke::Revoked) => {
@@ -585,7 +958,10 @@ impl App {
     fn move_selection(&mut self, by: isize) {
         let (table, len) = match self.tab {
             Tab::Requests => (&mut self.requests_table, self.recent.len()),
-            Tab::Tokens => (&mut self.tokens_table, self.tokens.len()),
+            Tab::Tokens => match self.tokens_focus {
+                TokensFocus::Tokens => (&mut self.tokens_table, self.tokens.len()),
+                TokensFocus::Invites => (&mut self.invites_table, self.invites.len()),
+            },
             _ => return,
         };
         if len == 0 {
@@ -669,6 +1045,11 @@ fn clamp(table: &mut TableState, len: usize) {
         (Some(i), n) if i >= n => table.select(Some(n - 1)),
         _ => {}
     }
+}
+
+fn cycle(i: usize, len: usize, by: isize) -> usize {
+    let n = len.max(1).cast_signed();
+    (i.cast_signed() + by).rem_euclid(n).cast_unsigned()
 }
 
 fn short(id: &str) -> &str {
