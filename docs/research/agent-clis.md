@@ -428,3 +428,13 @@ Not recommended for now: **Crush** (no JSON, auto-approves everything, loads wor
 - From official docs only, not source: Cursor CLI, Copilot CLI, Amp, Factory Droid.
 - Nothing was executed except `--version`/`--help` on installed binaries: `goose` 1.44.0 (`goose run --help` lists `--output-format text|json|stream-json`, `--session-id`, `-n`, `--no-session`, `--max-turns`), `claude` 2.1.318, `codex` 0.166.0. `opencode --version` was killed with exit 137 before printing (ad-hoc signed 1.x binary), so its version is unknown.
 - Every `--` positional claim for yargs-based CLIs (Gemini, Qwen) is UNVERIFIED; the `--prompt=<text>` form is recommended instead. Before shipping any backend, record real fixtures from a pinned version with a harmless prompt and replace the derived fixtures above.
+
+## Flags Hashi pins for shared tokens
+
+Added after the security audit. Each is overridden when the owner passes the same flag through the agent's extra arguments.
+
+- **Claude Code**: `--setting-sources user` (project and local settings in a token's workspace never load), `--strict-mcp-config` (no MCP servers unless `--mcp-config <file>` lists them), and `--disallowedTools WebFetch` when no `--permission-mode` is set. A leading `/` in the prompt gets a space, as for Gemini and Qwen.
+- **Gemini CLI and Qwen Code**: `--allowed-mcp-server-names ""`, which their own source treats as "allow no MCP servers". Qwen also gets `QWEN_CODE_MEMORY_BASE_DIR` inside the workspace. Neither CLI has a flag to skip project-level settings, and `web_fetch` stays denied only while the owner has no user-level allow rule for it.
+- **Codex**: no MCP flag. `-c` overrides are deep-merged, so `-c mcp_servers={}` does not remove configured servers; disabling one needs its name, `-c mcp_servers.<name>.enabled=false`.
+- **opencode**: the inline config starts with `"*": "deny"` and allows only `read` (without `.env` files), `glob`, `grep`, `list` and `lsp`. MCP tools are checked under `<server>_<tool>` and fall under the `*` deny.
+- **Cursor CLI**: `--approve-mcps` is stripped from extra arguments, like `--force` and `--yolo`.

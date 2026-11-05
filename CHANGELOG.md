@@ -49,6 +49,24 @@ All notable changes to this project are documented here. The format follows [Kee
 - Revoking a token (API, CLI or dashboard) deletes its workspace directory. Symlinks are removed without being followed.
 - A request that was running during 3 unclean stops of Hashi (crashes, not normal quits) now fails with "stopped after interrupting the server 3 times" instead of running again on every start.
 
+### Security
+
+Fixes from a full security audit of the codebase.
+
+- A request body must arrive within 10 seconds, and one client address may hold at most an eighth of the connection slots, so a client stalling half-sent invite claims can no longer take every slot. Shutdown waits at most 10 seconds for open requests.
+- A valid token or invite code always works, even from an address that sent many bad ones; only failures are throttled. Behind a reverse proxy, `--trust-proxy` keys clients by `X-Forwarded-For` on loopback connections.
+- Cross-origin browser access is off by default (`--cors-origin` to allow an origin), and plain HTTP refuses unknown `Host` headers (`--allowed-host` to add names), which stops DNS rebinding.
+- opencode runs are default deny: only read, glob, grep, list and lsp are allowed, so the owner's MCP tools, web search and code execution are no longer reachable from shared tokens.
+- Claude runs load user settings only, connect no MCP servers and cannot use `WebFetch` unless the owner sets a permission mode or passes the flags. Gemini and Qwen connect no MCP servers, Qwen keeps its memory in the workspace, and Cursor strips `--approve-mcps`. Prompts starting with `/` are neutralised for Claude as well.
+- Agent processes that detach into their own session are measured against the run's memory limit and killed when the run ends. Linux adopts orphaned descendants; Windows puts each run in a Job Object and stops npm `.cmd` shims from running a `node` planted in the workspace.
+- Hashi's own variables (`HASHI_*`, `TUNNEL_TOKEN`) are removed from agent environments, so a run never sees the tunnel token. Passing `--tunnel-token` as a flag prints a warning.
+- Pausing a token holds its queued prompts, expiry fails them without running, and revoking stops running prompts at once (from the API or dashboard) or within about 2 seconds (from `hashi token revoke`).
+- Request and spend caps are checked in the same transaction as the insert, so concurrent bursts cannot exceed them. Changing limits keeps `maxPending` unless it is set, redeeming an invite respects the token cap, and a paused admin token can no longer read other tokens' requests.
+- Hashi shuts down cleanly on `SIGTERM`, `SIGHUP` and Windows console close, not only Ctrl-C, so agent runs and cloudflared no longer outlive it. A second signal exits at once.
+- `hashi report` no longer copies stored agent error text by default; failed runs get a fixed label. Included text cannot break out of its code block. The report, database WAL and SHM files, logs, crash files and tunnel config are created owner-only, and on Windows the Hashi home is limited to the current user, SYSTEM and Administrators.
+- Errors returned to token holders mask secrets and the owner's home directory, headless output strips control and text-direction characters, and redaction also covers AWS access keys, Google OAuth tokens and Cloudflare tunnel tokens.
+- Release builds grant write access only to the publish job, never persist checkout credentials, and pin every action to a commit. The installers refuse to fall back to a source build when a release archive downloads but its checksum does not.
+
 ## [0.1.1] - 2026-11-05
 
 ### Added

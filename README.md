@@ -68,14 +68,14 @@ Hashi drives whichever of these you have installed and signed in to. `hashi doct
 
 | Agent | `agent` value | Binary | Headless defaults Hashi uses | Reports |
 |---|---|---|---|---|
-| Claude Code | `claude` | `claude` | print mode, normal permission rules, 10-turn limit | tokens and cost |
-| Codex | `codex` | `codex` | `exec`, read-only sandbox | tokens |
-| Gemini CLI | `gemini` | `gemini` | `--approval-mode default` (tools that need approval are denied), no relaunch | tokens |
-| opencode (2.2+) | `opencode` | `opencode` | `run --standalone`; `bash`, `edit`, web fetches and paths outside the workspace denied; project config ignored | tokens and cost |
-| Qwen Code | `qwen` | `qwen` | `--approval-mode default` (shell and edits denied), no relaunch | tokens |
-| Cursor CLI | `cursor` | `cursor-agent` or `agent` | print mode, sandbox on, never `--force`, so changes are proposed and not applied | text only |
+| Claude Code | `claude` | `claude` | print mode, 10-turn limit, user settings only (`--setting-sources user`), no MCP servers (`--strict-mcp-config`), and `WebFetch` denied unless you set a permission mode | tokens and cost |
+| Codex | `codex` | `codex` | `exec`, read-only sandbox (your global MCP servers still load; turn one off with `-c mcp_servers.<name>.enabled=false`) | tokens |
+| Gemini CLI | `gemini` | `gemini` | `--approval-mode default` (tools that need approval are denied), no MCP servers, no relaunch | tokens |
+| opencode (2.2+) | `opencode` | `opencode` | `run --standalone`; every tool denied except read, glob, grep, list and lsp (so no shell, edits, web, MCP tools or subagents), `.env` files unreadable, project config ignored | tokens and cost |
+| Qwen Code | `qwen` | `qwen` | `--approval-mode default` (shell and edits denied), no MCP servers, memory kept in the workspace, no relaunch | tokens |
+| Cursor CLI | `cursor` | `cursor-agent` or `agent` | print mode, sandbox on, never `--force` or `--approve-mcps`, so changes are proposed and not applied | text only |
 
-Gemini CLI and Qwen Code run prompts that start with `/` as built-in commands. Hashi adds a leading space to such prompts so a shared user cannot reach commands like `/config`. Every agent works in its own directory per token, so one agent can never leave behind configuration that another agent loads.
+Claude Code, Gemini CLI and Qwen Code can treat prompts that start with `/` as commands. Hashi adds a leading space to such prompts so a shared user cannot reach commands like `/config` or your own custom commands. To give shared tokens an MCP server or web access anyway, pass the flag yourself through the agent's extra arguments (for example `--mcp-config <file>` for Claude); your own flags win. Every agent works in its own directory per token, so one agent can never leave behind configuration that another agent loads.
 
 Adding another agent takes one file in `src/agent/`; see [CONTRIBUTING.md](CONTRIBUTING.md) and the research notes in [docs/research/agent-clis.md](docs/research/agent-clis.md).
 
@@ -181,7 +181,7 @@ You get a link like `https://your-host/claim/hashi_inv_…`. It works once and e
 
 Spend uses the cost estimate the agent reports. Claude Code reports one; Codex does not, so budgets only bound Claude. Invited tokens default to 3 prompts in flight. A token over a cap gets `429 limit_reached` with the `limit` it hit and `resetAt`.
 
-**Pause, extend, revoke.** `p` in the Tokens view, `hashi token update <prefix> --pause`, or `PATCH /v1/tokens/{id}` with `{"paused": true}`. A paused token is refused on its very next prompt and can still read its earlier results. Resuming keeps every setting.
+**Pause, extend, revoke.** `p` in the Tokens view, `hashi token update <prefix> --pause`, or `PATCH /v1/tokens/{id}` with `{"paused": true}`. A paused token is refused on its very next prompt and can still read its earlier results; prompts it had already queued wait until you resume it. When a token expires, its queued prompts fail without running. Revoking a token stops its running prompts at once (within about 2 seconds when you revoke from another terminal with `hashi token revoke`). Resuming keeps every setting.
 
 **Let people check themselves.** `/me` is a page where a token holder pastes their token to see their status, limits and today's use. Apps can call `GET /v1/me`.
 
@@ -326,7 +326,7 @@ Hashi listens on `127.0.0.1` over plain HTTP by default, which is fine for apps 
 | Cloudflare quick tunnel | `hashi serve --tunnel` | random `https://*.trycloudflare.com`, new on every start | trying it out, short sessions |
 | Cloudflare named tunnel | `hashi serve --tunnel-token <token> --public-url https://hashi.example.com` | your own hostname, stable | sharing invite links that last |
 | Hashi serves HTTPS itself | `hashi serve --tls-cert cert.pem --tls-key key.pem` | wherever you point DNS or your VPN | LANs, Tailscale, your own certificates |
-| Your reverse proxy | run Caddy or nginx in front, then `--public-url https://...` | your proxy's address | existing setups |
+| Your reverse proxy | run Caddy or nginx in front, then `--public-url https://... --trust-proxy` | your proxy's address | existing setups |
 
 **Quick tunnel.** Install `cloudflared` (`brew install cloudflared` or your platform's package) and add `--tunnel`. The URL appears in the dashboard header. Because it changes on restart, invite links made against it stop working after a restart.
 
@@ -340,6 +340,8 @@ Hashi listens on `127.0.0.1` over plain HTTP by default, which is fine for apps 
 
 Then share links with `--public-url` set to the address people will use, so invites point at the right place.
 
+**Behind a reverse proxy**, pass `--trust-proxy` so Hashi reads each client's address from `X-Forwarded-For` (only on connections from loopback) and rate limits people separately instead of as one. Over plain HTTP, Hashi answers only requests whose `Host` is an IP address, `localhost`, the `--public-url` host or a name you list with `--allowed-host`, which stops DNS rebinding pages. Caddy forwards the original host name, so set `--public-url` or `--allowed-host` for it. Web pages on other sites cannot call Hashi unless you list their origin with `--cors-origin`.
+
 Hashi always gives cloudflared its own empty config file, so an existing `~/.cloudflared/config.yml` from another project cannot redirect Hashi's tunnel. Hashi also never downloads `cloudflared` for you, because running an unverified binary fetched at runtime is a supply-chain risk.
 
 ## Security
@@ -349,14 +351,18 @@ Anyone holding a token can make your agent run on your computer with your accoun
 - **Tokens.** Each token is 256 bits from the OS random generator, prefixed `hashi_` so secret scanners recognise it. The database stores only its SHA-256 hash.
 - **Least privilege.** Tokens default to the `user` role. Only admins manage tokens, and the last admin cannot be revoked. Requests are visible only to the token that made them, and to admins.
 - **No shell.** Agents are started directly with an argument vector. The prompt always follows `--`, so it can never be read as a flag. Model names and session ids are checked against a strict alphabet and may not start with `-`.
-- **Sandboxed by default.** Codex runs with `sandbox_mode="read-only"`. Claude Code runs in print mode with its normal permission rules and a turn limit. Loosen these deliberately with `--codex-sandbox` and `--claude-permission-mode`.
+- **Sandboxed by default.** Codex runs with `sandbox_mode="read-only"`. Claude Code runs in print mode with a turn limit, your user settings only, no MCP servers and no `WebFetch`. opencode may only read. Loosen these deliberately with `--codex-sandbox`, `--claude-permission-mode` and the agent's extra arguments. See [Supported agents](#supported-agents) for every agent.
+- **Agents run as you.** An agent run uses your account and can read whatever your account can, unless the agent's own sandbox stops it. That includes `~/.hashi/hashi.db` (every token's prompts and answers) and other tokens' workspaces; only opencode is confined to its workspace. Share agents that can read files only with people you would trust with them. Hashi removes its own settings (`HASHI_*` variables and `TUNNEL_TOKEN`) from every agent's environment, so a run never sees your tunnel token.
 - **Isolated workspaces.** Every token gets its own working directory for each agent, under `~/.hashi/workspaces/<token>/<agent>/`. One agent with write access can never plant project config (such as hook definitions in `.claude/settings.json` or `.gemini/settings.json`) that a different agent would load.
-- **Limits.** Bodies over 64 KB and prompts over 32 KB are refused. Each run is killed after its timeout (default 5 minutes) or once it prints more than 10 MB. There is a per-token rate limit (default 60 requests per minute) and a global queue cap.
+- **Limits.** Bodies over 64 KB and prompts over 32 KB are refused, and a request body must arrive within 10 seconds. One client address may hold at most an eighth of the connection slots (at least 4; loopback, where tunnels and proxies connect from, is exempt). Shutdown waits at most 10 seconds for open requests. Each run is killed after its timeout (default 5 minutes) or once it prints more than 10 MB. There is a per-token rate limit (default 60 requests per minute) and a global queue cap.
 - **Fair sharing.** A `user` token created without limits (`POST /v1/tokens`, `hashi token create`, dashboard `n`) may have 3 prompts in flight; invite tokens get the same default and admins stay unlimited. The in-flight cap and the queue cap are checked in the same database transaction as the insert, so a burst of parallel requests cannot slip past them. The last 10% of the queue (at least 5 slots, at most half) is kept for admin tokens, so a flood from people you share with never locks you out. Each token may hold at most 4 long polls open at once (`wait` on `POST /v1/ask` and `GET /v1/ask/{id}`, and the MCP `ask_*` and `get_result` tools); a further wait answers at once with the current state (202) instead of holding a connection.
-- **Protecting your machine.** People you share with decide when agents start, so Hashi keeps your computer usable whatever a token does. Runs across all agents are capped (`--max-running`, from your memory and CPU count). Before a run starts, Hashi checks that it would still leave your memory reserve free and that the disk under `~/.hashi` is above its floor; if not, the request waits in the queue, keeping its place, and the dashboard shows "held: low memory" or "held: disk". While a run is active its whole process tree (the agent plus every shell or server it spawns) is measured every 2 seconds and stopped above `--run-memory-limit`, failing that request with the measured and allowed sizes. Each run gets its own process group on Unix (the process tree on Windows), so a timeout, memory stop, output overflow or shutdown kills everything it started, and agents run at a lower priority (`--nice 10`). Memory and disk figures appear only in the dashboard and the admin `GET /v1/stats`, never on `/v1/status`, `/v1/me` or MCP.
-- **Private data.** `~/.hashi` is created `0700` and the database `0600`.
+- **Protecting your machine.** People you share with decide when agents start, so Hashi keeps your computer usable whatever a token does. Runs across all agents are capped (`--max-running`, from your memory and CPU count). Before a run starts, Hashi checks that it would still leave your memory reserve free and that the disk under `~/.hashi` is above its floor; if not, the request waits in the queue, keeping its place, and the dashboard shows "held: low memory" or "held: disk". While a run is active its whole process tree (the agent plus every shell or server it spawns) is measured every 2 seconds and stopped above `--run-memory-limit`, failing that request with the measured and allowed sizes. Each run gets its own process group on Unix (the process tree on Windows), so a timeout, memory stop, output overflow or shutdown kills everything it started, and agents run at a lower priority (`--nice 10`). Processes that detach into their own session are tracked too: their memory counts against the run, and they are killed when it ends. On Linux Hashi adopts orphaned descendants so none can slip away; on macOS one that detaches and loses its parent between two samples can still escape. On Windows each run is a Job Object that kills every descendant when it closes. Memory and disk figures appear only in the dashboard and the admin `GET /v1/stats`, never on `/v1/status`, `/v1/me` or MCP.
+- **Private data.** On macOS and Linux, `~/.hashi` is created `0700`, and the database with its WAL and SHM files, logs, crash files, the tunnel config and `hashi report` output are `0600`. On Windows, Hashi limits the home to you, SYSTEM and Administrators; a `HASHI_HOME` outside your profile prints a warning, and Hashi refuses to start there if it cannot set that.
+- **Clean output.** Errors returned to token holders have your home directory replaced by `~` and secrets masked. Headless output strips control and text-direction characters, so agent output cannot rewrite your terminal.
 - **Bounded storage.** Every hour Hashi deletes finished requests older than `--retention-days` (never the current month, which monthly caps count from), plus audit records and claimed or expired invites older than the retention period or 90 days, whichever is longer, and returns the freed pages to the disk with SQLite incremental vacuum. An existing database is converted to incremental vacuum on first start when their live data is under 128 MiB; a larger one is converted by the hourly pass once pruning brings it under that size. Usage checks read only an index, never prompt or response text, and the dashboard list loads only the first 200 characters of each prompt. Revoking a token (API, CLI or dashboard) deletes its workspace under `~/.hashi/workspaces/`, removing symlinks without following them. A request that was running when Hashi crashed is re-queued on the next start, but one that has interrupted the server 3 times fails instead of running again. The log keeps the first 500 characters of an agent's error; the full text stays with the request.
-- **Loopback first.** Binding to a non-loopback address without TLS prints a warning. Tunnels and HTTPS are opt-in.
+- **Loopback first.** Binding to a non-loopback address without TLS prints a warning. Tunnels and HTTPS are opt-in. Cross-origin browser access is off and plain HTTP checks the `Host` header (see [Remote access and HTTPS](#remote-access-and-https)).
+- **Wrong guesses are throttled, right ones are not.** Invalid tokens and invite codes are rate limited per client address, but a valid token or code always works, so someone guessing from the same address as you cannot lock you out.
+- **Withdrawing access is immediate.** Pause holds queued prompts, expiry fails them, and revoke stops running ones. Request and spend caps are checked in the same database transaction as the insert. Hashi shuts down cleanly on Ctrl-C, `SIGTERM`, `SIGHUP` and Windows console close, and a second signal exits at once.
 - **Sharing is bounded.** Invite links are single-use, hashed and short-lived, and create `user` tokens only. Usage caps and pause apply to HTTP and MCP alike, and every change is audited.
 - **Pages are locked down.** The claim and My access pages load nothing from other sites, run no inline script, and are served with a strict Content Security Policy, `no-referrer` and `no-store`, so an invite code never leaks through a Referer header or a cache.
 - **Supply chain.** `unsafe` is forbidden in the crate. CI runs `cargo deny` for advisories, licences and sources.
@@ -373,7 +379,10 @@ Every flag also reads an environment variable.
 | `--bind` | `HASHI_BIND` | `127.0.0.1` |
 | `--port` | `HASHI_PORT` | `7878` |
 | `--tunnel` | `HASHI_TUNNEL` | off |
-| `--tunnel-token` | `HASHI_TUNNEL_TOKEN` | none. Runs a named tunnel; needs `--public-url` |
+| `--tunnel-token` | `HASHI_TUNNEL_TOKEN` | none. Runs a named tunnel; needs `--public-url`. Prefer the variable: the flag shows in the process list, and Hashi warns |
+| `--trust-proxy` | `HASHI_TRUST_PROXY` | off. Read client addresses from `X-Forwarded-For` on loopback connections |
+| `--cors-origin` | `HASHI_CORS_ORIGINS` (comma separated) | none. Origins allowed to call Hashi from a browser |
+| `--allowed-host` | `HASHI_ALLOWED_HOSTS` (comma separated) | none. Extra host names accepted over plain HTTP |
 | `--public-url` | `HASHI_PUBLIC_URL` | none. Base for invite links, for example `https://hashi.example.com` |
 | `--tls-cert`, `--tls-key` | `HASHI_TLS_CERT`, `HASHI_TLS_KEY` | none. Serve HTTPS with these PEM files |
 | `--name` | `HASHI_NAME` | `Hashi`. Shown on invite and My access pages |
@@ -404,7 +413,7 @@ Sizes take binary units or a share of the total: `512M`, `4G`, `1.5G`, `25%`. Pa
 
 ```bash
 hashi doctor                               # are the agents and cloudflared installed?
-hashi report                               # redacted diagnostics to attach to a bug report
+hashi report                               # redacted diagnostics to attach to a bug report (no prompts or agent output unless --include-prompts)
 hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
 hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, --clear-limits
@@ -439,7 +448,8 @@ A request is written to SQLite and the matching agent's worker is woken. The wor
 - The machine running Hashi has to stay on, with the agents signed in.
 - Each run is a full agent session, so answers take seconds to minutes.
 - With the default `--concurrency 1`, prompts for the same agent run one at a time.
-- On Windows, npm installs Codex as a `codex.cmd` batch shim. Rust refuses to pass arguments it cannot quote safely for a batch file, so a prompt containing such characters fails with a clear error instead of running.
+- On Windows, npm installs agents such as Codex as `.cmd` batch shims. Rust refuses to pass arguments it cannot quote safely for a batch file, so a prompt with a line break fails with a clear error instead of running, and very long prompts can exceed the 8191-character command line. Hashi stops such shims from picking up a `node` program planted in the workspace.
+- Spend caps count only finished runs, so prompts already running can take a token past its budget by up to `maxPending` runs.
 - Using your subscription this way is subject to each provider's terms. Check them for your plan before you share access.
 
 ## Reporting a bug
