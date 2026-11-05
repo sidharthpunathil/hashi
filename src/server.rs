@@ -108,6 +108,9 @@ pub struct ServerConfig {
     /// How long an account that hit its limit is skipped when its message
     /// gives no reset time.
     pub account_cooldown: std::time::Duration,
+    /// Usage polling, the default account strategy and the rotate
+    /// threshold. The default polls nothing.
+    pub usage: crate::usage::UsageSettings,
 }
 
 /// A running server.
@@ -1000,6 +1003,34 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         cfg.retention_days,
         cancel.clone(),
     );
+
+    // Usage: the default policy, and a poller for refreshes and (unless
+    // turned off) background reads of Claude Code and Codex accounts.
+    let hub = dispatcher.usage();
+    hub.set_policy(cfg.usage.policy);
+    let installed: Vec<AgentKind> = state
+        .runtime
+        .agents
+        .iter()
+        .filter(|a| a.available)
+        .map(|a| a.agent)
+        .collect();
+    let poller = Arc::new(crate::usage::Poller::new(
+        Arc::clone(&store),
+        bus.clone(),
+        hub,
+        cfg.home.clone(),
+        cfg.usage.clone(),
+        cfg.agents.get(&AgentKind::Codex).map(|c| c.bin.clone()),
+        &installed,
+    ));
+    if cfg.usage.poll {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        hub.install(Arc::clone(&poller), Some(tx));
+        tasks.spawn(Arc::clone(&poller).run(rx, cancel.clone()));
+    } else {
+        hub.install(poller, None);
+    }
 
     let mut app = api::router(state.clone(), &net);
     let shutdown = cancel.clone();

@@ -16,7 +16,14 @@
 //! row; workers notice that within [`ROW_CHECK_EVERY`] and stop the run too.
 //!
 //! A token can list several accounts per agent (see [`crate::accounts`]).
-//! A run uses the first one that is enabled and not at its limit. When the
+//! A run uses one that is enabled and not at its limit, chosen by the
+//! project's account strategy over each account's usage (see
+//! [`crate::usage::choose`]; `in-order` takes the first one under the
+//! rotate threshold). A stateful conversation stays on its account until
+//! that account reaches the threshold, then starts fresh on the newly
+//! chosen one. Every run's rate-limit figures are recorded, published as
+//! [`Event::AccountUsage`] when they change, and the poller reads the
+//! account again soon after. When the
 //! run fails with that agent's limit message, the account is marked limited
 //! (until the reset time in the message, or for the cooldown) and the
 //! request goes back to the queue, keeping its place, to run on the next
@@ -109,6 +116,7 @@ type Runs = Arc<Mutex<HashMap<String, RunEntry>>>;
 pub struct Dispatcher {
     notify: Arc<HashMap<AgentKind, Arc<Notify>>>,
     runs: Runs,
+    usage: Arc<crate::usage::Hub>,
 }
 
 /// Registration of one run. Dropping it marks the run as finished.
@@ -141,7 +149,15 @@ impl Dispatcher {
         Self {
             notify: Arc::new(map),
             runs: Runs::default(),
+            usage: Arc::default(),
         }
+    }
+
+    /// The server's usage state: the default strategy and threshold, and
+    /// the poller.
+    #[must_use]
+    pub fn usage(&self) -> &Arc<crate::usage::Hub> {
+        &self.usage
     }
 
     /// Signals that `agent` has queued work.
@@ -531,24 +547,43 @@ impl Worker {
         Ok(proj::effective(token, project.as_ref()))
     }
 
-    /// The account the token's next run on this agent should use: the first
-    /// in its effective list that is not in `tried`, still exists, is
-    /// enabled and is not at its limit. Without a list it uses the default
-    /// account.
+    /// The strategy and threshold for a run: the project's, or the
+    /// server's defaults.
+    fn policy(&self, eff: &Effective) -> crate::usage::Policy {
+        let default = self.dispatcher.usage().policy();
+        crate::usage::Policy {
+            strategy: eff.account_strategy.unwrap_or(default.strategy),
+            rotate_at: eff.rotate_at.unwrap_or(default.rotate_at),
+        }
+    }
+
+    /// The account the token's next run on this agent should use, from its
+    /// effective list: accounts in `tried`, removed, disabled or at their
+    /// limit are out. A stateful conversation stays on its account while
+    /// that account is under the threshold (see
+    /// [`crate::usage::keep_session`]); otherwise the project's strategy
+    /// chooses (see [`crate::usage::choose`]). Without a list it uses the
+    /// default account.
     fn pick_account(
         &self,
-        accounts: &AccountMap,
+        req: &Request,
+        eff: &Effective,
         tried: &[String],
     ) -> Result<Option<Picked>, Halt> {
-        let Some(list) = accounts.get(&self.agent).filter(|l| !l.is_empty()) else {
+        let Some(list) = eff.accounts.get(&self.agent).filter(|l| !l.is_empty()) else {
             return Ok(Some(Picked {
                 name: acct::DEFAULT.to_owned(),
                 kind: AccountKind::Default,
                 listed: false,
+                fresh: false,
             }));
         };
         let now = now_ms();
-        for name in list.iter().filter(|n| !tried.contains(n)) {
+        let policy = self.policy(eff);
+        let mut names: Vec<&String> = Vec::new();
+        let mut kinds = Vec::new();
+        let mut candidates = Vec::new();
+        for name in list {
             let state = self
                 .store
                 .get_account(self.agent, name)
@@ -560,15 +595,83 @@ impl Worker {
                 Some(s) if s.kind == AccountKind::Default => continue,
                 Some(s) => s.kind,
             };
-            if state.is_none_or(|s| s.status(now) == AccountStatus::Ready) {
-                return Ok(Some(Picked {
-                    name: name.clone(),
-                    kind,
-                    listed: true,
-                }));
-            }
+            let ready = !tried.contains(name)
+                && state.is_none_or(|s| s.status(now) == AccountStatus::Ready);
+            let summary = self
+                .store
+                .account_summary(self.agent, name, policy.rotate_at, now)
+                .map_err(|e| e.to_string())?;
+            names.push(name);
+            kinds.push(kind);
+            candidates.push(crate::usage::Candidate {
+                available: ready,
+                summary,
+            });
         }
-        Ok(None)
+        let picked = |i: usize, fresh: bool| Picked {
+            name: names[i].clone(),
+            kind: kinds[i],
+            listed: true,
+            fresh,
+        };
+        let current = if req.stateful {
+            let owned: Vec<String> = names.iter().map(|n| (*n).clone()).collect();
+            self.store
+                .latest_conversation(&req.token_id, self.agent, eff.session_key(), &owned)
+                .map_err(|e| e.to_string())?
+        } else {
+            None
+        };
+        if let Some(i) = current
+            .as_ref()
+            .and_then(|c| names.iter().position(|n| *n == c))
+            && crate::usage::keep_session(&candidates[i], policy.rotate_at)
+        {
+            return Ok(Some(picked(i, false)));
+        }
+        Ok(
+            crate::usage::choose(policy.strategy, &candidates, policy.rotate_at).map(|i| {
+                let moved = current.as_ref().is_some_and(|c| c != names[i]);
+                picked(i, moved)
+            }),
+        )
+    }
+
+    /// Records the rate-limit figures a run reported on `account`, and
+    /// publishes the account's usage if it changed.
+    fn record_run_usage(&self, account: &str, limits: &[agent::RateLimit]) {
+        let windows: Vec<crate::usage::Window> = limits
+            .iter()
+            .filter_map(|l| {
+                let (key, label, mins) = crate::usage::claude::event_window(l.kind.as_deref()?)?;
+                let used = match (l.used_percent, l.status) {
+                    (_, agent::RateLimitStatus::Rejected) => 100.0,
+                    (Some(u), _) => u,
+                    (None, _) => return None,
+                };
+                Some(crate::usage::Window::new(
+                    key,
+                    label,
+                    used,
+                    l.resets_at,
+                    Some(mins),
+                    crate::usage::Source::Run,
+                ))
+            })
+            .collect();
+        if !windows.is_empty()
+            && let Err(e) = self.store.record_usage(self.agent, account, &windows)
+        {
+            warn!(error = %e, "failed to record a run's usage");
+        }
+    }
+
+    /// Publishes an account's usage after a run and asks the poller to read
+    /// it again soon.
+    fn after_run(&self, account: &str) {
+        let hub = self.dispatcher.usage();
+        crate::usage::publish(&self.store, &self.bus, hub, self.agent, account);
+        hub.ran(self.agent, account);
     }
 
     /// Why no account of the token's list can run this agent now.
@@ -658,9 +761,21 @@ impl Worker {
             }
         };
 
-        let Some(account) = self.pick_account(&eff.accounts, &req.accounts_tried)? else {
+        let Some(account) = self.pick_account(req, &eff, &req.accounts_tried)? else {
             return Err(Halt::Failed(self.none_left(&eff.accounts)));
         };
+        // Moving a conversation to another account starts it fresh there,
+        // rather than resuming an older one kept on that account.
+        if account.fresh
+            && let Err(e) = self.store.clear_conversation(
+                &req.token_id,
+                self.agent,
+                &account.name,
+                eff.session_key(),
+            )
+        {
+            warn!(error = %e, "failed to start a fresh conversation");
+        }
         // The owner's credential variables are removed and the account's
         // own set, for every account but the default.
         let env = acct::run_env(&self.cfg.home, self.agent, &account.name, account.kind).map_err(
@@ -702,7 +817,9 @@ impl Worker {
         let out = match result {
             Ok(out) => out,
             Err(e) => {
-                return Err(self.failed(req, &eff, &account, env.as_ref(), &e.to_string()));
+                let halt = self.failed(req, &eff, &account, env.as_ref(), &e);
+                self.after_run(&account.name);
+                return Err(halt);
             }
         };
         if account.listed
@@ -712,6 +829,12 @@ impl Worker {
         {
             warn!(error = %e, "failed to record the account's use");
         }
+        // A run that went through is no longer at a limit a failed one saw.
+        if let Err(e) = self.store.clear_error_usage(self.agent, &account.name) {
+            warn!(error = %e, "failed to clear an account's limit record");
+        }
+        self.record_run_usage(&account.name, &out.rate_limits);
+        self.after_run(&account.name);
 
         if req.stateful
             && let Some(session) = out.session_id.as_deref().filter(|s| agent::is_safe_arg(s))
@@ -739,9 +862,22 @@ impl Worker {
         eff: &Effective,
         account: &Picked,
         env: Option<&EnvOverride>,
-        error: &str,
+        agent_error: &agent::AgentError,
     ) -> Halt {
-        let mut error = error.to_owned();
+        // A limit the agent reported in its structured output wins over
+        // reading the message text.
+        let structured = match agent_error {
+            agent::AgentError::Limited {
+                resets_at,
+                rate_limits,
+                ..
+            } => {
+                self.record_run_usage(&account.name, rate_limits);
+                Some(*resets_at)
+            }
+            _ => None,
+        };
+        let mut error = agent_error.to_string();
         for (_, value) in env.map(|e| e.set.as_slice()).unwrap_or_default() {
             error = error.replace(value.as_str(), "<account>");
         }
@@ -752,7 +888,15 @@ impl Worker {
         if !account.listed {
             return Halt::Failed(error);
         }
-        let Some(reset) = agent::limit_hit(self.agent, &error) else {
+        let reset_ms = match structured {
+            Some(reset) => Some(reset),
+            None => agent::limit_hit(self.agent, &error).map(|reset| {
+                reset.map(|t| {
+                    i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
+                })
+            }),
+        };
+        let Some(reset) = reset_ms else {
             if let Err(e) = self
                 .store
                 .mark_account_used(self.agent, &account.name, false)
@@ -763,9 +907,11 @@ impl Worker {
         };
         let now = now_ms();
         let cooldown = i64::try_from(self.cfg.account_cooldown.as_millis()).unwrap_or(i64::MAX);
+        let latest = now
+            .saturating_add(i64::try_from(agent::limit::MAX_RESET.as_millis()).unwrap_or(i64::MAX));
         let until = reset
-            .map(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX))
             .filter(|t| *t > now)
+            .map(|t| t.min(latest))
             .unwrap_or_else(|| now.saturating_add(cooldown));
         if let Err(e) = self
             .store
@@ -773,11 +919,25 @@ impl Worker {
         {
             warn!(error = %e, "failed to mark the account limited");
         }
+        let window = crate::usage::Window::new(
+            "limit",
+            "limit",
+            100.0,
+            Some(until),
+            None,
+            crate::usage::Source::Error,
+        );
+        if let Err(e) = self
+            .store
+            .record_usage(self.agent, &account.name, &[window])
+        {
+            warn!(error = %e, "failed to record the account's limit");
+        }
         info!(agent = %self.agent, account = %account.name,
               until = %crate::util::rfc3339(until).unwrap_or_default(), "account at its limit");
         let mut tried = req.accounts_tried.clone();
         tried.push(account.name.clone());
-        match self.pick_account(&eff.accounts, &tried) {
+        match self.pick_account(req, eff, &tried) {
             Ok(Some(_)) => match self.store.requeue_after_limit(&req.id, &account.name) {
                 Ok(()) => Halt::Failover(account.name.clone()),
                 Err(e) => Halt::Failed(e.to_string()),
@@ -796,6 +956,9 @@ struct Picked {
     /// Whether it came from the token's list. Only listed accounts have
     /// their limits tracked; a token without a list runs as before.
     listed: bool,
+    /// The token's conversation moves here from another account, so it
+    /// starts fresh.
+    fresh: bool,
 }
 
 /// Who asked for a cancel.

@@ -176,8 +176,8 @@ impl Store {
     }
 
     /// Deletes an account's row and takes it off every token, invite and
-    /// project that lists it, and forgets the conversations kept on it, in one
-    /// transaction.
+    /// project that lists it, and forgets the conversations and usage kept on
+    /// it, in one transaction.
     ///
     /// # Errors
     ///
@@ -213,10 +213,12 @@ impl Store {
                 }
             }
         }
-        tx.execute(
-            "DELETE FROM sessions WHERE agent = ?1 AND account = ?2",
-            params![agent.as_str(), name],
-        )?;
+        for table in ["sessions", "usage", "usage_polls"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE agent = ?1 AND account = ?2"),
+                params![agent.as_str(), name],
+            )?;
+        }
         tx.commit()?;
         Ok(out)
     }

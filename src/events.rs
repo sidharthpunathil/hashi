@@ -4,6 +4,7 @@ use tokio::sync::broadcast;
 
 use crate::agent::AgentKind;
 use crate::guard::HoldReason;
+use crate::usage::UsageState;
 
 /// Something worth telling observers about.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,8 +60,60 @@ pub enum Event {
         /// Its release page.
         url: String,
     },
+    /// An account's usage changed: its state, or its whole-percent headroom.
+    /// Never published to token holders.
+    AccountUsage {
+        /// Agent.
+        agent: AgentKind,
+        /// Account name.
+        account: String,
+        /// The state now.
+        state: UsageState,
+        /// The state before, when one was published.
+        previous: Option<UsageState>,
+        /// Percent left, when known.
+        headroom: Option<u8>,
+        /// Until when it is limited, Unix ms.
+        until: Option<i64>,
+    },
     /// Free-form operational message.
     Log(String),
+}
+
+impl Event {
+    /// For an [`Event::AccountUsage`] whose state changed in a way the owner
+    /// should hear about (crossed the threshold, became limited, or
+    /// recovered), the line to show.
+    #[must_use]
+    pub fn usage_alert(&self) -> Option<String> {
+        let Self::AccountUsage {
+            agent,
+            account,
+            state,
+            previous,
+            headroom,
+            until,
+        } = self
+        else {
+            return None;
+        };
+        let name = format!("{} account {account}", agent.display_name());
+        let left = headroom
+            .map(|h| format!(" ({h}% left)"))
+            .unwrap_or_default();
+        match (previous, state) {
+            (Some(p), s) if p == s => None,
+            (_, UsageState::Limited) => Some(match until.and_then(crate::util::rfc3339) {
+                Some(t) => format!("{name} is at its limit until {t}"),
+                None => format!("{name} is at its limit"),
+            }),
+            (_, UsageState::Warning) => Some(format!("{name} crossed its rotate threshold{left}")),
+            (Some(UsageState::Limited | UsageState::Warning), UsageState::Ok) => {
+                Some(format!("{name} recovered{left}"))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Cloneable publisher handle.

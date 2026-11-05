@@ -388,6 +388,19 @@ pub fn headless_line(ev: &crate::events::Event) -> String {
         Event::UpdateAvailable { version, url } => {
             format!("  ↑ update   v{version} is available, run hashi update ({url})")
         }
+        Event::AccountUsage {
+            agent,
+            account,
+            state,
+            headroom,
+            ..
+        } => match ev.usage_alert() {
+            Some(alert) => format!("  ! usage    {alert}"),
+            None => format!(
+                "  · usage    {agent}:{account} {state}{}",
+                headroom.map(|h| format!(", {h}% left")).unwrap_or_default()
+            ),
+        },
         Event::Log(msg) => format!("  · {msg}"),
     };
     terminal_safe(&line)

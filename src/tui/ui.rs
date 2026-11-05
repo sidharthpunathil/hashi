@@ -625,6 +625,12 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
             Span::styled(" accounts", t::muted()),
         ]);
     }
+    let rotate_at = app.state.dispatcher.usage().policy().rotate_at;
+    counts_line.spans.extend(super::usage::headroom_spans(
+        &app.state.store,
+        agent,
+        rotate_at,
+    ));
     frame.render_widget(Paragraph::new(counts_line), counts);
 
     let lat = app.latencies(agent, 60);

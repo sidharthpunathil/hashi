@@ -338,8 +338,38 @@ struct ServeArgs {
     #[arg(long, default_value_t = 60, env = "HASHI_ACCOUNT_COOLDOWN",
           value_parser = clap::value_parser!(u32).range(1..=10_080))]
     account_cooldown: u32,
+    /// Do not read Claude Code and Codex quota in the background. Runs and
+    /// their limit errors are still recorded. `HASHI_USAGE_POLL=0` does the
+    /// same.
+    #[arg(long)]
+    no_usage_poll: bool,
+    /// How runs choose among an agent's accounts when the project sets
+    /// nothing: in-order, most-left or soonest-reset.
+    #[arg(long, default_value = "in-order", env = "HASHI_ACCOUNT_STRATEGY",
+          value_parser = parse_strategy)]
+    account_strategy: hashi::usage::Strategy,
+    /// Percent used (50 to 99) at which runs move off an account, when the
+    /// project sets nothing.
+    #[arg(long, value_name = "PCT", default_value_t = hashi::usage::DEFAULT_ROTATE_AT,
+          env = "HASHI_ROTATE_AT", value_parser = clap::value_parser!(u8).range(50..=99))]
+    rotate_at: u8,
     #[command(flatten)]
     agents: AgentArgs,
+}
+
+fn parse_strategy(s: &str) -> Result<hashi::usage::Strategy, String> {
+    s.parse()
+}
+
+/// Whether `HASHI_USAGE_POLL` turns background usage polling off (`0`,
+/// `false`, `no` or `off`).
+fn usage_poll_env_off() -> bool {
+    std::env::var("HASHI_USAGE_POLL").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 #[derive(Debug, Args)]
@@ -561,6 +591,14 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
             cloudflared_bin: args.helpers.cloudflared_bin.clone(),
         },
         account_cooldown: Duration::from_secs(u64::from(args.account_cooldown) * 60),
+        usage: hashi::usage::UsageSettings {
+            poll: !args.no_usage_poll && !usage_poll_env_off(),
+            policy: hashi::usage::Policy {
+                strategy: args.account_strategy,
+                rotate_at: args.rotate_at,
+            },
+            ..hashi::usage::UsageSettings::default()
+        },
     };
 
     let bus = Bus::default();

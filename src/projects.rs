@@ -29,6 +29,7 @@ use serde::Serialize;
 use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
 use crate::token::Token;
+use crate::usage::Strategy;
 
 /// Name of the implicit project that means "no project".
 pub const DEFAULT: &str = "default";
@@ -61,6 +62,12 @@ pub struct Project {
     pub models: ModelMap,
     /// Who or what the project is for.
     pub note: Option<String>,
+    /// How runs choose among an agent's accounts; `None` uses the server's
+    /// default.
+    pub account_strategy: Option<Strategy>,
+    /// Percent used at which runs move off an account; `None` uses the
+    /// server's default.
+    pub rotate_at: Option<u8>,
     /// Creation time, Unix ms.
     pub created_at: i64,
 }
@@ -209,6 +216,9 @@ pub fn check_shape(mut p: Project) -> Result<Project, String> {
         ));
     }
     p.note = check_note(p.note.as_deref())?;
+    if let Some(pct) = p.rotate_at {
+        crate::usage::check_rotate_at(pct)?;
+    }
     Ok(p)
 }
 
@@ -260,6 +270,10 @@ pub struct Effective {
     pub default_agent: Option<AgentKind>,
     /// Where runs start.
     pub cwd: Cwd,
+    /// The project's account strategy, when it sets one.
+    pub account_strategy: Option<Strategy>,
+    /// The project's rotate threshold, when it sets one.
+    pub rotate_at: Option<u8>,
 }
 
 impl Effective {
@@ -295,6 +309,7 @@ impl Effective {
 /// - **Model**: the project's per-agent model, for requests that name none.
 /// - **Default agent**: the project's, when the token may use it.
 /// - **Cwd**: the project folder.
+/// - **Strategy and threshold**: the project's, when it sets them.
 ///
 /// Access never widens: every agent and account here is one the project
 /// allows, and every agent is one the token allows.
@@ -308,6 +323,8 @@ pub fn effective(token: &Token, project: Option<&Project>) -> Effective {
             models: ModelMap::new(),
             default_agent: None,
             cwd: Cwd::Workspace,
+            account_strategy: None,
+            rotate_at: None,
         };
     };
     let agents: Vec<AgentKind> = token
@@ -343,6 +360,8 @@ pub fn effective(token: &Token, project: Option<&Project>) -> Effective {
         accounts,
         models,
         cwd: Cwd::Project(PathBuf::from(&p.path)),
+        account_strategy: p.account_strategy,
+        rotate_at: p.rotate_at,
     }
 }
 
@@ -421,6 +440,8 @@ mod tests {
             default_agent: None,
             models: ModelMap::new(),
             note: None,
+            account_strategy: None,
+            rotate_at: None,
             created_at: 0,
         }
     }

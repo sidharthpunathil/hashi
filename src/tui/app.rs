@@ -916,6 +916,15 @@ impl App {
                     text,
                 }
             }
+            ev @ Event::AccountUsage { .. } => {
+                let Some((item, toast)) = super::usage::feed(&ev) else {
+                    return;
+                };
+                if let Some(toast) = toast {
+                    self.notify(toast);
+                }
+                item
+            }
             Event::Log(text) => FeedItem {
                 at: now_ms(),
                 glyph: "·",

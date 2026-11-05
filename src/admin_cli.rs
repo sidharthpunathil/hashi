@@ -659,6 +659,23 @@ pub enum AccountCommand {
         #[command(flatten)]
         bins: BinArgs,
     },
+    /// Show how much of each account's quota is left: a bar per window
+    /// with its reset time, the plan, where the figures came from and the
+    /// state.
+    Usage {
+        /// Only this agent's accounts.
+        #[arg(long)]
+        agent: Option<AgentKind>,
+        /// Read Claude Code and Codex quota now first (read only; tokens
+        /// are never refreshed).
+        #[arg(long)]
+        refresh: bool,
+        /// Print JSON, as `GET /v1/accounts` shows each account.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        bins: BinArgs,
+    },
     /// Stop using an account until it is enabled again.
     Disable {
         /// Agent the account is for.
@@ -1018,10 +1035,12 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                 return Ok(());
             }
             println!(
-                "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} TOKENS",
-                "AGENT", "NAME", "KIND", "SIGNED IN", "STATE", "LAST USED", "TODAY"
+                "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {:<7} USAGE",
+                "AGENT", "NAME", "KIND", "SIGNED IN", "STATE", "LAST USED", "TODAY", "TOKENS"
             );
+            let rotate_at = cli_rotate_at();
             for a in accounts {
+                let summary = store.account_summary(a.agent, &a.name, rotate_at, now)?;
                 let state = match a.status(now) {
                     hashi::store::AccountStatus::Limited(until) => {
                         format!("limited until {}", rfc3339(until).unwrap_or_default())
@@ -1033,7 +1052,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u)));
                 let (today, _) = store.account_runs(a.agent, &a.name, now)?;
                 println!(
-                    "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {}",
+                    "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {:<7} {}",
                     a.agent.as_str(),
                     a.name,
                     a.kind.as_str(),
@@ -1041,10 +1060,17 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     state,
                     used,
                     today,
-                    store.tokens_using_account(a.agent, &a.name)?
+                    store.tokens_using_account(a.agent, &a.name)?,
+                    summary_cell(&summary)
                 );
             }
         }
+        AccountCommand::Usage {
+            agent,
+            refresh,
+            json,
+            bins,
+        } => account_usage(store, home, agent, refresh, json, &bins)?,
         AccountCommand::Disable { agent, name } => set_disabled(store, agent, &name, true)?,
         AccountCommand::Enable { agent, name } => set_disabled(store, agent, &name, false)?,
         AccountCommand::Remove { agent, name, yes } => {
@@ -1104,6 +1130,177 @@ fn set_disabled(store: &Store, agent: AgentKind, name: &str, disabled: bool) -> 
     Ok(())
 }
 
+/// The rotate threshold the CLI shows `warning` at: `HASHI_ROTATE_AT` when
+/// it is a valid one, else the default.
+fn cli_rotate_at() -> u8 {
+    std::env::var("HASHI_ROTATE_AT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u8>().ok())
+        .and_then(|n| hashi::usage::check_rotate_at(n).ok())
+        .unwrap_or(hashi::usage::DEFAULT_ROTATE_AT)
+}
+
+/// The `account list` usage column: `62% left` or `unknown`, with the
+/// state when it is not ok.
+fn summary_cell(s: &hashi::usage::Summary) -> String {
+    use hashi::usage::UsageState;
+    match (s.state, s.headroom_pct()) {
+        (UsageState::Limited, _) => match s.limited_until.and_then(rfc3339) {
+            Some(t) => format!("limited until {t}"),
+            None => "limited".to_owned(),
+        },
+        (UsageState::Warning, Some(h)) => format!("{h}% left (warning)"),
+        (_, Some(h)) => format!("{h}% left"),
+        (_, None) => "unknown".to_owned(),
+    }
+}
+
+/// A bar of `width` cells filled to `used` percent.
+fn usage_bar(used: f64, width: usize) -> String {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let filled = ((hashi::usage::clamp_percent(used) / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Time until `at`, short: `2h 10m`, `4d 3h`.
+fn until(at: i64, now: i64) -> String {
+    let secs = (at.saturating_sub(now) / 1_000).max(0);
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
+    match (d, h) {
+        (0, 0) => format!("{m}m"),
+        (0, h) => format!("{h}h {m}m"),
+        (d, h) => format!("{d}d {h}h"),
+    }
+}
+
+/// `hashi account usage`: each account's windows, plan, source and state,
+/// after reading Claude Code and Codex quota first with `--refresh`.
+fn account_usage(
+    store: &Store,
+    home: &Path,
+    agent: Option<AgentKind>,
+    refresh: bool,
+    json: bool,
+    bins: &BinArgs,
+) -> Result<()> {
+    let mut accounts: Vec<_> = hashi::api::accounts_with_usage(store)
+        .map_err(api_err)?
+        .into_iter()
+        .filter(|a| agent.is_none_or(|g| a.agent == g))
+        .collect();
+    if refresh {
+        let store = std::sync::Arc::new(server_store(home)?);
+        let hub = std::sync::Arc::new(hashi::usage::Hub::default());
+        let installed: Vec<AgentKind> = [AgentKind::Claude, AgentKind::Codex]
+            .into_iter()
+            .filter(|a| agent.is_none_or(|g| *a == g))
+            .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
+            .collect();
+        let poller = hashi::usage::Poller::new(
+            std::sync::Arc::clone(&store),
+            hashi::events::Bus::default(),
+            &hub,
+            home.to_path_buf(),
+            hashi::usage::UsageSettings::default(),
+            Some(bins.bin(AgentKind::Codex)),
+            &installed,
+        );
+        let targets = poller.eligible();
+        let results = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut out = Vec::new();
+                for (a, n) in &targets {
+                    out.push(((*a, n.clone()), poller.poll(*a, n).await));
+                }
+                out
+            })
+        });
+        for ((a, n), r) in results {
+            if let Err(e) = r
+                && !json
+            {
+                eprintln!("{a}:{n}: {e}");
+            }
+        }
+        accounts = hashi::api::accounts_with_usage(store.as_ref())
+            .map_err(api_err)?
+            .into_iter()
+            .filter(|a| agent.is_none_or(|g| a.agent == g))
+            .collect();
+    }
+    let now = now_ms();
+    let rotate_at = cli_rotate_at();
+    if json {
+        let mut list = Vec::new();
+        for a in &accounts {
+            list.push(hashi::api::account_json_with(store, a, now, rotate_at).map_err(api_err)?);
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "accounts": list }))?
+        );
+        return Ok(());
+    }
+    if accounts.is_empty() {
+        println!(
+            "no usage yet: Claude Code and Codex accounts are read while `hashi serve` runs \
+             (or now with --refresh)"
+        );
+        return Ok(());
+    }
+    for a in &accounts {
+        let windows = store.usage_windows(a.agent, &a.name)?;
+        let summary = hashi::usage::summarize(&windows, a.limited_until, rotate_at, now);
+        let poll = store.poll_status(a.agent, &a.name)?;
+        let mut head = format!("{}:{}", a.agent, a.name);
+        if let Some(plan) = poll.as_ref().and_then(|p| p.plan.as_deref()) {
+            head.push_str(&format!("  {plan}"));
+        }
+        head.push_str(&format!("  {}", summary_cell(&summary)));
+        if let Some(w) = windows.iter().max_by_key(|w| w.observed_at)
+            && let Some(at) = w.observed_at
+        {
+            head.push_str(&format!("  ({}, {} ago)", w.source.as_str(), human_age(at)));
+        }
+        println!("{head}");
+        if windows.is_empty() {
+            let spend = store.account_spend_today(a.agent, &a.name, now)?;
+            let (runs, _) = store.account_runs(a.agent, &a.name, now)?;
+            let note = poll
+                .as_ref()
+                .and_then(|p| p.note.clone())
+                .unwrap_or_else(|| "no live quota for this agent".to_owned());
+            println!(
+                "  {note}; {runs} run(s) today, {} tokens, ${:.2} reported",
+                spend.tokens, spend.cost_usd
+            );
+        }
+        for w in &windows {
+            let used = w.used_at(now).unwrap_or(w.used_percent);
+            let mut line = format!("  {:<14} {} {used:>3.0}%", w.label, usage_bar(used, 20));
+            if let Some(at) = w.resets_at.filter(|r| *r > now) {
+                line.push_str(&format!(
+                    "  resets in {} ({})",
+                    until(at, now),
+                    rfc3339(at).unwrap_or_default()
+                ));
+            }
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// The store again, shared, for the poller.
+fn server_store(home: &Path) -> Result<Store> {
+    hashi::server::open_store(home)
+}
+
 // ── projects ───────────────────────────────────────────────────────────────
 
 /// One `--model <agent>=<model>` value.
@@ -1134,6 +1331,19 @@ pub struct ProjectArgs {
     /// Who or what the project is for.
     #[arg(long)]
     note: Option<String>,
+    /// How runs choose among an agent's accounts: in-order, most-left or
+    /// soonest-reset. Default: the server's --account-strategy.
+    #[arg(long, value_parser = parse_strategy)]
+    account_strategy: Option<hashi::usage::Strategy>,
+    /// Percent used (50 to 99) at which runs move off an account. Default:
+    /// the server's --rotate-at.
+    #[arg(long, value_name = "PCT",
+          value_parser = clap::value_parser!(u8).range(50..=99))]
+    rotate_at: Option<u8>,
+}
+
+fn parse_strategy(s: &str) -> Result<hashi::usage::Strategy, String> {
+    s.parse()
 }
 
 /// `hashi project ...`
@@ -1167,6 +1377,12 @@ pub enum ProjectCommand {
         /// Remove every model before applying --model.
         #[arg(long)]
         clear_models: bool,
+        /// Go back to the server's account strategy.
+        #[arg(long, conflicts_with = "account_strategy")]
+        clear_account_strategy: bool,
+        /// Go back to the server's rotate threshold.
+        #[arg(long, conflicts_with = "rotate_at")]
+        clear_rotate_at: bool,
         #[command(flatten)]
         settings: ProjectArgs,
     },
@@ -1186,7 +1402,9 @@ pub enum ProjectCommand {
 /// Crush is opt-in, so it is never part of a project's default agents; list
 /// it with `--agents` to allow it.
 fn installed_agents(bins: &BinArgs) -> Vec<AgentKind> {
-    let candidates = AgentKind::ALL.into_iter().filter(|a| *a != AgentKind::Crush);
+    let candidates = AgentKind::ALL
+        .into_iter()
+        .filter(|a| *a != AgentKind::Crush);
     let found: Vec<AgentKind> = candidates
         .clone()
         .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
@@ -1227,6 +1445,8 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
                 default_agent: settings.default_agent,
                 models: settings.models.into_iter().collect(),
                 note: settings.note,
+                account_strategy: settings.account_strategy,
+                rotate_at: settings.rotate_at,
                 created_at: now_ms(),
             };
             if store.list_projects()?.len() >= hashi::projects::MAX_PROJECTS {
@@ -1254,6 +1474,8 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
             clear_accounts,
             clear_default_agent,
             clear_models,
+            clear_account_strategy,
+            clear_rotate_at,
             settings,
         } => {
             let current = store
@@ -1290,6 +1512,16 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
                 },
                 models,
                 note: settings.note,
+                account_strategy: if clear_account_strategy {
+                    Some(None)
+                } else {
+                    settings.account_strategy.map(Some)
+                },
+                rotate_at: if clear_rotate_at {
+                    Some(None)
+                } else {
+                    settings.rotate_at.map(Some)
+                },
             };
             let (p, changes) =
                 hashi::api::apply_update(store, Some(home), current, body).map_err(api_err)?;
@@ -1308,8 +1540,16 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
             }
             let now = now_ms();
             println!(
-                "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} PATH",
-                "NAME", "TOKENS", "TODAY", "MONTH", "SPEND", "AGENTS", "ACCOUNTS", "MODELS"
+                "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} {:<20} PATH",
+                "NAME",
+                "TOKENS",
+                "TODAY",
+                "MONTH",
+                "SPEND",
+                "AGENTS",
+                "ACCOUNTS",
+                "MODELS",
+                "STRATEGY"
             );
             for p in projects {
                 let st = store.project_stats(&p.name, now)?;
@@ -1317,8 +1557,16 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
                     Some(d) => format!("{} ({d})", hashi::token::encode_agents(&p.agents)),
                     None => hashi::token::encode_agents(&p.agents),
                 };
+                let strategy = match (p.account_strategy, p.rotate_at) {
+                    (None, None) => "server default".to_owned(),
+                    (s, r) => format!(
+                        "{} at {}",
+                        s.map_or("default", hashi::usage::Strategy::as_str),
+                        r.map_or_else(|| "default".to_owned(), |n| format!("{n}%"))
+                    ),
+                };
                 println!(
-                    "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} {}",
+                    "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} {:<20} {}",
                     p.name,
                     st.tokens,
                     st.today_requests,
@@ -1327,6 +1575,7 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
                     agents,
                     acct::format_bindings(&p.accounts),
                     hashi::projects::format_models(&p.models),
+                    strategy,
                     p.path
                 );
             }

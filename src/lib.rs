@@ -24,5 +24,6 @@ pub mod tui;
 pub mod tunnel;
 pub mod uninstall;
 pub mod update;
+pub mod usage;
 pub mod util;
 pub mod web;
