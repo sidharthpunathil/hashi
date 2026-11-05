@@ -15,14 +15,11 @@ subcommand's `--help` from the clap definitions in `src/main.rs` and
 - **In the dashboard**: a key, a form, a popup or a Commands-tab row does the
   same thing, through the same library function the CLI calls. Logic must not
   be duplicated.
-- **Shown, not run**: it cannot or should not run inside a live server. These
-  are `serve` startup flags, `uninstall` (refuses while a server runs) and
-  `hashi ask` without a server. The Commands tab shows the exact command,
-  with `c` to copy it.
+- **Excluded**: `serve` (the dashboard is the running server, and its flags only apply at start) and `uninstall`. They get no dashboard entry, no Commands-tab row and no copy-the-command row. Plain `hashi ask` without a server is covered by the dashboard prompt popup.
 
 Add a parity test that walks the clap command tree, compares it with a table
 in the TUI code that maps every subcommand to its dashboard entry or to
-"shown", and fails when a new subcommand has no entry.
+"excluded", and fails when a new subcommand has no entry.
 
 ## Gaps to close
 
