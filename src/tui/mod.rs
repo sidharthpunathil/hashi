@@ -2,6 +2,7 @@
 
 pub mod access;
 pub mod app;
+pub mod cache;
 mod clipboard;
 pub mod forms;
 mod manage;
@@ -228,7 +229,7 @@ fn reenter(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
 
 /// Applies events that are already waiting, up to a bound so input stays
 /// responsive. Returns `false` once the bus has closed.
-fn drain(app: &mut App, events: &mut tokio::sync::broadcast::Receiver<Event>) -> bool {
+pub fn drain(app: &mut App, events: &mut tokio::sync::broadcast::Receiver<Event>) -> bool {
     use tokio::sync::broadcast::error::TryRecvError;
     for _ in 0..256 {
         match events.try_recv() {

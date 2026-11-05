@@ -95,6 +95,7 @@ fn nothing(body: &crate::api::UpdateTokenBody) -> bool {
         && body.limits.is_none()
         && body.accounts.is_none()
         && body.project.is_none()
+        && body.share_usage.is_none()
 }
 
 impl App {
@@ -111,6 +112,10 @@ impl App {
             Err(_) => return false,
         };
         let any = !done.is_empty();
+        if any {
+            // A bridge may have been saved.
+            self.cache.clear();
+        }
         for d in done {
             match d {
                 Done::Connected(Ok(name)) => {
@@ -138,6 +143,12 @@ impl App {
                     }) if *r == remote => *answer = Some(result),
                     _ => self.notify(format!("{remote} answered; ask again to see it")),
                 },
+                Done::RemoteAccount {
+                    agent,
+                    name,
+                    remote,
+                    result,
+                } => self.remote_account_done(agent, &name, &remote, result),
                 Done::RequestStatus(result) => {
                     self.request_checking = false;
                     match result {
@@ -694,6 +705,12 @@ impl App {
             KeyCode::Right | KeyCode::Char(' ') if form.field == EditTokenForm::PROJECT => {
                 form.project.shift(1);
             }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if form.field == EditTokenForm::SHARE_USAGE =>
+            {
+                form.share_usage = !form.share_usage;
+                form.error = None;
+            }
             _ => {
                 let max = match form.field {
                     0 => 100,
@@ -922,7 +939,11 @@ impl App {
         }
         let row = rows.get(selected).cloned();
         match (code, row) {
-            (KeyCode::Char('a'), _) => return Some(Popup::AddAccount(Box::default())),
+            (KeyCode::Char('a'), _) => {
+                return Some(Popup::AddAccount(Box::new(AccountForm::with_remotes(
+                    self.remote_names(),
+                ))));
+            }
             (KeyCode::Char('l'), Some(a)) => {
                 if a.kind.is_key() {
                     self.notify("a key account has no sign-in; remove it and add the new key");
@@ -989,16 +1010,25 @@ impl App {
 
     fn add_account_key(&mut self, mut form: Box<AccountForm>, code: KeyCode) -> Option<Popup> {
         let fields = form.fields();
+        if form.busy {
+            // The bridge is being checked; the answer closes the form.
+            return Some(Popup::AddAccount(form));
+        }
         match code {
             KeyCode::Esc => return Some(Popup::Accounts { selected: 0 }),
+            KeyCode::Enter if form.kind == AccountKind::Remote => {
+                return self.add_remote_account(form);
+            }
             KeyCode::Enter => return self.add_account(form),
             _ if nav(&mut form.field, fields, code, |_| false) => {}
-            KeyCode::Left if matches!(form.field, 0 | 2) => form.step(-1),
-            KeyCode::Right | KeyCode::Char(' ') if matches!(form.field, 0 | 2) => form.step(1),
+            KeyCode::Left if form.on_choice() => form.step(-1),
+            KeyCode::Right | KeyCode::Char(' ') if form.on_choice() => form.step(1),
             _ => {
                 let used = match form.field {
                     1 => edit(&mut form.name, code, 32),
-                    AccountForm::KEY => edit_secret(&mut form.key, code, AccountForm::KEY_CHARS),
+                    AccountForm::KEY if form.kind.is_key() => {
+                        edit_secret(&mut form.key, code, AccountForm::KEY_CHARS)
+                    }
                     _ => false,
                 };
                 if used {
@@ -1065,6 +1095,118 @@ impl App {
             .position(|a| a.agent == agent && a.name == name)
             .unwrap_or(0);
         Some(Popup::Accounts { selected })
+    }
+
+    /// `hashi account add <agent> <name> --remote <remote>`: checks the
+    /// form, then adds the account in the background, since asking the
+    /// bridge who it is can take seconds.
+    fn add_remote_account(&mut self, mut form: Box<AccountForm>) -> Option<Popup> {
+        let fail = |mut form: Box<AccountForm>, (field, e): FieldError| {
+            form.field = field;
+            form.error = Some((field, e));
+            Some(Popup::AddAccount(form))
+        };
+        let Some(home) = self.home() else {
+            return fail(form, (1, "no Hashi home here".to_owned()));
+        };
+        let name = form.name.trim().to_owned();
+        if let Err(e) = acct::check_name(&name, false) {
+            return fail(form, (1, e));
+        }
+        if self
+            .state
+            .store
+            .get_account(form.agent, &name)
+            .ok()
+            .flatten()
+            .is_some_and(|a| a.kind != AccountKind::Default)
+        {
+            let e = format!("{} already has an account named {name}", form.agent);
+            return fail(form, (1, e));
+        }
+        let Some(remote) = form.selected_remote().map(str::to_owned) else {
+            return fail(
+                form,
+                (
+                    AccountForm::REMOTE,
+                    "no bridges saved: use Connect to a bridge first".to_owned(),
+                ),
+            );
+        };
+        let (agent, remote_agent) = (form.agent, form.remote_agent());
+        let store = std::sync::Arc::clone(&self.state.store);
+        let slot = std::sync::Arc::clone(&self.done);
+        let spawned = std::thread::Builder::new()
+            .name("hashi-remote-account".to_owned())
+            .spawn(move || {
+                let result = acct::ops::add_remote(
+                    &store,
+                    &home,
+                    agent,
+                    &name,
+                    &remote,
+                    remote_agent,
+                    ACTOR,
+                )
+                .map_err(|e| format!("{e:#}"));
+                Self::finish(
+                    &slot,
+                    Done::RemoteAccount {
+                        agent,
+                        name,
+                        remote,
+                        result,
+                    },
+                );
+            });
+        if spawned.is_err() {
+            return fail(form, (1, "could not start adding the account".to_owned()));
+        }
+        form.busy = true;
+        form.error = None;
+        Some(Popup::AddAccount(form))
+    }
+
+    /// What adding a remote account in the background found.
+    fn remote_account_done(
+        &mut self,
+        agent: AgentKind,
+        name: &str,
+        remote: &str,
+        result: Result<Option<String>, String>,
+    ) {
+        match result {
+            Ok(warning) => {
+                self.state.bus.log(format!(
+                    "account added: {agent}:{name} (remote via {remote})"
+                ));
+                self.notify(match &warning {
+                    Some(w) => format!("added {agent}:{name}, but {w}"),
+                    None => format!("added {agent}:{name} (remote via {remote})"),
+                });
+                if matches!(self.popup, Some(Popup::AddAccount(_))) {
+                    let selected = self
+                        .account_rows()
+                        .iter()
+                        .position(|a| a.agent == agent && a.name == name)
+                        .unwrap_or(0);
+                    self.popup = Some(Popup::Accounts { selected });
+                }
+            }
+            Err(e) => match &mut self.popup {
+                Some(Popup::AddAccount(form)) => {
+                    form.busy = false;
+                    let field = if e.contains("remote") {
+                        AccountForm::REMOTE
+                    } else {
+                        1
+                    };
+                    form.field = field;
+                    form.error = Some((field, e));
+                }
+                _ => self.notify(format!("could not add {agent}:{name}: {e}")),
+            },
+        }
     }
 
     fn remove_account(&mut self, agent: AgentKind, name: &str) {

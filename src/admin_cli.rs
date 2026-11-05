@@ -847,12 +847,10 @@ fn kind_cell(a: &hashi::store::AccountState) -> String {
     }
 }
 
-/// Printed whenever a remote account is added.
-pub const REMOTE_PRIVACY: &str = "privacy: the friend who runs that bridge can see every prompt sent through this account and every answer, as their claim page told you. People you share with never see that this account is remote.";
-
 /// `hashi account add <agent> <name> --remote <remote>`: an account whose
 /// runs go to a friend's bridge, through a remote saved by `hashi connect`.
-/// Refused when the remote is this same Hashi.
+/// Refused when the remote is this same Hashi. The dashboard's add-account
+/// form does the same through [`acct::ops::add_remote`].
 fn add_remote_account(
     store: &Store,
     home: &Path,
@@ -861,43 +859,16 @@ fn add_remote_account(
     remote: &str,
     remote_agent: AgentKind,
 ) -> Result<()> {
-    let remotes = hashi::remote::load(home)?;
-    let saved = hashi::remote::pick(&remotes, Some(remote))?;
-    if store
-        .get_account(agent, name)?
-        .is_some_and(|a| a.kind != AccountKind::Default)
-    {
-        bail!("{agent} already has an account named {name}");
+    let warning = acct::ops::add_remote(store, home, agent, name, remote, remote_agent, "cli")?;
+    if let Some(w) = warning {
+        eprintln!("warning: {w}");
     }
-    // A remote account that points back here would only forward prompts
-    // to itself.
-    let ours = store.instance_id()?;
-    match hashi::forward::instance_id(&saved.base_url) {
-        Ok(Some(theirs)) if theirs == ours => bail!(
-            "the remote {remote} is this same Hashi; a remote account must point at a friend's bridge"
-        ),
-        Ok(_) => {}
-        Err(e) => eprintln!(
-            "warning: could not reach {} to check it ({}); runs check again and refuse a loop",
-            hashi::diagnostics::terminal_safe(&saved.base_url),
-            hashi::diagnostics::terminal_safe(&e)
-        ),
-    }
-    // A row left by a limit mark on a since removed account.
-    store.remove_account(agent, name)?;
-    store.add_remote_account(agent, name, remote, remote_agent)?;
-    store.audit(
-        "cli",
-        "account.add",
-        &format!("{agent}:{name}"),
-        &format!("remote via {remote}"),
-    )?;
     println!(
         "added {} account {name} (remote via {remote}, {} on their bridge)",
         agent.display_name(),
         remote_agent.display_name()
     );
-    println!("{REMOTE_PRIVACY}");
+    println!("{}", acct::ops::REMOTE_PRIVACY);
     println!(
         "use it with: hashi token update <id> --account {agent}={name}  (or --account on token create and share)"
     );

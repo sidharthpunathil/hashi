@@ -98,6 +98,65 @@ pub fn create(
     Ok(dir)
 }
 
+/// Shown whenever a remote account is added, by `hashi account add
+/// --remote` and in the dashboard's add-account form.
+pub const REMOTE_PRIVACY: &str = "privacy: the friend who runs that bridge can see every prompt sent through this account and every answer, as their claim page told you. People you share with never see that this account is remote.";
+
+/// `hashi account add <agent> <name> --remote <remote>`: adds an account
+/// whose runs go to a friend's bridge, through the remote saved as
+/// `remote` by `hashi connect`, asking for `remote_agent` there. Refused
+/// when the remote is this same Hashi. Asks the bridge who it is, so it
+/// blocks for up to ten seconds; when the bridge cannot be reached the
+/// account is still added and the warning to show is returned.
+///
+/// # Errors
+///
+/// Fails on a bad name, a name already taken, an unknown remote, a remote
+/// that is this Hashi, or database errors.
+pub fn add_remote(
+    store: &Store,
+    home: &Path,
+    agent: AgentKind,
+    name: &str,
+    remote: &str,
+    remote_agent: AgentKind,
+    actor: &str,
+) -> Result<Option<String>> {
+    acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))?;
+    let remotes = crate::remote::load(home)?;
+    let saved = crate::remote::pick(&remotes, Some(remote))?;
+    if store
+        .get_account(agent, name)?
+        .is_some_and(|a| a.kind != AccountKind::Default)
+    {
+        bail!("{agent} already has an account named {name}");
+    }
+    // A remote account that points back here would only forward prompts
+    // to itself.
+    let ours = store.instance_id()?;
+    let warning = match crate::forward::instance_id(&saved.base_url) {
+        Ok(Some(theirs)) if theirs == ours => bail!(
+            "the remote {remote} is this same Hashi; a remote account must point at a friend's bridge"
+        ),
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "could not reach {} to check it ({}); runs check again and refuse a loop",
+            crate::diagnostics::terminal_safe(&saved.base_url),
+            crate::diagnostics::terminal_safe(&e)
+        )),
+    };
+    // A row left by a limit mark on a since removed account.
+    store.remove_account(agent, name)?;
+    store.add_remote_account(agent, name, remote, remote_agent)?;
+    store.audit(
+        actor,
+        "account.add",
+        &format!("{agent}:{name}"),
+        &format!("remote via {remote}"),
+    )?;
+    Ok(warning)
+}
+
 /// Gets a login account ready to sign in again: its directory exists and it
 /// is a login. Crush's default account counts, since Hashi owns its
 /// directory too.

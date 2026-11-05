@@ -29,6 +29,7 @@ pub(super) const TEXT: Rgb = Rgb(232, 228, 245);
 
 /// Draws the whole UI.
 pub fn render(app: &mut App, frame: &mut Frame) {
+    app.prepare_frame();
     let area = frame.area();
     let roomy = area.height >= 32 && area.width >= 100;
     let header_h = if roomy { 8 } else { 1 };
@@ -644,11 +645,10 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
             Span::styled(" accounts", t::muted()),
         ]);
     }
-    let rotate_at = app.state.dispatcher.usage().policy().rotate_at;
     counts_line.spans.extend(super::usage::headroom_spans(
-        &app.state.store,
+        &app.usage_snapshot(),
         agent,
-        rotate_at,
+        app.rotate_at(),
     ));
     frame.render_widget(Paragraph::new(counts_line), counts);
 
@@ -1282,9 +1282,24 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
         ]
         .map(|h| Cell::from(h).style(t::bold(t::MIST))),
     );
+    // Build only the rows that fit, and read only their use.
+    let visible = usize::from(area.height.saturating_sub(4)).max(1);
+    let selected = app.tokens_table.selected();
+    let offset = window_offset(
+        app.tokens_table.offset(),
+        selected,
+        visible,
+        app.tokens.len(),
+    );
+    *app.tokens_table.offset_mut() = offset;
+    app.load_token_usage(offset..offset + visible);
+    let mut window =
+        TableState::default().with_selected(selected.map(|s| s.saturating_sub(offset)));
     let rows: Vec<Row> = app
         .tokens
         .iter()
+        .skip(offset)
+        .take(visible)
         .map(|tk| {
             let role = match tk.role {
                 Role::Admin => Span::styled("★ admin", t::bold(t::ORCHID)),
@@ -1376,7 +1391,7 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
             )
             .title_bottom(selected_accounts_line(app)),
     );
-    frame.render_stateful_widget(table, area, &mut app.tokens_table);
+    frame.render_stateful_widget(table, area, &mut window);
 }
 
 /// The selected token's accounts and project, for the foot of the tokens
@@ -1515,11 +1530,11 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             None => ("installs the latest release, if newer".to_owned(), TEXT),
         },
         Action::AccessRequests => {
-            let open = crate::access::current_link(&app.state.store)
-                .ok()
-                .flatten()
-                .is_some_and(|l| l.status(crate::util::now_ms()) == "open");
-            let link = if open { "link open" } else { "link closed" };
+            let link = if app.link_open() {
+                "link open"
+            } else {
+                "link closed"
+            };
             match app.access_pending {
                 0 => (format!("none pending, {link}"), TEXT),
                 n => (format!("{n} pending, {link}"), t::ORCHID),
@@ -1529,17 +1544,17 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             Some(t) => (format!("sends as {}", t.name), TEXT),
             None => ("no active admin token".to_owned(), t::AMBER),
         },
-        Action::Accounts => match app.account_rows().len() {
+        Action::Accounts => match app.cached_accounts().len() {
             0 => ("only the default logins".to_owned(), TEXT),
             1 => ("1 account".to_owned(), TEXT),
             n => (format!("{n} accounts"), TEXT),
         },
-        Action::Projects => match app.state.store.list_projects().map_or(0, |l| l.len()) {
+        Action::Projects => match app.cached_projects().len() {
             0 => ("none yet".to_owned(), TEXT),
             1 => ("1 project".to_owned(), TEXT),
             n => (format!("{n} projects"), TEXT),
         },
-        Action::Bridges => match app.remote_names().len() {
+        Action::Bridges => match app.remote_count() {
             0 => ("none saved".to_owned(), TEXT),
             1 => ("1 saved".to_owned(), TEXT),
             n => (format!("{n} saved"), TEXT),
@@ -2201,7 +2216,7 @@ pub(super) fn form_error(error: Option<&String>, indent: usize) -> Line<'static>
 
 fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
     const W: usize = 16;
-    let rect = centered(area, 72, 19);
+    let rect = centered(area, 72, 20);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(
@@ -2249,6 +2264,15 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
             ),
         ),
         form_field(
+            f(ShareForm::SHARE_USAGE),
+            "share usage",
+            W,
+            form_toggle(
+                share_usage_label(form.share_usage),
+                f(ShareForm::SHARE_USAGE),
+            ),
+        ),
+        form_field(
             f(ShareForm::PROJECT),
             "project",
             W,
@@ -2277,7 +2301,7 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
 
 fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
     const W: usize = 10;
-    let rect = centered(area, 60, 16);
+    let rect = centered(area, 60, 17);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(f(0), "name", W, form_text(&form.name, f(0), "my-app", tick)),
@@ -2294,6 +2318,15 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
                 f(TokenForm::ACCOUNTS),
                 "default (or claude=work,personal)",
                 tick,
+            ),
+        ),
+        form_field(
+            f(TokenForm::SHARE_USAGE),
+            "usage",
+            W,
+            form_toggle(
+                share_usage_label(form.share_usage),
+                f(TokenForm::SHARE_USAGE),
             ),
         ),
         form_field(
@@ -2322,6 +2355,16 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
     ];
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(modal("new token")), rect);
+}
+
+/// The share usage toggle: whether the token sees its agents' quota
+/// headroom (`GET /v1/me`), never account names or counts.
+pub(super) const fn share_usage_label(share: bool) -> &'static str {
+    if share {
+        "shared: headroom, reset and state"
+    } else {
+        "not shared"
+    }
 }
 
 /// Body text: inherits the terminal (or popup) foreground so it stays

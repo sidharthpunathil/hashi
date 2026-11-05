@@ -16,7 +16,8 @@ use hashi::guard::{GIB, HoldReason, ManualProbe, ResourceGuard, ResourceSettings
 use hashi::queue::Dispatcher;
 use hashi::store::{NewRequest, NewToken, Store};
 use hashi::token::{Role, SessionMode};
-use hashi::tui::app::{Action, App, Popup, Tab};
+use hashi::tui::app::{Action, App, Popup, ShareForm, Tab, TokenForm};
+use hashi::tui::forms::EditTokenForm;
 use hashi::tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -2237,4 +2238,288 @@ fn the_project_form_sets_the_account_strategy_and_rotate_threshold() {
     app.on_key(key(KeyCode::Enter));
     let p = app.state.store.get_project("api").unwrap().unwrap();
     assert_eq!(p.account_strategy, None);
+}
+
+#[test]
+fn views_pick_up_store_changes_on_the_next_refresh_or_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Accounts);
+    assert!(draw(&mut app, 190, 44).contains("only the default logins"));
+    // Added behind the dashboard's back: frames reuse what they read until
+    // the next refresh.
+    app.state
+        .store
+        .add_account(
+            AgentKind::Claude,
+            "work",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    assert!(draw(&mut app, 190, 44).contains("only the default logins"));
+    app.refresh();
+    assert!(draw(&mut app, 190, 44).contains("1 account"));
+    // A key press reads afresh too, so the dashboard's own changes show at
+    // once.
+    app.state
+        .store
+        .add_account(
+            AgentKind::Codex,
+            "team",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    app.on_key(key(KeyCode::Char('j')));
+    app.on_key(key(KeyCode::Char('k')));
+    assert!(draw(&mut app, 190, 44).contains("2 accounts"));
+}
+
+#[test]
+fn a_long_token_list_draws_and_reads_only_the_rows_on_screen() {
+    let st = state();
+    for i in 0..80 {
+        st.store
+            .create_token(&NewToken {
+                name: format!("user-{i:02}"),
+                role: Role::User,
+                session_mode: SessionMode::Stateless,
+                agents: AgentKind::ALL.to_vec(),
+                expires_in_days: None,
+                note: None,
+                limits: Default::default(),
+                accounts: Default::default(),
+                project: None,
+            })
+            .unwrap();
+    }
+    let mut app = App::new(st, None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    let first = app.tokens[0].clone();
+    let last = app.tokens[80].clone();
+    let out = draw(&mut app, 160, 40);
+    assert!(out.contains(&first.name), "{out}");
+    assert!(!out.contains(&last.name));
+    assert!(app.usage.len() < 40, "read {} tokens' use", app.usage.len());
+    assert!(!app.usage.contains_key(&last.id));
+    // Down to the last row: the table scrolls with the selection and reads
+    // the use of the rows that came into view.
+    for _ in 0..80 {
+        app.on_key(key(KeyCode::Char('j')));
+    }
+    let out = draw(&mut app, 160, 40);
+    assert!(out.contains(&format!("▌{} ", last.name)), "{out}");
+    assert!(!out.contains(&first.name));
+    let now = hashi::util::now_ms();
+    assert_eq!(
+        app.usage[&last.id],
+        app.state.store.token_usage(&last.id, now).unwrap()
+    );
+}
+
+/// The token named `name`, read from the store.
+fn stored_token(app: &App, name: &str) -> hashi::token::Token {
+    app.state
+        .store
+        .list_tokens()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == name)
+        .unwrap()
+}
+
+#[test]
+fn the_token_form_can_share_usage() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('n')));
+    typed(&mut app, "quiet");
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Esc));
+    assert!(!stored_token(&app, "quiet").share_usage);
+
+    app.on_key(key(KeyCode::Char('n')));
+    typed(&mut app, "open");
+    for _ in 0..TokenForm::SHARE_USAGE {
+        app.on_key(key(KeyCode::Down));
+    }
+    assert!(draw(&mut app, 140, 40).contains("not shared"));
+    app.on_key(key(KeyCode::Right));
+    assert!(draw(&mut app, 140, 40).contains("shared: headroom, reset and state"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Reveal { .. })));
+    assert!(stored_token(&app, "open").share_usage);
+}
+
+#[test]
+fn the_share_form_can_share_usage() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('s')));
+    typed(&mut app, "dave");
+    for _ in 0..ShareForm::SHARE_USAGE {
+        app.on_key(key(KeyCode::Down));
+    }
+    app.on_key(key(KeyCode::Char(' ')));
+    assert!(draw(&mut app, 140, 40).contains("shared: headroom, reset and state"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::InviteReveal { .. })));
+    let invite = app.state.store.list_invites().unwrap().remove(0);
+    assert_eq!(invite.label, "dave");
+    assert!(invite.share_usage);
+
+    // Left as it is, the toggle shares nothing.
+    app.on_key(key(KeyCode::Esc));
+    share_invite(&mut app, "erin");
+    let erin = app
+        .state
+        .store
+        .list_invites()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.label == "erin")
+        .unwrap();
+    assert!(!erin.share_usage);
+}
+
+#[test]
+fn the_edit_form_turns_usage_sharing_on_and_off() {
+    let mut app = App::new(state(), None, false);
+    add_user(&mut app, "bob");
+    app.on_key(key(KeyCode::Char('3')));
+    select_token(&mut app, "bob");
+    for (on, change) in [(true, "usage shared"), (false, "usage not shared")] {
+        app.on_key(key(KeyCode::Char('e')));
+        for _ in 0..EditTokenForm::SHARE_USAGE {
+            app.on_key(key(KeyCode::Down));
+        }
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.popup.is_none(), "{:?}", app.popup);
+        assert!(toast(&app).contains(change), "{}", toast(&app));
+        assert_eq!(stored_token(&app, "bob").share_usage, on);
+        select_token(&mut app, "bob");
+    }
+    // Opened and saved untouched, nothing changes.
+    app.on_key(key(KeyCode::Char('e')));
+    app.on_key(key(KeyCode::Enter));
+    assert!(toast(&app).contains("nothing changed"));
+}
+
+/// Opens the add-account form, types `name` and picks the remote kind.
+fn open_remote_account_form(app: &mut App, name: &str) {
+    select_action(app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(app, name);
+    // Kind: remote is the last kind, left of login.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Left));
+    let Some(Popup::AddAccount(form)) = &app.popup else {
+        panic!("expected the add-account form, got {:?}", app.popup)
+    };
+    assert_eq!(form.kind, hashi::accounts::AccountKind::Remote);
+}
+
+#[test]
+fn the_account_form_adds_a_remote_account_through_a_saved_bridge() {
+    let dir = tempfile::tempdir().unwrap();
+    hashi::remote::save(
+        dir.path(),
+        &[
+            hashi::remote::Remote {
+                name: "friend".into(),
+                // Nothing listens here, so the loop check cannot run.
+                base_url: "http://127.0.0.1:9".into(),
+                token: "hashi_sk_secret_never_shown".into(),
+            },
+            hashi::remote::Remote {
+                name: "other".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                token: "hashi_sk_other".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    open_remote_account_form(&mut app, "pal");
+    let out = draw(&mut app, 160, 44);
+    assert!(
+        out.contains("friend") && out.contains("same (claude)"),
+        "{out}"
+    );
+    assert!(out.contains("privacy: the friend who runs that bridge can see every"));
+    assert!(
+        out.contains("never see that this account is remote."),
+        "{out}"
+    );
+    assert!(!out.contains("secret_never_shown"));
+
+    // The second bridge, and codex on it.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Down));
+    for _ in 0..=AgentKind::ALL.len() {
+        if draw(&mut app, 160, 44).contains("‹ codex ›") {
+            break;
+        }
+        app.on_key(key(KeyCode::Right));
+    }
+    assert!(draw(&mut app, 160, 44).contains("other"));
+    app.on_key(key(KeyCode::Enter));
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    while matches!(app.popup, Some(Popup::AddAccount(_))) {
+        assert!(Instant::now() < deadline, "the account was never added");
+        app.on_tick();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        matches!(app.popup, Some(Popup::Accounts { .. })),
+        "{:?}",
+        app.popup
+    );
+    // Unreachable, so added with the CLI's warning.
+    assert!(toast(&app).contains("could not reach"), "{}", toast(&app));
+    let a = app
+        .state
+        .store
+        .get_account(AgentKind::Claude, "pal")
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.kind, hashi::accounts::AccountKind::Remote);
+    assert_eq!(a.remote.as_deref(), Some("other"));
+    assert_eq!(a.remote_agent, Some(AgentKind::Codex));
+    let audited = app
+        .state
+        .store
+        .list_audit(10)
+        .unwrap()
+        .into_iter()
+        .any(|e| e.actor == "dashboard" && e.action == "account.add" && e.target == "claude:pal");
+    assert!(audited);
+    let out = draw(&mut app, 160, 44);
+    assert!(out.contains("pal") && out.contains("remote"), "{out}");
+}
+
+#[test]
+fn a_remote_account_needs_a_saved_bridge_and_a_good_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    open_remote_account_form(&mut app, "Bad Name");
+    assert!(draw(&mut app, 160, 44).contains("none saved (connect to a bridge first)"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 160, 44).contains("must be 1 to 32"));
+    let Some(Popup::AddAccount(form)) = &mut app.popup else {
+        panic!("expected the add-account form")
+    };
+    form.name = "pal".into();
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 160, 44);
+    assert!(out.contains("no bridges saved"), "{out}");
+    assert!(
+        app.state
+            .store
+            .get_account(AgentKind::Claude, "pal")
+            .unwrap()
+            .is_none()
+    );
 }
