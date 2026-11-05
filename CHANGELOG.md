@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- One-time invite links (`hashi share`, `POST /v1/invites`, dashboard `s`) with a claim page that shows what is shared and hands out a personal token once.
+- Per-token limits: prompts per day and month, reported spend per day and month, and prompts in flight. Pause, resume and extend tokens (`PATCH /v1/tokens/{id}`, `hashi token update`, dashboard `p`).
+- `GET /v1/me` and a `/me` page so token holders can see their own status, limits and usage.
+- MCP server at `/mcp` with `ask_claude`, `ask_codex`, `get_result` and `my_usage`.
+- Audit log of token and invite changes (`GET /v1/audit`, `hashi audit`).
+- Native HTTPS (`--tls-cert`, `--tls-key`), named Cloudflare tunnels (`--tunnel-token`), `--public-url` and `--name`.
+
+### Fixed
+
+- A `~/.cloudflared/config.yml` from another project no longer hijacks Hashi's tunnel.
+- Pruning old requests no longer removes the current month, which monthly caps count from.
+
 ## [0.1.1] - 2026-11-05
 
 ### Added
