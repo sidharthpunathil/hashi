@@ -90,6 +90,7 @@ fn state() -> AppState {
         limiter: Arc::new(RateLimiter::new(0)),
         default_agent: AgentKind::Claude,
         queue_limit: 100,
+        run_timeout_secs: 600,
     }
 }
 

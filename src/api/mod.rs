@@ -14,6 +14,7 @@
 //! | `PATCH`  | `/v1/tokens/{id}`     | admin | Pause, resume, extend, set limits  |
 //! | `DELETE` | `/v1/tokens/{id}`     | admin | Revoke a token                     |
 //! | `GET`    | `/v1/audit`           | admin | Recent sharing and access changes  |
+//! | `POST`   | `/mcp`                | token | MCP server for agent clients       |
 //!
 //! "any" accepts paused and expired tokens, so they can see why they stopped.
 
@@ -117,6 +118,8 @@ pub struct AppState {
     pub default_agent: AgentKind,
     /// Maximum pending requests across all agents.
     pub queue_limit: u64,
+    /// Per-run time limit, in seconds. MCP calls wait this long for an answer.
+    pub run_timeout_secs: u64,
 }
 
 /// Builds the router.
@@ -146,6 +149,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(tokens::update).delete(tokens::revoke),
         )
         .route("/v1/audit", get(tokens::audit))
+        .route(
+            "/mcp",
+            post(crate::mcp::handle).get(crate::mcp::get_not_allowed),
+        )
         .fallback(|| async { ApiError::NotFound("no such route") })
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(cors)
