@@ -388,6 +388,14 @@ pub fn headless_line(ev: &crate::events::Event) -> String {
         Event::UpdateAvailable { version, url } => {
             format!("  ↑ update   v{version} is available, run hashi update ({url})")
         }
+        Event::AccessRequest { kind, name, .. } => match kind {
+            crate::store::AccessKind::New => {
+                format!("  ? request  {name} asks for access: hashi requests list")
+            }
+            crate::store::AccessKind::More => {
+                format!("  ? request  {name} asks for more: hashi requests list")
+            }
+        },
         Event::Log(msg) => format!("  · {msg}"),
     };
     terminal_safe(&line)

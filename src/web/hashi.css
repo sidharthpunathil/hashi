@@ -76,7 +76,7 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--purple); }
-button:focus-visible, input:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
 button.primary {
   width: 100%;
   margin-top: 8px;
@@ -107,7 +107,7 @@ button.primary:disabled { opacity: 0.6; cursor: progress; }
 .tabs button[aria-selected="true"] { border-color: var(--purple); color: var(--pink); }
 label { display: block; margin: 12px 0 6px; color: var(--muted); }
 label.check { display: flex; gap: 8px; align-items: center; }
-input[type="password"] {
+input[type="password"], input[type="text"], input[type="number"], textarea {
   width: 100%;
   padding: 10px 12px;
   border-radius: 10px;
@@ -142,3 +142,16 @@ a.button {
 }
 a.button:hover { border-color: var(--purple); }
 a.button:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+textarea { font: 0.95rem/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; resize: vertical; min-height: 84px; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+@media (max-width: 420px) { .pair { grid-template-columns: 1fr; } }
+.choices { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.choices label { margin: 0; }
+.more { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.more h2 { margin: 0 0 4px; font-size: 1.05rem; }
+.requests { list-style: none; padding: 0; margin: 10px 0 0; }
+.requests li { padding: 6px 0; border-top: 1px solid var(--line); font-size: 0.92rem; }
+.pill.pending { color: var(--amber); }
+.pill.accepted, .pill.claimed { color: var(--good); }
+.pill.declined { color: var(--bad); }
+.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -1,6 +1,8 @@
 //! Hashi: a bridge that exposes local coding-agent CLIs (Claude Code, Codex and more) as an
 //! authenticated HTTP API, with a live terminal dashboard.
 
+pub mod access;
+pub mod access_client;
 pub mod accounts;
 pub mod agent;
 pub mod api;

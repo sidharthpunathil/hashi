@@ -39,6 +39,27 @@
       <div id="meters"></div>
       <p class="muted small" id="resets"></p>
       <button id="forget">Forget token</button>
+
+      <section class="more" id="more" hidden>
+        <h2>Ask for more</h2>
+        <p class="muted small">Fill in only what you need. The owner decides, and nothing changes until they accept.</p>
+        <form id="more-form">
+          <div class="pair">
+            <div><label for="more-daily">Prompts a day</label><input id="more-daily" type="number" min="0" step="1"></div>
+            <div><label for="more-monthly">Prompts a month</label><input id="more-monthly" type="number" min="0" step="1"></div>
+            <div><label for="more-daily-budget">Budget a day (USD)</label><input id="more-daily-budget" type="number" min="0" step="0.01"></div>
+            <div><label for="more-monthly-budget">Budget a month (USD)</label><input id="more-monthly-budget" type="number" min="0" step="0.01"></div>
+            <div><label for="more-agents">More agents</label><input id="more-agents" type="text" spellcheck="false" placeholder="codex, gemini"></div>
+            <div><label for="more-expiry">Access for (days)</label><input id="more-expiry" type="number" min="1" max="3650" step="1"></div>
+          </div>
+          <label for="more-message">Anything else (optional)</label>
+          <textarea id="more-message" maxlength="500"></textarea>
+          <button class="primary" type="submit">Send to the owner</button>
+          <p class="good" id="more-sent" hidden>✓ Sent. The owner will see it.</p>
+          <p class="bad" id="more-error" hidden></p>
+        </form>
+        <ul class="requests" id="my-requests" hidden></ul>
+      </section>
     </section>
   </main>
   <script src="/assets/hashi.js"></script>

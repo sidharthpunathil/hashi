@@ -1,5 +1,6 @@
 //! Live terminal dashboard built on ratatui.
 
+pub mod access;
 pub mod app;
 mod clipboard;
 pub mod theme;

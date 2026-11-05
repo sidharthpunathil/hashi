@@ -1,6 +1,6 @@
 //! Offline admin commands that work straight on the database: tokens,
-//! invites, accounts, projects and the audit log. Every change is audited
-//! with actor `cli`.
+//! invites, access requests, accounts, projects and the audit log. Every
+//! change is audited with actor `cli`.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use clap::builder::TypedValueParser;
 use clap::{Args, Subcommand};
 use hashi::accounts::{self as acct, AccountKind, AccountMap};
 use hashi::agent::{AgentConfig, AgentKind};
+use hashi::diagnostics::terminal_safe;
 use hashi::store::{NewToken, Revoke, Store};
 use hashi::token::{Limits, Role, SessionMode, Token};
 use hashi::util::{human_age, now_ms, rfc3339};
@@ -1186,7 +1187,9 @@ pub enum ProjectCommand {
 /// Crush is opt-in, so it is never part of a project's default agents; list
 /// it with `--agents` to allow it.
 fn installed_agents(bins: &BinArgs) -> Vec<AgentKind> {
-    let candidates = AgentKind::ALL.into_iter().filter(|a| *a != AgentKind::Crush);
+    let candidates = AgentKind::ALL
+        .into_iter()
+        .filter(|a| *a != AgentKind::Crush);
     let found: Vec<AgentKind> = candidates
         .clone()
         .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
@@ -1397,4 +1400,307 @@ pub fn doctor_accounts(home: &Path) {
             );
         }
     }
+}
+
+// ── access requests ────────────────────────────────────────────────────────
+
+/// `hashi requests ...`
+#[derive(Debug, Subcommand)]
+pub enum RequestsCommand {
+    /// List requests for access and for more (pending ones unless --all).
+    List {
+        /// Show decided and expired requests too.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Accept a request. A new person gets a single-use invite that only
+    /// they can collect; a token gets the asked values. Flags override what
+    /// was asked for.
+    Accept {
+        /// Request id, or a unique start of it.
+        id: String,
+        /// Token name for a new person. Default: the name they gave.
+        #[arg(long)]
+        label: Option<String>,
+        /// Agents (comma separated). Default: what they asked for, within
+        /// the link's project, or the token's agents plus the asked ones.
+        #[arg(long, value_delimiter = ',')]
+        agents: Option<Vec<AgentKind>>,
+        /// Keep a conversation per agent across prompts (new people).
+        #[arg(long)]
+        stateful: bool,
+        /// Token lifetime in days. For a token, 0 removes the expiry.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=3650))]
+        expires_in_days: Option<u32>,
+        /// How long the invite stays claimable, in hours (new people).
+        #[arg(
+            long,
+            value_parser = clap::builder::PossibleValuesParser::new(["1", "24", "168"])
+                .map(|s| s.parse::<u32>().unwrap_or(168)),
+        )]
+        link_hours: Option<u32>,
+        /// Accounts for an agent, in order, for example claude=work
+        /// (repeatable, new people).
+        #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
+        accounts: Vec<Binding>,
+        /// Project for a new person, instead of the link's.
+        #[arg(long)]
+        project: Option<String>,
+        #[command(flatten)]
+        limits: LimitArgs,
+    },
+    /// Decline a request. The requester sees the reason.
+    Decline {
+        /// Request id, or a unique start of it.
+        id: String,
+        /// Why, up to 300 characters.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Open the ask-access link, so people can ask for access. Opening a
+    /// new one closes the old one.
+    Open {
+        /// The project new requests are for.
+        #[arg(long)]
+        project: Option<String>,
+        /// A note shown on the page.
+        #[arg(long)]
+        note: Option<String>,
+        /// Hours until it closes by itself (1 to 720).
+        #[arg(long, default_value_t = hashi::access::DEFAULT_LINK_HOURS,
+              value_parser = clap::value_parser!(u32).range(1..=720))]
+        hours: u32,
+        /// Base URL for the link, as for `hashi share`.
+        #[arg(long, env = "HASHI_PUBLIC_URL")]
+        public_url: Option<String>,
+        /// Port of the local server, used for a local-only link.
+        #[arg(long, default_value_t = 7878, env = "HASHI_PORT")]
+        port: u16,
+    },
+    /// Close the ask-access link.
+    Close,
+}
+
+fn find_request(store: &Store, id: &str) -> Result<hashi::store::AccessRequest> {
+    let matches: Vec<_> = store
+        .list_access_requests()?
+        .into_iter()
+        .filter(|r| r.id == id || (id.len() >= 4 && r.id.starts_with(id)))
+        .collect();
+    match matches.as_slice() {
+        [r] => Ok(r.clone()),
+        [] => bail!("no access request matches `{}`", terminal_safe(id)),
+        _ => bail!(
+            "`{}` matches several requests; use more of the id",
+            terminal_safe(id)
+        ),
+    }
+}
+
+fn limits_text(l: &Limits) -> String {
+    let mut parts = Vec::new();
+    if let Some(n) = l.daily_requests {
+        parts.push(format!("{n}/day"));
+    }
+    if let Some(n) = l.monthly_requests {
+        parts.push(format!("{n}/month"));
+    }
+    if let Some(n) = l.daily_budget_usd {
+        parts.push(format!("${n}/day"));
+    }
+    if let Some(n) = l.monthly_budget_usd {
+        parts.push(format!("${n}/month"));
+    }
+    if let Some(n) = l.max_pending {
+        parts.push(format!("{n} at a time"));
+    }
+    if parts.is_empty() {
+        "no limits".to_owned()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn public_base(store: &Store, public_url: Option<&str>, port: u16) -> (String, bool) {
+    let public = public_url.map_or_else(
+        || {
+            store
+                .data_dir()
+                .and_then(|home| hashi::server::read_public_url(&home))
+        },
+        |u| Some(u.trim_end_matches('/').to_owned()),
+    );
+    let local = public.is_none();
+    (
+        public.unwrap_or_else(|| format!("http://127.0.0.1:{port}")),
+        local,
+    )
+}
+
+fn print_requests(store: &Store, all: bool) -> Result<()> {
+    let now = now_ms();
+    let list: Vec<_> = hashi::access::list(store)
+        .map_err(api_err)?
+        .into_iter()
+        .filter(|r| all || r.is_pending(now))
+        .collect();
+    match store.latest_access_link()? {
+        Some(link) if link.status(now) == "open" => println!(
+            "ask-access link: open, closes {}",
+            rfc3339(link.expires_at).unwrap_or_default()
+        ),
+        Some(link) => println!("ask-access link: {}", link.status(now)),
+        None => println!("ask-access link: never opened (hashi requests open)"),
+    }
+    if list.is_empty() {
+        println!("No {}requests.", if all { "" } else { "pending " });
+        return Ok(());
+    }
+    println!(
+        "{:<8}  {:<4}  {:<8}  {:<20}  {:<9}  WHAT",
+        "ID", "KIND", "STATUS", "NAME", "AGE"
+    );
+    for r in &list {
+        println!(
+            "{:<8}  {:<4}  {:<8}  {:<20}  {:<9}  {}",
+            r.id.get(..8).unwrap_or(&r.id),
+            r.kind.as_str(),
+            r.state(now),
+            terminal_safe(&hashi::util::truncate(&r.name, 20)),
+            format!("{} ago", human_age(r.created_at)),
+            terminal_safe(&hashi::access::asked_text(r)),
+        );
+        if !r.message.is_empty() {
+            println!(
+                "          \"{}\"",
+                terminal_safe(&hashi::util::truncate(&r.message, 200))
+            );
+        }
+        if r.is_pending(now)
+            && let Ok(pre) = hashi::access::prefill(store, r)
+            && let Some(cur) = &pre.current
+        {
+            println!(
+                "          now: {}, agents {}; accepting gives: {}, agents {}",
+                limits_text(&cur.limits),
+                hashi::token::encode_agents(&cur.agents),
+                limits_text(&pre.limits),
+                hashi::token::encode_agents(&pre.agents),
+            );
+        }
+        if let Some(reason) = &r.reason {
+            println!("          reason: {}", terminal_safe(reason));
+        }
+    }
+    Ok(())
+}
+
+/// Runs a `hashi requests` command.
+///
+/// # Errors
+///
+/// Fails on invalid input, an unknown or decided request, or database errors.
+pub fn requests(store: &Store, cmd: RequestsCommand) -> Result<()> {
+    match cmd {
+        RequestsCommand::List { all } => print_requests(store, all)?,
+        RequestsCommand::Accept {
+            id,
+            label,
+            agents,
+            stateful,
+            expires_in_days,
+            link_hours,
+            accounts,
+            project,
+            limits,
+        } => {
+            let r = find_request(store, &id)?;
+            let accounts = if accounts.is_empty() {
+                None
+            } else {
+                Some(bindings(store, AccountMap::new(), accounts)?)
+            };
+            let input = hashi::access::AcceptInput {
+                label: label.map(|l| clean_label(&l)).transpose()?,
+                session_mode: stateful.then_some(SessionMode::Stateful),
+                agents,
+                expires_in_days,
+                limits: limits.any().then(|| limits.apply(Limits::default())),
+                link_hours,
+                accounts,
+                project,
+            };
+            match hashi::access::accept(store, "cli", &r.id, input).map_err(api_err)? {
+                hashi::access::Accepted::Invite { invite, .. } => {
+                    println!(
+                        "accepted {}: a single-use invite ({}, {}) waits for them until {}",
+                        terminal_safe(&invite.label),
+                        hashi::token::encode_agents(&invite.agents),
+                        limits_text(&invite.limits),
+                        rfc3339(invite.expires_at).unwrap_or_default()
+                    );
+                    println!(
+                        "they collect it from their request page or `hashi request status`; \
+                         it is never shown here"
+                    );
+                }
+                hashi::access::Accepted::Token { token, changes, .. } => {
+                    println!(
+                        "accepted {}: {changes} (now {}, agents {})",
+                        terminal_safe(&token.name),
+                        limits_text(&token.limits),
+                        hashi::token::encode_agents(&token.agents)
+                    );
+                }
+            }
+        }
+        RequestsCommand::Decline { id, reason } => {
+            let r = find_request(store, &id)?;
+            let r =
+                hashi::access::decline(store, "cli", &r.id, reason.as_deref()).map_err(api_err)?;
+            println!("declined the request from {}", terminal_safe(&r.name));
+        }
+        RequestsCommand::Open {
+            project,
+            note,
+            hours,
+            public_url,
+            port,
+        } => {
+            let (link, code) = hashi::access::open_link(
+                store,
+                "cli",
+                hashi::access::OpenLink {
+                    project,
+                    note,
+                    hours: Some(hours),
+                },
+            )
+            .map_err(api_err)?;
+            let (base, local) = public_base(store, public_url.as_deref(), port);
+            eprintln!(
+                "ask-access link{} (anyone with it can ask; closes {}):",
+                link.project
+                    .as_deref()
+                    .map(|p| format!(" for project {p}"))
+                    .unwrap_or_default(),
+                rfc3339(link.expires_at).unwrap_or_default()
+            );
+            println!("{}", hashi::access::link_url(&base, &code));
+            if local {
+                eprintln!(
+                    "note: this link only works on this machine. Press t in the dashboard to go \
+                     public, start with --tunnel or set HASHI_PUBLIC_URL to share it."
+                );
+            }
+        }
+        RequestsCommand::Close => {
+            if hashi::access::close_link(store, "cli").map_err(api_err)? {
+                println!("closed the ask-access link");
+            } else {
+                println!("no ask-access link was open");
+            }
+        }
+    }
+    Ok(())
 }

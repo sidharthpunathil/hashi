@@ -27,11 +27,23 @@
 //! | `DELETE` | `/v1/invites/{id}`    | admin | Cancel a pending invite            |
 //! | `POST`   | `/v1/claim/preview`   | code  | What an invite would grant         |
 //! | `POST`   | `/v1/claim/redeem`    | code  | Use an invite, get a token once    |
-//! | `GET`    | `/claim/{code}`, `/me`|       | Pages for people you share with    |
+//! | `GET`    | `/v1/request-link`    | admin | The ask-access link's state        |
+//! | `POST`   | `/v1/request-link`    | admin | Open the ask-access link           |
+//! | `DELETE` | `/v1/request-link`    | admin | Close it                           |
+//! | `GET`    | `/v1/access-requests` | admin | Requests for access and for more   |
+//! | `POST`   | `/v1/access-requests/{id}/accept` | admin | Accept, with the owner's values |
+//! | `POST`   | `/v1/access-requests/{id}/decline`| admin | Decline, with a reason      |
+//! | `POST`   | `/v1/ask-access/preview` | code | What the ask-access page shows   |
+//! | `POST`   | `/v1/ask-access`      | code  | Ask for access, get a pickup secret|
+//! | `POST`   | `/v1/ask-access/status` | pickup | A request's state, claim URL  |
+//! | `GET`    | `/v1/me/requests`     | any   | The token's own requests for more  |
+//! | `POST`   | `/v1/me/requests`     | any   | Ask the owner for more             |
+//! | `GET`    | `/claim/{code}`, `/me`, `/ask-access/{code}` | | Pages for people you share with |
 //! | `POST`   | `/mcp`                | token | MCP server for agent clients       |
 //!
 //! "any" accepts paused and expired tokens, so they can see why they stopped.
 
+mod access;
 mod ask;
 mod cancel;
 mod invites;
@@ -39,12 +51,13 @@ mod openai;
 mod projects;
 mod tokens;
 
+pub use access::ask_more_for;
 pub use cancel::cancel_request;
 
 pub use ask::{
     AskBody, SubmitInput, me_json, reads_any_request, request_json, submit, wait_until_done,
 };
-pub use invites::{CreateInviteBody, snippets, validate_new_invite};
+pub use invites::{CreateInviteBody, MAX_PENDING_INVITES, snippets, validate_new_invite};
 pub use projects::{
     CreateProjectBody, UpdateProjectBody, apply_update, check_binding, check_bound,
     check_project_name, project_json, usable_agents, validate_project,
@@ -264,6 +277,22 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
         .route("/v1/invites/{id}", delete(invites::cancel))
         .route("/v1/claim/preview", post(invites::preview))
         .route("/v1/claim/redeem", post(invites::redeem))
+        .route(
+            "/v1/request-link",
+            get(access::link_state)
+                .post(access::open_link)
+                .delete(access::close_link),
+        )
+        .route("/v1/access-requests", get(access::list))
+        .route("/v1/access-requests/{id}/accept", post(access::accept))
+        .route("/v1/access-requests/{id}/decline", post(access::decline))
+        .route("/v1/ask-access/preview", post(access::preview))
+        .route("/v1/ask-access", post(access::submit))
+        .route("/v1/ask-access/status", post(access::status))
+        .route(
+            "/v1/me/requests",
+            get(access::my_requests).post(access::ask_more),
+        )
         .merge(crate::web::routes())
         .route(
             "/mcp",
@@ -450,7 +479,8 @@ pub type ApiResult<T> = Result<T, ApiError>;
 // ── auth ───────────────────────────────────────────────────────────────────
 
 /// Fixed-window request limiter keyed by token id, and by client address for
-/// invite claims (`claim:<ip>`) and failed sign-ins (`authfail:<ip>`).
+/// invite claims (`claim:<ip>`), access requests (`askaccess:<ip>`) and
+/// failed sign-ins (`authfail:<ip>`).
 #[derive(Debug)]
 pub struct RateLimiter {
     per_minute: u32,

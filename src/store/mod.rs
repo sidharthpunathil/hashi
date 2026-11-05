@@ -13,12 +13,18 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 
+mod access;
 mod accounts;
 mod audit;
 mod cancel;
 mod invites;
 mod projects;
 
+pub use access::{
+    AccessAdmission, AccessKind, AccessLink, AccessRequest, LINK_PREFIX, MAX_OPEN_PER_TOKEN,
+    MAX_PENDING_PER_LINK, MAX_PENDING_TOTAL, MORE_EVERY_MS, MoreAsk, NewAccessRequest,
+    PICKUP_PREFIX, Pickup, REQUEST_DAYS, claim_code_for,
+};
 pub use accounts::{AccountState, AccountStatus};
 pub use audit::AuditEntry;
 pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
@@ -240,6 +246,8 @@ pub struct Pruned {
     pub audit: usize,
     /// Claimed or expired invites.
     pub invites: usize,
+    /// Decided or expired access requests.
+    pub access: usize,
 }
 
 /// Audit records and spent invites are kept at least this many days.
@@ -482,7 +490,63 @@ DROP TABLE sessions;
 ALTER TABLE sessions_v5 RENAME TO sessions;
 ";
 
-const MIGRATIONS: [&str; 5] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
+/// Version 6 is reserved for the usage-limits change, which lands
+/// separately. Until then this slot is empty, so a version 5 database steps
+/// through it unchanged.
+const SCHEMA_V6_RESERVED: &str = "";
+
+/// Version 7: access requests. The public ask-access link (its code kept
+/// only as a hash) and the requests people make through it or from their
+/// token. Nothing here depends on version 6, and every statement is
+/// idempotent.
+const SCHEMA_V7: &str = r"
+CREATE TABLE IF NOT EXISTS access_links (
+    id         TEXT PRIMARY KEY,
+    hash       TEXT NOT NULL UNIQUE,
+    project    TEXT,
+    note       TEXT,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    closed_at  INTEGER,
+    created_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS access_requests (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    link_id     TEXT,
+    token_id    TEXT REFERENCES tokens(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    message     TEXT NOT NULL DEFAULT '',
+    agents      TEXT NOT NULL DEFAULT '',
+    project     TEXT,
+    asked       TEXT NOT NULL DEFAULT '{}',
+    pickup_hash TEXT UNIQUE,
+    claim_hash  TEXT,
+    status      TEXT NOT NULL,
+    reason      TEXT,
+    invite_id   TEXT,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    decided_at  INTEGER,
+    decided_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_access_requests_status ON access_requests(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_access_requests_link ON access_requests(link_id, status);
+CREATE INDEX IF NOT EXISTS idx_access_requests_token ON access_requests(token_id, created_at);
+";
+
+const MIGRATIONS: [&str; 7] = [
+    SCHEMA_V1,
+    SCHEMA_V2,
+    SCHEMA_V3,
+    SCHEMA_V4,
+    SCHEMA_V5,
+    SCHEMA_V6_RESERVED,
+    SCHEMA_V7,
+];
+
+/// The schema version a fully migrated database reports.
+pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Usage of token `?1` since day start `?2` and month start `?3`. Every
 /// column it touches is in `idx_requests_usage`.
@@ -1093,7 +1157,8 @@ impl Store {
 
     /// One maintenance pass: finished requests past `retention_days` (never
     /// the current month), plus audit records and claimed or expired invites
-    /// older than `retention_days` or [`MIN_AUDIT_DAYS`], whichever is longer.
+    /// older than `retention_days` or [`MIN_AUDIT_DAYS`], whichever is longer,
+    /// and access requests decided or expired more than 30 days ago.
     ///
     /// # Errors
     ///
@@ -1103,10 +1168,13 @@ impl Store {
         let cutoff = now_ms() - i64::from(retention_days.max(MIN_AUDIT_DAYS)) * 86_400_000;
         let audit = self.prune_audit(cutoff)?;
         let invites = self.prune_invites(cutoff)?;
+        // Access requests have their own, shorter clock.
+        let access = self.prune_access(now_ms() - crate::access::PURGE_DAYS * 86_400_000)?;
         Ok(Pruned {
             requests,
             audit,
             invites,
+            access,
         })
     }
 
@@ -1582,7 +1650,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, SCHEMA_VERSION);
         // Opening again is a no-op.
         drop(s);
         assert!(Store::open(&path).is_ok());
@@ -1621,7 +1689,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 2).unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 5);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         let conn = s.conn().unwrap();
         let mode: i64 = conn
             .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
@@ -1671,7 +1739,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 5);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         let t = s.get_token("t1").unwrap().unwrap();
         assert!(t.accounts.is_empty());
         assert_eq!(
@@ -1694,6 +1762,28 @@ mod tests {
             .execute("DELETE FROM tokens WHERE id = 't1'", [])
             .unwrap();
         assert!(s.session("t1", AgentKind::Claude).unwrap().is_none());
+    }
+
+    #[test]
+    fn migrates_v5_database_to_access_requests_without_v6() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..5] {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.pragma_update(None, "user_version", 5).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        assert!(s.list_access_requests().unwrap().is_empty());
+        s.open_access_link(None, None, 1, "cli").unwrap();
+        // Running version 7 again (as a renumbered step would) is harmless.
+        s.conn().unwrap().execute_batch(SCHEMA_V7).unwrap();
+        assert!(s.latest_access_link().unwrap().is_some());
     }
 
     #[test]
@@ -1739,7 +1829,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 5);
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         let t = s.get_token("t1").unwrap().unwrap();
         assert_eq!(t.project, None);
         assert_eq!(t.accounts[&AgentKind::Claude], ["work"]);

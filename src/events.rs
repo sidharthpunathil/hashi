@@ -59,6 +59,16 @@ pub enum Event {
         /// Its release page.
         url: String,
     },
+    /// Someone asked for access, or a token asked for more. The dashboard
+    /// shows a toast and bumps its badge count.
+    AccessRequest {
+        /// Request id.
+        id: String,
+        /// New person or more.
+        kind: crate::store::AccessKind,
+        /// The requester's name (already cleaned), or the token's.
+        name: String,
+    },
     /// Free-form operational message.
     Log(String),
 }

@@ -63,6 +63,13 @@ enum Command {
     /// List or remove the bridges saved by `hashi connect`.
     #[command(subcommand)]
     Remote(RemoteCommand),
+    /// Ask someone's Hashi for access with their ask-access link, or check
+    /// your requests with `hashi request status`.
+    Request(RequestArgs),
+    /// See and decide requests for access, and open or close the
+    /// ask-access link people use to ask.
+    #[command(subcommand)]
+    Requests(admin_cli::RequestsCommand),
     /// Check that the agents, cloudflared and Tailscale are installed.
     Doctor(DoctorArgs),
     /// Write a redacted diagnostic report to attach to a bug report.
@@ -379,6 +386,35 @@ struct ConnectArgs {
     claude_bin: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct RequestArgs {
+    #[command(subcommand)]
+    command: Option<RequestCommand>,
+    /// The ask-access link, https://<host>/ask-access/hashi_ask_<code>.
+    url: Option<String>,
+    /// Your name, as the owner will see it. Default: your login name.
+    #[arg(long)]
+    name: Option<String>,
+    /// What you want access for.
+    #[arg(long)]
+    message: Option<String>,
+    /// Agents you want (comma separated). Default: all the link offers.
+    #[arg(long, value_delimiter = ',')]
+    agents: Option<Vec<String>>,
+    /// Name to save the bridge under once accepted. Default: the server's
+    /// name.
+    #[arg(long)]
+    remote_name: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum RequestCommand {
+    /// Check your pending requests. Accepted ones are saved as remotes,
+    /// as `hashi connect` saves them.
+    Status,
+}
+
 #[derive(Debug, Subcommand)]
 enum RemoteCommand {
     /// Show saved bridges (names and URLs, never tokens).
@@ -439,6 +475,8 @@ async fn main() -> Result<()> {
         Some(Command::Remote(RemoteCommand::Remove { name })) => {
             hashi::remote::remove(&home, &name)
         }
+        Some(Command::Request(args)) => request(home, args).await,
+        Some(Command::Requests(cmd)) => admin_cli::requests(&server::open_store(&home)?, cmd),
         Some(Command::Doctor(args)) => doctor(&home, &args).await,
         Some(Command::Install(args)) => tokio::task::spawn_blocking(move || install(&args)).await?,
         Some(Command::Report(args)) => report(&home, args).await,
@@ -738,6 +776,34 @@ async fn connect(home: PathBuf, args: ConnectArgs) -> Result<()> {
     tokio::task::spawn_blocking(move || hashi::remote::connect(&home, &opts).map(|_| ()))
         .await
         .context("the connect thread stopped")?
+}
+
+async fn request(home: PathBuf, args: RequestArgs) -> Result<()> {
+    let job = move || -> Result<()> {
+        if matches!(args.command, Some(RequestCommand::Status)) {
+            return hashi::access_client::status(&home);
+        }
+        let Some(url) = args.url else {
+            bail!("give the ask-access link: hashi request <link>, or hashi request status");
+        };
+        let name = args
+            .name
+            .or_else(|| std::env::var("USER").ok())
+            .or_else(|| std::env::var("USERNAME").ok())
+            .filter(|n| !n.trim().is_empty())
+            .context("give your name with --name")?;
+        let opts = hashi::access_client::RequestOptions {
+            url,
+            name,
+            message: args.message,
+            agents: args.agents,
+            remote_name: args.remote_name,
+        };
+        hashi::access_client::request(&home, &opts).map(|_| ())
+    };
+    tokio::task::spawn_blocking(job)
+        .await
+        .context("the request thread stopped")?
 }
 
 /// Writes the redacted diagnostic report. Nothing is uploaded.
