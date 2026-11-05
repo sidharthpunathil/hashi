@@ -199,9 +199,10 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             note,
             limits,
         } => {
+            let role = if admin { Role::Admin } else { Role::User };
             let new = NewToken {
                 name: clean_label(&name)?,
-                role: if admin { Role::Admin } else { Role::User },
+                role,
                 session_mode: if stateful {
                     SessionMode::Stateful
                 } else {
@@ -210,7 +211,11 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                 agents: agents.unwrap_or_else(|| AgentKind::ALL.to_vec()),
                 expires_in_days,
                 note,
-                limits: limits.apply(Limits::default()),
+                limits: if limits.any() {
+                    limits.apply(Limits::default())
+                } else {
+                    NewToken::default_limits(role)
+                },
             };
             let (t, secret) = store.create_token(&new)?;
             store.audit("cli", "token.create", &t.name, t.role.as_str())?;
@@ -303,10 +308,15 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
         TokenCommand::Revoke { id } => {
             let name = find_token(store, &id).map(|t| t.name).ok();
             match store.revoke_token(&id)? {
-                Revoke::Revoked => {
+                Revoke::Revoked(token_id) => {
                     let target = name.unwrap_or_else(|| id.clone());
                     store.audit("cli", "token.revoke", &target, "")?;
                     println!("revoked {target}");
+                    if let Some(home) = store.data_dir()
+                        && let Err(e) = hashi::server::remove_workspace(&home, &token_id)
+                    {
+                        eprintln!("warning: could not delete its workspace: {e}");
+                    }
                 }
                 Revoke::NotFound => bail!("no token matches `{id}`"),
                 Revoke::LastAdmin => bail!("refusing to revoke the last admin token"),

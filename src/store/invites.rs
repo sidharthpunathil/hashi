@@ -173,6 +173,21 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Deletes invites claimed, or expired unclaimed, before `before_ms`.
+    /// Pending invites are never removed.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn prune_invites(&self, before_ms: i64) -> Result<usize> {
+        Ok(self.conn()?.execute(
+            "DELETE FROM invites
+             WHERE (claimed_at IS NOT NULL AND claimed_at < ?1)
+                OR (claimed_at IS NULL AND expires_at < ?1)",
+            [before_ms],
+        )?)
+    }
+
     /// Looks up a code without using it.
     ///
     /// # Errors
@@ -288,6 +303,51 @@ mod tests {
             },
             link_hours,
         }
+    }
+
+    #[test]
+    fn prune_invites_keeps_pending_and_recent() {
+        let s = Store::open_in_memory().unwrap();
+        let (old_claimed, code) = s.create_invite(&new_invite(24)).unwrap();
+        assert!(matches!(
+            s.redeem_invite(&code).unwrap(),
+            Redeemed::Token(..)
+        ));
+        let (old_expired, _) = s.create_invite(&new_invite(1)).unwrap();
+        let (pending, _) = s.create_invite(&new_invite(24)).unwrap();
+        let (recent_claimed, code) = s.create_invite(&new_invite(24)).unwrap();
+        assert!(matches!(
+            s.redeem_invite(&code).unwrap(),
+            Redeemed::Token(..)
+        ));
+        {
+            let conn = s.conn().unwrap();
+            conn.execute(
+                "UPDATE invites SET claimed_at = 5 WHERE id = ?1",
+                [&old_claimed.id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE invites SET expires_at = 5 WHERE id = ?1",
+                [&old_expired.id],
+            )
+            .unwrap();
+            // A pending invite is kept even when its row is old.
+            conn.execute(
+                "UPDATE invites SET created_at = 5 WHERE id = ?1",
+                [&pending.id],
+            )
+            .unwrap();
+        }
+        assert_eq!(s.prune_invites(1_000).unwrap(), 2);
+        let left: Vec<String> = s
+            .list_invites()
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(left.len(), 2);
+        assert!(left.contains(&pending.id) && left.contains(&recent_claimed.id));
     }
 
     #[test]

@@ -131,6 +131,8 @@ pub struct AppState {
     pub run_timeout_secs: u64,
     /// Machine protection. Its figures are shown to admins only.
     pub guard: Arc<ResourceGuard>,
+    /// Long polls held open per token.
+    pub waits: Arc<ask::WaitSlots>,
 }
 
 /// Builds the router.

@@ -36,6 +36,17 @@ impl Store {
         Ok(())
     }
 
+    /// Deletes records written before `before_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn prune_audit(&self, before_ms: i64) -> Result<usize> {
+        Ok(self
+            .conn()?
+            .execute("DELETE FROM audit WHERE at < ?1", [before_ms])?)
+    }
+
     /// The most recent records, newest first.
     ///
     /// # Errors
@@ -73,5 +84,20 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].action, "token.update");
         assert_eq!(s.list_audit(1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_audit_drops_only_old_records() {
+        let s = Store::open_in_memory().unwrap();
+        s.audit("cli", "token.create", "old", "").unwrap();
+        s.conn()
+            .unwrap()
+            .execute("UPDATE audit SET at = 5", [])
+            .unwrap();
+        s.audit("cli", "token.create", "new", "").unwrap();
+        assert_eq!(s.prune_audit(1_000).unwrap(), 1);
+        let left = s.list_audit(10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].target, "new");
     }
 }

@@ -864,7 +864,15 @@ fn wrapped_height(line: &Line, width: usize) -> usize {
 
 fn render_detail(app: &mut App, frame: &mut Frame, area: Rect) {
     let selected = app.requests_table.selected();
-    let Some(r) = selected.and_then(|i| app.recent.get(i)) else {
+    // The list holds brief rows (prompt cut to 200 chars, no response); the
+    // full request for the selection is loaded into `app.detail`. Borrow the
+    // fields directly rather than cloning a response that can be megabytes.
+    let brief = selected.and_then(|i| app.recent.get(i));
+    let full = match (&app.detail, brief) {
+        (Some(full), Some(b)) if full.id == b.id => Some(full),
+        (_, b) => b,
+    };
+    let Some(r) = full else {
         let hint = Paragraph::new(Span::styled(
             "Select a request to see its prompt and answer.",
             t::muted(),

@@ -272,7 +272,7 @@ async fn ask(
     )
     .await?;
     let secs = state.run_timeout_secs;
-    let req = api::wait_until_done(state, &req.id, secs, secs).await?;
+    let req = api::wait_until_done(state, &token.id, &req.id, secs, secs).await?;
     Ok(outcome(req))
 }
 
@@ -292,7 +292,14 @@ async fn get_result(
     let req = if req.status.is_terminal() {
         req
     } else {
-        api::wait_until_done(state, &req.id, GET_RESULT_WAIT_SECS, GET_RESULT_WAIT_SECS).await?
+        api::wait_until_done(
+            state,
+            &token.id,
+            &req.id,
+            GET_RESULT_WAIT_SECS,
+            GET_RESULT_WAIT_SECS,
+        )
+        .await?
     };
     Ok(outcome(req))
 }

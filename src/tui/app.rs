@@ -385,7 +385,8 @@ pub struct App {
     pub stats: Stats,
     /// Counters per agent.
     pub agent_stats: HashMap<AgentKind, Stats>,
-    /// Recent requests, newest first.
+    /// Recent requests, newest first. Prompts and errors are cut short and
+    /// responses left out; [`App::selected_request`] has the full row.
     pub recent: Vec<Request>,
     /// All tokens.
     pub tokens: Vec<Token>,
@@ -420,6 +421,8 @@ pub struct App {
     /// The request detail pane, kept between frames.
     pub detail_cache: super::ui::DetailCache,
     last_refresh: Option<Instant>,
+    /// The selected request in full, for the detail pane.
+    pub(crate) detail: Option<Request>,
 }
 
 const FEED_CAP: usize = 500;
@@ -460,6 +463,7 @@ impl App {
             reduced_motion: std::env::var("HASHI_REDUCED_MOTION").is_ok_and(|v| v != "0"),
             detail_cache: super::ui::DetailCache::default(),
             last_refresh: None,
+            detail: None,
         };
         app.refresh();
         app
@@ -488,7 +492,7 @@ impl App {
             Ok::<_, crate::store::StoreError>((
                 stats,
                 per,
-                store.recent_requests(RECENT_LIMIT)?,
+                store.recent_requests_brief(RECENT_LIMIT)?,
                 tokens,
                 usage,
                 invites,
@@ -508,6 +512,7 @@ impl App {
                 if self.invites.is_empty() {
                     self.tokens_focus = TokensFocus::Tokens;
                 }
+                self.load_detail();
             }
             Err(e) => self.notify(format!("refresh failed: {e}")),
         }
@@ -861,7 +866,7 @@ impl App {
             agents: form.agents.agents(),
             expires_in_days: None,
             note: None,
-            limits: crate::token::Limits::default(),
+            limits: NewToken::default_limits(form.role),
         };
         match self.state.store.create_token(&new) {
             Ok((token, secret)) => {
@@ -974,9 +979,16 @@ impl App {
 
     fn revoke(&mut self, id: &str, name: &str) {
         match self.state.store.revoke_token(id) {
-            Ok(Revoke::Revoked) => {
+            Ok(Revoke::Revoked(token_id)) => {
                 self.state.bus.log(format!("token revoked: {name}"));
                 self.notify(format!("revoked {name}"));
+                if let Some(home) = self.state.store.data_dir()
+                    && let Err(e) = crate::server::remove_workspace(&home, &token_id)
+                {
+                    self.state
+                        .bus
+                        .log(format!("could not delete the workspace of {name}: {e}"));
+                }
             }
             Ok(Revoke::LastAdmin) => self.notify("cannot revoke the last admin token"),
             Ok(Revoke::NotFound) => self.notify("token already gone"),
@@ -1006,6 +1018,19 @@ impl App {
         let next = (cur + by).clamp(0, len.cast_signed() - 1);
         table.select(Some(next.cast_unsigned()));
         self.detail_scroll = 0;
+        if self.tab == Tab::Requests {
+            self.load_detail();
+        }
+    }
+
+    /// Loads the selected request with its full prompt and response.
+    fn load_detail(&mut self) {
+        let id = self
+            .requests_table
+            .selected()
+            .and_then(|i| self.recent.get(i))
+            .map(|r| r.id.clone());
+        self.detail = id.and_then(|id| self.state.store.get_request(&id).ok().flatten());
     }
 
     /// Shows a transient message in the footer.
@@ -1020,12 +1045,17 @@ impl App {
         }
     }
 
-    /// The request highlighted in the requests table.
+    /// The request highlighted in the requests table, in full when loaded.
     #[must_use]
     pub fn selected_request(&self) -> Option<&Request> {
-        self.requests_table
+        let brief = self
+            .requests_table
             .selected()
-            .and_then(|i| self.recent.get(i))
+            .and_then(|i| self.recent.get(i))?;
+        match &self.detail {
+            Some(full) if full.id == brief.id => Some(full),
+            _ => Some(brief),
+        }
     }
 
     /// How long the oldest running request for `agent` has been running, in ms.

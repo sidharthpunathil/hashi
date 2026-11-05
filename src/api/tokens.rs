@@ -33,7 +33,8 @@ pub struct CreateTokenBody {
     /// Who or what the token is for.
     #[serde(default)]
     pub note: Option<String>,
-    /// Usage caps.
+    /// Usage caps. Omitted, a `user` token gets `maxPending: 3` and an
+    /// `admin` token is unlimited.
     #[serde(default)]
     pub limits: Option<Limits>,
 }
@@ -118,14 +119,19 @@ pub fn validate_new_token(body: CreateTokenBody) -> ApiResult<NewToken> {
             "agents must name at least one agent".to_owned(),
         ));
     }
+    let role = body.role.unwrap_or(Role::User);
+    let limits = match body.limits {
+        Some(l) => validate_limits(l)?,
+        None => NewToken::default_limits(role),
+    };
     Ok(NewToken {
         name,
-        role: body.role.unwrap_or(Role::User),
+        role,
         session_mode: body.session_mode.unwrap_or_default(),
         agents,
         expires_in_days: body.expires_in_days,
         note: validate_note(body.note)?,
-        limits: validate_limits(body.limits.unwrap_or_default())?,
+        limits,
     })
 }
 
@@ -247,12 +253,21 @@ pub(super) async fn revoke(
 ) -> ApiResult<Json<Value>> {
     let name = state.store.get_token(&id)?.map(|t| t.name);
     match state.store.revoke_token(&id)? {
-        Revoke::Revoked => {
+        Revoke::Revoked(token_id) => {
             let target = name.unwrap_or_else(|| id.clone());
             state
                 .store
                 .audit(&admin.name, "token.revoke", &target, "")?;
             state.bus.log(format!("token revoked: {target}"));
+            if let Some(home) = state.store.data_dir() {
+                let removed = tokio::task::spawn_blocking(move || {
+                    crate::server::remove_workspace(&home, &token_id)
+                })
+                .await;
+                if let Ok(Err(e)) = removed {
+                    tracing::warn!(error = %e, "could not delete the revoked token's workspace");
+                }
+            }
             Ok(Json(json!({ "ok": true })))
         }
         Revoke::NotFound => Err(ApiError::NotFound("token not found")),
@@ -313,6 +328,27 @@ mod tests {
             (t.name.as_str(), t.role, t.agents.len()),
             ("bot", Role::User, AgentKind::ALL.len())
         );
+    }
+
+    #[test]
+    fn tokens_without_limits_get_fair_defaults() {
+        let user = validate_new_token(body("bot")).unwrap();
+        assert_eq!(user.limits.max_pending, Some(3));
+        let admin = validate_new_token(CreateTokenBody {
+            role: Some(Role::Admin),
+            ..body("ops")
+        })
+        .unwrap();
+        assert_eq!(admin.limits, Limits::default());
+        let explicit = validate_new_token(CreateTokenBody {
+            limits: Some(Limits {
+                daily_requests: Some(5),
+                ..Limits::default()
+            }),
+            ..body("capped")
+        })
+        .unwrap();
+        assert_eq!(explicit.limits.max_pending, None);
     }
 
     #[test]

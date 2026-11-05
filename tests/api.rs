@@ -1154,3 +1154,173 @@ async fn machine_figures_are_for_admins_only() {
     }
     h.running.shutdown().await;
 }
+
+// ── storage and queue exhaustion ───────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_burst_cannot_exceed_max_pending() {
+    let h = harness().await;
+    let token = h.user_token(json!({"limits": {"maxPending": 3}})).await;
+    let posts = (0..50).map(|i| {
+        let token = token.clone();
+        let h = &h;
+        async move {
+            h.post("/v1/ask", &token, json!({"message": format!("slow {i}")}))
+                .await
+        }
+    });
+    let results = futures::future::join_all(posts).await;
+    let accepted = results
+        .iter()
+        .filter(|(s, _)| *s == StatusCode::ACCEPTED)
+        .count();
+    let busy = results
+        .iter()
+        .filter(|(s, v)| {
+            *s == StatusCode::TOO_MANY_REQUESTS && v["error"]["code"] == "too_many_pending"
+        })
+        .count();
+    assert_eq!((accepted, busy), (3, 47), "{results:?}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn new_user_tokens_default_to_three_pending_and_admins_to_unlimited() {
+    let h = harness().await;
+    let user = h.user_token(json!({})).await;
+    let (_, me) = h.get("/v1/me", Some(&user)).await;
+    assert_eq!(me["limits"]["maxPending"], 3, "{me}");
+    let (status, v) = h
+        .post(
+            "/v1/tokens",
+            &h.admin,
+            json!({"name": "ops", "role": "admin"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(v["record"]["limits"]["maxPending"].is_null(), "{v}");
+    for i in 0..3 {
+        let (status, _) = h
+            .post("/v1/ask", &user, json!({"message": format!("slow {i}")}))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+    let (status, v) = h.post("/v1/ask", &user, json!({"message": "slow"})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(v["error"]["code"], "too_many_pending");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn users_cannot_fill_the_slots_reserved_for_admins() {
+    // A queue of 6 keeps 3 slots for admins.
+    let h = harness_with(|c| c.queue_limit = 6).await;
+    let user = h.user_token(json!({"limits": {"maxPending": 50}})).await;
+    for i in 0..3 {
+        let (status, _) = h
+            .post("/v1/ask", &user, json!({"message": format!("slow {i}")}))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+    let (status, _) = h.post("/v1/ask", &user, json!({"message": "slow"})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _) = h
+        .post("/v1/ask", &h.admin, json!({"message": "slow admin"}))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_token_holds_at_most_four_long_polls() {
+    let h = harness().await;
+    let user = h.user_token(json!({})).await;
+    let (status, v) = h.post("/v1/ask", &user, json!({"message": "slow"})).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let id = v["id"].as_str().unwrap().to_owned();
+    let path = format!("/v1/ask/{id}?wait=10");
+    let held = futures::future::join_all((0..4).map(|_| h.get(&path, Some(&user))));
+    let fifth = async {
+        // Let the four waits register first.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let started = std::time::Instant::now();
+        let (status, v) = h.get(&path, Some(&user)).await;
+        (status, v, started.elapsed())
+    };
+    let (held, (status, v, took)) = tokio::join!(held, fifth);
+    assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+    assert!(
+        took < Duration::from_secs(1),
+        "fifth wait was held {took:?}"
+    );
+    assert_ne!(v["status"], "completed");
+    for (status, v) in held {
+        assert_eq!(status, StatusCode::OK, "{v}");
+    }
+    h.running.shutdown().await;
+}
+
+async fn user_id(h: &Harness) -> String {
+    let (_, v) = h.get("/v1/tokens", Some(&h.admin)).await;
+    v["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["role"] == "user")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn revoking_a_token_deletes_its_workspace() {
+    let h = harness().await;
+    let user = h.user_token(json!({})).await;
+    let (status, _) = h
+        .post("/v1/ask", &user, json!({"message": "hi", "wait": 10}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = user_id(&h).await;
+    let workspace = h._dir.path().join("home/workspaces").join(&id);
+    assert!(workspace.join("claude").is_dir());
+    let (status, _) = h
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/v1/tokens/{id}"),
+            Some(&h.admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!workspace.exists());
+    h.running.shutdown().await;
+}
+
+#[test]
+fn remove_workspace_never_leaves_the_workspace_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(home.join("workspaces/tok-1/claude")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), "precious").unwrap();
+    // A link inside a workspace, and a workspace that is itself a link.
+    std::os::unix::fs::symlink(&outside, home.join("workspaces/tok-1/claude/escape")).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("workspaces/tok-2")).unwrap();
+
+    assert!(server::remove_workspace(&home, "tok-1").unwrap());
+    assert!(server::remove_workspace(&home, "tok-2").unwrap());
+    assert!(!home.join("workspaces/tok-1").exists());
+    assert!(home.join("workspaces/tok-2").symlink_metadata().is_err());
+    assert_eq!(
+        std::fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "precious"
+    );
+
+    // Missing is fine; anything that is not a plain id is refused.
+    assert!(!server::remove_workspace(&home, "tok-3").unwrap());
+    assert!(server::remove_workspace(&home, "../outside").is_err());
+    assert!(server::remove_workspace(&home, "").is_err());
+    assert!(outside.join("keep.txt").exists());
+}

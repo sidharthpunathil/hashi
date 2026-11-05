@@ -100,6 +100,7 @@ fn state() -> AppState {
             std::path::PathBuf::from("."),
             Bus::default(),
         )),
+        waits: Default::default(),
     }
 }
 
@@ -735,4 +736,37 @@ fn requests_view_handles_many_large_prompts() {
     assert!(out.contains(&format!("END OF PROMPT {tag}")), "{out}");
     // Drawing again reuses the cached detail and gives the same frame.
     assert_eq!(draw(&mut app, w, h), out);
+}
+
+#[test]
+fn request_list_is_brief_but_the_selection_is_whole() {
+    let st = state();
+    let admin = st.store.list_tokens().unwrap().remove(0);
+    let long = "word ".repeat(2_000);
+    st.store
+        .insert_request(NewRequest {
+            id: "99999999-0000-4000-8000-000000000000",
+            token: &admin,
+            agent: AgentKind::Claude,
+            model: None,
+            message: &long,
+        })
+        .unwrap();
+    let app = App::new(st, None, false);
+    assert_eq!(app.recent[0].message.chars().count(), 200);
+    assert!(app.recent.iter().all(|r| r.response.is_none()));
+    assert_eq!(app.selected_request().unwrap().message, long);
+}
+
+#[test]
+fn dashboard_user_tokens_get_the_default_pending_cap() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('n')));
+    for c in "friend".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Enter));
+    let t = app.tokens.iter().find(|t| t.name == "friend").unwrap();
+    assert_eq!((t.role, t.limits.max_pending), (Role::User, Some(3)));
 }
