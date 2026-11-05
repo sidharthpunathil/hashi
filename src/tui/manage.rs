@@ -63,7 +63,7 @@ fn nav(field: &mut usize, n: usize, code: KeyCode, skip: impl Fn(usize) -> bool)
 fn list_nav(selected: &mut usize, len: usize, code: KeyCode) -> bool {
     match code {
         KeyCode::Down | KeyCode::Char('j') => {
-            *selected = (*selected + 1).min(len.saturating_sub(1));
+            *selected = selected.saturating_add(1).min(len.saturating_sub(1));
             true
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -416,9 +416,9 @@ impl App {
             Popup::Audit { mut scroll } => {
                 match code {
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return None,
-                    KeyCode::Down | KeyCode::Char('j') => scroll += 1,
+                    KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
                     KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
-                    KeyCode::PageDown | KeyCode::Char('J') => scroll += 10,
+                    KeyCode::PageDown | KeyCode::Char('J') => scroll = scroll.saturating_add(10),
                     KeyCode::PageUp | KeyCode::Char('K') => scroll = scroll.saturating_sub(10),
                     _ => {}
                 }
