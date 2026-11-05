@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod net;
 pub mod queue;
 pub mod server;
+pub mod shutdown;
 pub mod store;
 pub mod tls;
 pub mod token;

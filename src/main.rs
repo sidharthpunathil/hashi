@@ -377,15 +377,22 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         ..hashi::net::NetLimits::default()
     };
     let running = server::start_with(cfg, net, bus).await?;
+    // Ctrl-C, SIGTERM and SIGHUP (or the Windows console closing) all stop
+    // the server the same graceful way; a second one exits at once.
+    let mut signals = hashi::shutdown::Signals::install().context("installing signal handlers")?;
 
     if tui {
-        let result = hashi::tui::run(
+        let result = hashi::tui::run_until(
             running.state.clone(),
             events,
             running.bootstrap_token.clone(),
             args.tunnel,
+            async {
+                signals.recv().await;
+            },
         )
         .await;
+        let _force = hashi::shutdown::exit_on_next(signals);
         running.shutdown().await;
         return result;
     }
@@ -397,11 +404,10 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
             print_event(&ev);
         }
     });
-    tokio::signal::ctrl_c()
-        .await
-        .context("waiting for ctrl-c")?;
-    eprintln!("\nshutting down…");
+    let why = signals.recv().await;
+    eprintln!("\nshutting down ({why}), press Ctrl-C again to exit at once…");
     printer.abort();
+    let _force = hashi::shutdown::exit_on_next(signals);
     running.shutdown().await;
     Ok(())
 }

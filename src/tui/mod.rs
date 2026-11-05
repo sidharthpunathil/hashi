@@ -31,9 +31,26 @@ pub async fn run(
     bootstrap: Option<String>,
     tunnel: bool,
 ) -> anyhow::Result<()> {
+    run_until(state, events, bootstrap, tunnel, std::future::pending()).await
+}
+
+/// Like [`run`], but also stops when `stop` resolves, for example on a
+/// termination signal. The terminal is restored either way.
+///
+/// # Errors
+///
+/// Fails if the terminal cannot be drawn to.
+pub async fn run_until(
+    state: AppState,
+    events: tokio::sync::broadcast::Receiver<Event>,
+    bootstrap: Option<String>,
+    tunnel: bool,
+    stop: impl Future<Output = ()>,
+) -> anyhow::Result<()> {
     // `ratatui::init` installs a panic hook that restores the terminal.
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, App::new(state, bootstrap, tunnel), events).await;
+    let app = App::new(state, bootstrap, tunnel);
+    let result = event_loop(&mut terminal, app, events, stop).await;
     ratatui::restore();
     result
 }
@@ -42,7 +59,9 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     mut app: App,
     mut events: tokio::sync::broadcast::Receiver<Event>,
+    stop: impl Future<Output = ()>,
 ) -> anyhow::Result<()> {
+    let mut stop = std::pin::pin!(stop);
     let mut input = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -56,6 +75,7 @@ async fn event_loop(
             dirty = false;
         }
         tokio::select! {
+            () = &mut stop => break,
             maybe = input.next() => match maybe {
                 Some(Ok(TermEvent::Key(key))) => {
                     app.on_key(key);
