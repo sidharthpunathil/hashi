@@ -41,6 +41,10 @@ pub struct ServerConfig {
     pub retention_days: u32,
     /// Start a public tunnel.
     pub tunnel: bool,
+    /// Stable public base URL for links, such as `https://hashi.example.com`.
+    pub public_url: Option<String>,
+    /// Name shown to people you share with.
+    pub name: String,
 }
 
 /// A running server.
@@ -172,8 +176,9 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
     let runtime = Arc::new(Runtime {
         started: Instant::now(),
         local_url: format!("http://{local}"),
-        public_url: RwLock::new(None),
+        public_url: RwLock::new(cfg.public_url.clone()),
         agents,
+        name: cfg.name.clone(),
     });
     let dispatcher = Dispatcher::new();
     let state = AppState {
@@ -219,7 +224,10 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         tasks.spawn(async move {
             match crate::tunnel::start(port).await {
                 Ok(mut tunnel) => {
-                    if let Ok(mut url) = runtime.public_url.write() {
+                    // A configured public URL wins: invite links must not change.
+                    if let Ok(mut url) = runtime.public_url.write()
+                        && url.is_none()
+                    {
                         *url = Some(tunnel.url.clone());
                     }
                     bus.emit(Event::TunnelReady(tunnel.url.clone()));

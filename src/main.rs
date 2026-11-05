@@ -94,6 +94,12 @@ struct ServeArgs {
     /// Expose the API through a Cloudflare quick tunnel (requires `cloudflared`).
     #[arg(long, env = "HASHI_TUNNEL")]
     tunnel: bool,
+    /// Stable public URL used in invite links, e.g. https://hashi.example.com.
+    #[arg(long, env = "HASHI_PUBLIC_URL", value_parser = parse_public_url)]
+    public_url: Option<String>,
+    /// Name shown to people you share with.
+    #[arg(long, default_value = "Hashi", env = "HASHI_NAME")]
+    name: String,
     /// Plain logs instead of the dashboard (also used when stdout is not a terminal).
     #[arg(long)]
     headless: bool,
@@ -163,6 +169,19 @@ struct AskArgs {
     timeout: u64,
     #[command(flatten)]
     agents: AgentArgs,
+}
+
+/// Accepts `http(s)://host[:port][/path]` and strips a trailing slash.
+fn parse_public_url(s: &str) -> Result<String, String> {
+    let s = s.trim().trim_end_matches('/');
+    let rest = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .ok_or("public URL must start with https:// or http://")?;
+    if rest.is_empty() || rest.contains(char::is_whitespace) || rest.contains(['?', '#', '@']) {
+        return Err("public URL must be a plain origin like https://hashi.example.com".to_owned());
+    }
+    Ok(s.to_owned())
 }
 
 fn home_dir(custom: Option<PathBuf>) -> Result<PathBuf> {
@@ -238,6 +257,8 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         queue_limit: args.queue_limit,
         retention_days: args.retention_days,
         tunnel: args.tunnel,
+        public_url: args.public_url.clone(),
+        name: args.name.clone(),
     };
 
     let bus = Bus::default();
@@ -348,6 +369,8 @@ fn token(home: &std::path::Path, cmd: TokenCommand) -> Result<()> {
                 },
                 agents: agents.unwrap_or_else(|| AgentKind::ALL.to_vec()),
                 expires_in_days,
+                note: None,
+                limits: hashi::token::Limits::default(),
             };
             let (t, secret) = store.create_token(&new)?;
             eprintln!("created {} token `{}` ({})", t.role, t.name, t.id);

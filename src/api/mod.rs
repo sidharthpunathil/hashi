@@ -1,0 +1,445 @@
+//! HTTP API.
+//!
+//! | Method   | Path                  | Auth  | Purpose                            |
+//! |----------|-----------------------|-------|------------------------------------|
+//! | `GET`    | `/healthz`            |       | Liveness probe                     |
+//! | `GET`    | `/v1/status`          |       | Version, uptime, agent readiness   |
+//! | `POST`   | `/v1/ask`             | token | Queue a prompt                     |
+//! | `GET`    | `/v1/ask/{id}`        | token | Poll (or long-poll) a result       |
+//! | `DELETE` | `/v1/session/{agent}` | token | Reset a stateful conversation      |
+//! | `GET`    | `/v1/me`              | any   | The token's own access and usage   |
+//! | `GET`    | `/v1/stats`           | admin | Queue and request counters         |
+//! | `GET`    | `/v1/tokens`          | admin | List tokens                        |
+//! | `POST`   | `/v1/tokens`          | admin | Create a token                     |
+//! | `PATCH`  | `/v1/tokens/{id}`     | admin | Pause, resume, extend, set limits  |
+//! | `DELETE` | `/v1/tokens/{id}`     | admin | Revoke a token                     |
+//! | `GET`    | `/v1/audit`           | admin | Recent sharing and access changes  |
+//!
+//! "any" accepts paused and expired tokens, so they can see why they stopped.
+
+mod ask;
+mod tokens;
+
+pub use ask::{AskBody, SubmitInput, me_json, request_json, submit, wait_until_done};
+pub use tokens::{CreateTokenBody, UpdateTokenBody, validate_limits, validate_new_token};
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+use axum::extract::{FromRequestParts, State};
+use axum::http::{HeaderValue, StatusCode, header, request::Parts};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use serde::Serialize;
+use serde_json::json;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
+
+use crate::agent::AgentKind;
+use crate::events::Bus;
+use crate::queue::Dispatcher;
+use crate::store::{Store, StoreError};
+use crate::token::{Token, TokenStatus};
+use crate::util::now_ms;
+
+/// Largest accepted prompt, in bytes.
+pub const MAX_MESSAGE_BYTES: usize = 32 * 1024;
+/// Largest accepted request body, in bytes.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Upper bound for `wait` long-polls, in seconds.
+pub const MAX_WAIT_SECS: u64 = 120;
+/// Upper bound on stored tokens.
+pub const MAX_TOKENS: usize = 100;
+
+/// Readiness of one agent, discovered at startup.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    /// Which agent.
+    pub agent: AgentKind,
+    /// Whether the executable answered `--version`.
+    pub available: bool,
+    /// Reported version string.
+    pub version: Option<String>,
+    /// Resolved executable path.
+    pub path: String,
+}
+
+/// Facts about the running server that the API and TUI both display.
+#[derive(Debug)]
+pub struct Runtime {
+    /// Process start.
+    pub started: Instant,
+    /// Local listen address.
+    pub local_url: String,
+    /// Public URL: configured with `--public-url`, or the tunnel's once known.
+    pub public_url: RwLock<Option<String>>,
+    /// Agent readiness.
+    pub agents: Vec<AgentInfo>,
+    /// Name shown to people you share with.
+    pub name: String,
+}
+
+impl Runtime {
+    /// The public URL, if one is configured or a tunnel is up.
+    #[must_use]
+    pub fn public_url(&self) -> Option<String> {
+        self.public_url.read().ok().and_then(|u| u.clone())
+    }
+
+    /// Best URL to hand to clients.
+    #[must_use]
+    pub fn base_url(&self) -> String {
+        self.public_url
+            .read()
+            .ok()
+            .and_then(|u| u.clone())
+            .unwrap_or_else(|| self.local_url.clone())
+    }
+}
+
+/// Shared handler state.
+#[derive(Debug, Clone)]
+pub struct AppState {
+    /// Persistence.
+    pub store: Arc<Store>,
+    /// Event publisher.
+    pub bus: Bus,
+    /// Worker wake-ups.
+    pub dispatcher: Dispatcher,
+    /// Server facts.
+    pub runtime: Arc<Runtime>,
+    /// Per-token rate limiter.
+    pub limiter: Arc<RateLimiter>,
+    /// Agent used when a request does not name one.
+    pub default_agent: AgentKind,
+    /// Maximum pending requests across all agents.
+    pub queue_limit: u64,
+}
+
+/// Builds the router.
+pub fn router(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
+    Router::new()
+        .route("/", get(root))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/v1/status", get(status))
+        .route("/v1/ask", post(ask::ask))
+        .route("/v1/ask/{id}", get(ask::poll))
+        .route("/v1/session/{agent}", delete(ask::reset_session))
+        .route("/v1/me", get(ask::me))
+        .route("/v1/stats", get(stats))
+        .route("/v1/tokens", get(tokens::list).post(tokens::create))
+        .route(
+            "/v1/tokens/{id}",
+            axum::routing::patch(tokens::update).delete(tokens::revoke),
+        )
+        .route("/v1/audit", get(tokens::audit))
+        .fallback(|| async { ApiError::NotFound("no such route") })
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(cors)
+        .layer(axum::middleware::map_response(security_headers))
+        .with_state(state)
+}
+
+async fn security_headers(mut res: Response) -> Response {
+    let h = res.headers_mut();
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
+}
+
+// ── errors ─────────────────────────────────────────────────────────────────
+
+/// Errors rendered as `{"error": {"code", "message"}}`.
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    /// 400
+    #[error("{0}")]
+    BadRequest(String),
+    /// 401
+    #[error("{0}")]
+    Unauthorized(&'static str),
+    /// 403
+    #[error("{0}")]
+    Forbidden(String),
+    /// 404
+    #[error("{0}")]
+    NotFound(&'static str),
+    /// 409
+    #[error("{0}")]
+    Conflict(&'static str),
+    /// 429
+    #[error("{0}")]
+    TooManyRequests(&'static str),
+    /// 503
+    #[error("{0}")]
+    Unavailable(String),
+    /// Any status with a specific machine-readable code and optional extra fields.
+    #[error("{message}")]
+    Coded {
+        /// HTTP status.
+        status: StatusCode,
+        /// Machine-readable code, for example `limit_reached`.
+        code: &'static str,
+        /// Human-readable message.
+        message: String,
+        /// Extra fields merged into the error object.
+        extra: Option<serde_json::Value>,
+    },
+    /// 500
+    #[error("internal error")]
+    Internal(#[from] StoreError),
+}
+
+impl ApiError {
+    /// Builds a [`ApiError::Coded`] error.
+    #[must_use]
+    pub fn coded(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self::Coded {
+            status,
+            code,
+            message: message.into(),
+            extra: None,
+        }
+    }
+
+    fn parts(&self) -> (StatusCode, &'static str) {
+        match self {
+            Self::Coded { status, code, .. } => (*status, code),
+            Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            Self::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            Self::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        if let Self::Internal(e) = &self {
+            tracing::error!(error = %e, "internal error");
+        }
+        let (status, code) = self.parts();
+        let mut error = json!({ "code": code, "message": self.to_string() });
+        if let (
+            Self::Coded {
+                extra: Some(serde_json::Value::Object(extra)),
+                ..
+            },
+            Some(obj),
+        ) = (&self, error.as_object_mut())
+        {
+            obj.extend(extra.clone());
+        }
+        let mut res = (status, Json(json!({ "error": error }))).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            res.headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        res
+    }
+}
+
+/// Result alias for handlers.
+pub type ApiResult<T> = Result<T, ApiError>;
+
+// ── auth ───────────────────────────────────────────────────────────────────
+
+/// Fixed-window request limiter keyed by token id.
+#[derive(Debug)]
+pub struct RateLimiter {
+    per_minute: u32,
+    windows: Mutex<HashMap<String, (Instant, u32)>>,
+}
+
+impl RateLimiter {
+    /// Allows `per_minute` authenticated requests per token. Zero disables limiting.
+    #[must_use]
+    pub fn new(per_minute: u32) -> Self {
+        Self {
+            per_minute,
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Records a hit and returns whether it is within budget.
+    pub fn check(&self, key: &str) -> bool {
+        if self.per_minute == 0 {
+            return true;
+        }
+        let Ok(mut map) = self.windows.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        if map.len() > 10_000 {
+            map.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(60));
+        }
+        let entry = map.entry(key.to_owned()).or_insert((now, 0));
+        if now.duration_since(entry.0) >= Duration::from_secs(60) {
+            *entry = (now, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= self.per_minute
+    }
+}
+
+/// Extractor for an unexpired token (paused tokens pass; see [`submit`]).
+#[derive(Debug)]
+pub struct Auth(pub Token);
+
+/// Extractor for an active admin token.
+#[derive(Debug)]
+pub struct Admin(pub Token);
+
+/// Extractor for any known token, including paused and expired ones.
+#[derive(Debug)]
+pub struct AnyToken(pub Token);
+
+fn bearer(parts: &Parts) -> ApiResult<&str> {
+    let header = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ApiError::Unauthorized(
+            "missing Authorization: Bearer <token> header",
+        ))?;
+    header
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.len() <= 256)
+        .ok_or(ApiError::Unauthorized("malformed Authorization header"))
+}
+
+fn rate_limit(state: &AppState, token: &Token) -> ApiResult<()> {
+    if state.limiter.check(&token.id) {
+        Ok(())
+    } else {
+        Err(ApiError::TooManyRequests("rate limit exceeded, slow down"))
+    }
+}
+
+impl FromRequestParts<AppState> for Auth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
+        let token = state
+            .store
+            .authenticate(bearer(parts)?)?
+            .ok_or(ApiError::Unauthorized("invalid or expired token"))?;
+        rate_limit(state, &token)?;
+        Ok(Self(token))
+    }
+}
+
+impl FromRequestParts<AppState> for AnyToken {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
+        let token = state
+            .store
+            .authenticate_any(bearer(parts)?)?
+            .ok_or(ApiError::Unauthorized("invalid token"))?;
+        rate_limit(state, &token)?;
+        Ok(Self(token))
+    }
+}
+
+impl FromRequestParts<AppState> for Admin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
+        let Auth(token) = Auth::from_request_parts(parts, state).await?;
+        if !token.is_admin() {
+            return Err(ApiError::Forbidden("admin token required".to_owned()));
+        }
+        if token.status(now_ms()) == TokenStatus::Paused {
+            return Err(ApiError::coded(
+                StatusCode::FORBIDDEN,
+                "token_paused",
+                "this admin token is paused",
+            ));
+        }
+        Ok(Self(token))
+    }
+}
+
+// ── public ─────────────────────────────────────────────────────────────────
+
+async fn root(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "name": "hashi",
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "A bridge to Claude Code and Codex",
+        "baseUrl": state.runtime.base_url(),
+        "docs": "POST /v1/ask with Authorization: Bearer <token>",
+    }))
+}
+
+async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptimeSecs": state.runtime.started.elapsed().as_secs(),
+        "defaultAgent": state.default_agent,
+        "agents": state.runtime.agents.iter().map(|a| json!({
+            "agent": a.agent, "available": a.available, "version": a.version,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+// ── admin ──────────────────────────────────────────────────────────────────
+
+async fn stats(
+    State(state): State<AppState>,
+    Admin(_): Admin,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "stats": state.store.stats()? })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limiter_blocks_after_budget() {
+        let rl = RateLimiter::new(2);
+        assert!(rl.check("a") && rl.check("a"));
+        assert!(!rl.check("a"));
+        assert!(rl.check("b"));
+    }
+
+    #[test]
+    fn coded_errors_carry_extra_fields() {
+        let err = ApiError::Coded {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "limit_reached",
+            message: "daily cap".into(),
+            extra: Some(json!({ "limit": "dailyRequests" })),
+        };
+        assert_eq!(err.into_response().status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+}

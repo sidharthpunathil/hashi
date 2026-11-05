@@ -71,6 +71,7 @@ fn state() -> AppState {
             started: Instant::now(),
             local_url: "http://127.0.0.1:7878".into(),
             public_url: RwLock::new(None),
+            name: "Hashi".into(),
             agents: vec![
                 AgentInfo {
                     agent: AgentKind::Claude,

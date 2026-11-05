@@ -94,6 +94,8 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         queue_limit: 100,
         retention_days: 14,
         tunnel: false,
+        public_url: None,
+        name: "Test Hashi".to_owned(),
     };
     tweak(&mut cfg);
 
@@ -480,5 +482,204 @@ async fn data_directory_is_private() {
         .mode()
         & 0o777;
     assert_eq!(dir_mode, 0o700);
+    h.running.shutdown().await;
+}
+
+// ── sharing: limits, pause, /v1/me, audit ─────────────────────────────────
+
+impl Harness {
+    async fn patch(&self, path: &str, body: Value) -> (StatusCode, Value) {
+        self.call(reqwest::Method::PATCH, path, Some(&self.admin), Some(body))
+            .await
+    }
+
+    async fn token_id(&self, name: &str) -> String {
+        let (_, v) = self.get("/v1/tokens", Some(&self.admin)).await;
+        v["tokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+#[tokio::test]
+async fn paused_token_cannot_ask_but_can_read_me() {
+    let h = harness().await;
+    let token = h.user_token(json!({"name": "pausable"})).await;
+    let id = h.token_id("pausable").await;
+    let (status, v) = h
+        .patch(&format!("/v1/tokens/{id}"), json!({"paused": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["record"]["status"], "paused");
+
+    let (status, v) = h.post("/v1/ask", &token, json!({"message": "hi"})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(v["error"]["code"], "token_paused");
+    let (status, v) = h.get("/v1/me", Some(&token)).await;
+    assert_eq!(
+        (status, v["status"].as_str()),
+        (StatusCode::OK, Some("paused"))
+    );
+
+    h.patch(&format!("/v1/tokens/{id}"), json!({"paused": false}))
+        .await;
+    let (status, _) = h
+        .post("/v1/ask", &token, json!({"message": "hi", "wait": 10}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn daily_request_cap_is_exact() {
+    let h = harness().await;
+    let token = h.user_token(json!({"limits": {"dailyRequests": 2}})).await;
+    for _ in 0..2 {
+        let (status, v) = h
+            .post("/v1/ask", &token, json!({"message": "hi", "wait": 10}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+    }
+    let (status, v) = h.post("/v1/ask", &token, json!({"message": "hi"})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(v["error"]["code"], "limit_reached");
+    assert_eq!(v["error"]["limit"], "dailyRequests");
+    assert!(
+        v["error"]["resetAt"]
+            .as_str()
+            .unwrap()
+            .ends_with("T00:00:00Z")
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn max_pending_blocks_extra_prompts() {
+    let h = harness().await;
+    let token = h.user_token(json!({"limits": {"maxPending": 1}})).await;
+    let (status, _) = h
+        .post("/v1/ask", &token, json!({"message": "slow one"}))
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (status, v) = h
+        .post("/v1/ask", &token, json!({"message": "another"}))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(v["error"]["code"], "too_many_pending");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn budget_cap_counts_reported_cost() {
+    let h = harness().await;
+    // The fake Claude reports $0.01 per answer.
+    let token = h
+        .user_token(json!({"limits": {"dailyBudgetUsd": 0.01}}))
+        .await;
+    let (status, _) = h
+        .post("/v1/ask", &token, json!({"message": "hi", "wait": 10}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, v) = h.post("/v1/ask", &token, json!({"message": "again"})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(v["error"]["limit"], "dailyBudgetUsd");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn patch_token_updates_limits_and_audits() {
+    let h = harness().await;
+    h.user_token(json!({"name": "ci"})).await;
+    let id = h.token_id("ci").await;
+    let (status, v) = h
+        .patch(
+            &format!("/v1/tokens/{id}"),
+            json!({"limits": {"monthlyRequests": 50}, "note": "CI bot"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["record"]["limits"]["monthlyRequests"], 50);
+    assert_eq!(v["record"]["note"], "CI bot");
+    let (_, audit) = h.get("/v1/audit", Some(&h.admin)).await;
+    let first = &audit["entries"][0];
+    assert_eq!(
+        (first["action"].as_str(), first["target"].as_str()),
+        (Some("token.update"), Some("ci"))
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn patch_rejects_bad_input() {
+    let h = harness().await;
+    h.user_token(json!({"name": "x"})).await;
+    let id = h.token_id("x").await;
+    for body in [
+        json!({}),
+        json!({"limits": {"maxPending": 0}}),
+        json!({"limits": {"dailyBudgetUsd": -1}}),
+        json!({"expiresInDays": 99999}),
+        json!({"surprise": 1}),
+    ] {
+        let (status, v) = h.patch(&format!("/v1/tokens/{id}"), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    }
+    let (status, _) = h.patch("/v1/tokens/nope", json!({"paused": true})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_cannot_pause_itself() {
+    let h = harness().await;
+    let (_, v) = h.get("/v1/tokens", Some(&h.admin)).await;
+    let admin_id = v["tokens"][0]["id"].as_str().unwrap().to_owned();
+    let (status, _) = h
+        .patch(&format!("/v1/tokens/{admin_id}"), json!({"paused": true}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn expired_token_sees_status_in_me() {
+    let h = harness().await;
+    let token = h
+        .user_token(json!({"name": "brief", "expiresInDays": 1}))
+        .await;
+    let id = h.token_id("brief").await;
+    // Expire it by hand.
+    let mut t = h.running.state.store.get_token(&id).unwrap().unwrap();
+    t.expires_at = Some(1);
+    h.running.state.store.save_token_policy(&t).unwrap();
+
+    let (status, _) = h.post("/v1/ask", &token, json!({"message": "hi"})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, v) = h.get("/v1/me", Some(&token)).await;
+    assert_eq!(
+        (status, v["status"].as_str()),
+        (StatusCode::OK, Some("expired"))
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn me_reports_usage() {
+    let h = harness().await;
+    let token = h.user_token(json!({"limits": {"dailyRequests": 10}})).await;
+    h.post("/v1/ask", &token, json!({"message": "hi", "wait": 10}))
+        .await;
+    let (status, v) = h.get("/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v["usage"]["todayRequests"], 1);
+    assert_eq!(v["limits"]["dailyRequests"], 10);
+    assert_eq!(v["server"]["name"], "Test Hashi");
+    assert!((v["usage"]["todayCostUsd"].as_f64().unwrap() - 0.01).abs() < 1e-9);
     h.running.shutdown().await;
 }
