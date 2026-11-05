@@ -743,7 +743,6 @@ async fn connect(home: PathBuf, args: ConnectArgs) -> Result<()> {
 /// Writes the redacted diagnostic report. Nothing is uploaded.
 async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
     let agents = server::discover_agents(&args.agents.configs()).await;
-    let cloudflared = hashi::tunnel::locate();
     let db = home.join("hashi.db");
     // Opening creates the file, so only open a database that already exists.
     let store = if db.exists() {
@@ -751,21 +750,12 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
     } else {
         Err(format!("no database at {}", db.display()))
     };
-    let env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("HASHI_"))
-        .collect();
-    let now = time::OffsetDateTime::now_utc();
-    let text = diagnostics::build_report(&diagnostics::ReportInput {
-        store: store.as_ref().map_err(Clone::clone),
-        logs_dir: &home.join("logs"),
-        agents: &agents,
-        cloudflared: cloudflared.as_deref(),
-        env: &env,
-        include_prompts: args.include_prompts,
-        now_ms: hashi::util::now_ms(),
-    });
-
-    let name = format!("hashi-report-{}.md", diagnostics::file_timestamp(now));
+    let text = diagnostics::report_text(
+        home,
+        store.as_ref().map_err(Clone::clone),
+        &agents,
+        args.include_prompts,
+    );
     let issue = diagnostics::issue_url();
     if args.stdout {
         print!("{text}");
@@ -775,15 +765,9 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
         );
         return Ok(());
     }
-    let path = match args.out {
-        Some(p) if p.is_dir() => p.join(name),
-        Some(p) => p,
-        None => PathBuf::from(name),
-    };
-    diagnostics::write_private(&path, &text)
-        .with_context(|| format!("writing {}", path.display()))?;
+    let shown =
+        diagnostics::save_report(args.out.as_deref(), &text).context("writing the report")?;
     println!("\n  ✦ hashi report\n");
-    let shown = std::path::absolute(&path).unwrap_or(path);
     println!("  Saved {}", shown.display());
     println!();
     if args.include_prompts {
@@ -904,58 +888,12 @@ fn install(args: &InstallArgs) -> Result<()> {
     Ok(())
 }
 
-/// Doctor's lines for cloudflared and tailscale, with Tailscale's sign-in
-/// state read from `tailscale status --json` only when it is installed.
-async fn doctor_helpers(helpers: &HelperArgs) {
-    use hashi::install::{self, Helper};
-    match install::locate(Helper::Cloudflared, helpers.cloudflared_bin.as_deref()) {
-        Some(p) => println!("  ✓ {:<12} {}", "cloudflared", p.display()),
-        None => println!(
-            "  · {:<12} not installed (only needed for --tunnel): hashi install cloudflared",
-            "cloudflared"
-        ),
-    }
-    let Some(bin) = install::locate(Helper::Tailscale, helpers.tailscale_bin.as_deref()) else {
-        println!(
-            "  · {:<12} not installed (only needed for --tailscale): hashi install tailscale",
-            "tailscale"
-        );
-        return;
-    };
-    let shown = bin.display();
-    match hashi::tailscale::self_status(&bin).await {
-        Ok(me) if me.running() => match me.dns_name {
-            Some(name) => println!("  ✓ {:<12} {shown}, signed in as {name}", "tailscale"),
-            None => println!(
-                "  ! {:<12} {shown}, signed in but no DNS name: turn on MagicDNS",
-                "tailscale"
-            ),
-        },
-        Ok(me) => println!(
-            "  ! {:<12} {shown}, not connected ({}): {}",
-            "tailscale",
-            diagnostics::terminal_safe(&me.backend_state),
-            hashi::tailscale::sign_in_hint()
-        ),
-        Err(e) => println!(
-            "  · {:<12} {shown}, sign-in state unknown ({})",
-            "tailscale",
-            diagnostics::terminal_safe(&hashi::util::truncate(&e.to_string(), 80))
-        ),
-    }
-}
-
-/// Doctor's update line: always asks GitHub (ignoring the cache's age)
+/// Doctor's update state: always asks GitHub (ignoring the cache's age)
 /// unless `HASHI_NO_UPDATE_CHECK` is set.
-async fn doctor_update(home: &std::path::Path) {
-    let current = env!("CARGO_PKG_VERSION");
+async fn doctor_update(home: &std::path::Path) -> hashi::doctor::UpdateState {
+    use hashi::doctor::UpdateState;
     if hashi::update::opted_out() {
-        println!(
-            "  · {:<12} v{current}, update check off ({})",
-            "hashi",
-            hashi::update::OPT_OUT_ENV
-        );
-        return;
+        return UpdateState::OptedOut;
     }
     let home = home.to_path_buf();
     let latest = tokio::task::spawn_blocking(move || {
@@ -968,84 +906,63 @@ async fn doctor_update(home: &std::path::Path) {
     })
     .await;
     match latest {
-        Ok(Ok(r)) if hashi::update::is_newer(&r.version, &hashi::update::current_version()) => {
-            println!(
-                "  ! {:<12} v{current}, latest v{}: update available, run hashi update",
-                "hashi", r.version
-            );
-        }
-        Ok(Ok(r)) => println!(
-            "  ✓ {:<12} v{current}, latest v{}: up to date",
-            "hashi", r.version
-        ),
-        Ok(Err(e)) => println!(
-            "  · {:<12} v{current}, could not check for updates ({})",
-            "hashi",
-            diagnostics::terminal_safe(&hashi::util::truncate(&format!("{e:#}"), 80))
-        ),
-        Err(_) => println!("  · {:<12} v{current}", "hashi"),
+        Ok(Ok(r)) => UpdateState::Latest(Ok(r.version)),
+        Ok(Err(e)) => UpdateState::Latest(Err(format!("{e:#}"))),
+        Err(_) => UpdateState::Unknown,
     }
 }
 
 async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
+    use hashi::doctor;
+    use hashi::install::{self, Helper};
     println!("\n  ✦ hashi doctor\n");
-    let mut found = 0;
-    for info in server::discover_agents(&args.agents.configs()).await {
-        match &info.version {
-            Some(v) => {
-                found += 1;
-                println!("  ✓ {:<12} {v}  ({})", info.agent.display_name(), info.path);
-            }
-            None => println!(
-                "  · {:<12} not installed (optional)",
-                info.agent.display_name()
-            ),
-        }
-    }
-    if !args.agents.enable_crush {
+    let found_agents = server::discover_agents(&args.agents.configs()).await;
+    let (mut checks, found) = doctor::agents(&found_agents);
+    if args.agents.enable_crush {
+        checks.push(doctor::crush(Some(args.agents.crush_allow_newer), None));
+    } else {
         let installed = args
             .agents
             .crush_bin
             .clone()
             .or_else(|| agent::locate(AgentKind::Crush.binary_name()));
-        match installed {
-            Some(p) => println!(
-                "  · {:<12} installed ({}), not enabled: start with --enable-crush to offer it",
-                AgentKind::Crush.display_name(),
-                p.display()
-            ),
-            None => println!(
-                "  · {:<12} not enabled (opt-in: --enable-crush; hashi install crush)",
-                AgentKind::Crush.display_name()
-            ),
-        }
-    } else {
-        println!(
-            "  · {:<12} enabled (--enable-crush){}",
-            AgentKind::Crush.display_name(),
-            if args.agents.crush_allow_newer {
-                ", newer releases allowed (--crush-allow-newer)"
-            } else {
-                ""
-            }
-        );
+        checks.push(doctor::crush(None, installed.as_deref()));
     }
-    doctor_helpers(&args.helpers).await;
-    admin_cli::doctor_accounts(home);
-    doctor_update(home).await;
+    let cloudflared = install::locate(Helper::Cloudflared, args.helpers.cloudflared_bin.as_deref());
+    checks.push(doctor::cloudflared(cloudflared.as_deref()));
+    // Tailscale's sign-in state is read only when it is installed.
+    let tailscale = install::locate(Helper::Tailscale, args.helpers.tailscale_bin.as_deref());
+    let status = match &tailscale {
+        Some(bin) => Some(
+            hashi::tailscale::self_status(bin)
+                .await
+                .map_err(|e| e.to_string()),
+        ),
+        None => None,
+    };
+    checks.push(doctor::tailscale(tailscale.as_deref(), status));
+    // The database is read only when it exists: opening creates it.
+    match home
+        .join("hashi.db")
+        .exists()
+        .then(|| server::open_store(home))
+    {
+        Some(Err(_)) => checks.push(doctor::Check {
+            mark: doctor::Mark::Warn,
+            name: "accounts".to_owned(),
+            detail: "could not open the database".to_owned(),
+        }),
+        Some(Ok(store)) => checks.extend(doctor::accounts(Some(&store))),
+        None => checks.extend(doctor::accounts(None)),
+    }
+    checks.push(doctor::update(&doctor_update(home).await));
+    for check in &checks {
+        println!("  {}", check.line());
+    }
     println!();
-    if found == 0 {
-        println!(
-            "  No coding agent found. Install one (for example Claude Code or Codex) and sign in.\n"
-        );
-    } else {
-        println!(
-            "  Agents that are not installed answer 503; install one any time and restart Hashi.\n"
-        );
-    }
+    println!("  {}\n", doctor::advice(found));
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

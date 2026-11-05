@@ -1560,6 +1560,7 @@ async fn concurrent_submits_never_exceed_request_caps() {
                         message: format!("hi {i}"),
                         agent: None,
                         model: None,
+                        account: None,
                     },
                 )
                 .await

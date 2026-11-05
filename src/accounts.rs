@@ -33,6 +33,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentKind, EnvOverride};
 
+pub mod ops;
+
 /// Name of the implicit account that is the owner's own login.
 pub const DEFAULT: &str = "default";
 

@@ -352,63 +352,63 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             clear_project,
             limits,
         } => {
-            let mut t = find_token(store, &id)?;
-            let mut changes = Vec::new();
-            if pause {
-                t.paused = true;
-                changes.push("paused".to_owned());
-            }
-            if resume {
-                t.paused = false;
-                changes.push("resumed".to_owned());
-            }
-            if let Some(n) = note {
-                t.note = Some(n.trim().to_owned()).filter(|n| !n.is_empty());
-                changes.push("note".to_owned());
-            }
-            if let Some(days) = expires_in_days {
-                t.expires_at = (days > 0).then(|| now_ms() + i64::from(days) * 86_400_000);
-                changes.push(if days == 0 {
-                    "expiry removed".to_owned()
-                } else {
-                    format!("expires in {days}d")
-                });
-            }
-            if clear_limits || limits.any() {
+            let t = find_token(store, &id)?;
+            let limits_patch = (clear_limits || limits.any()).then(|| {
                 let base = if clear_limits {
                     Limits::default()
                 } else {
                     t.limits
                 };
-                t.limits = limits.apply(base);
-                changes.push("limits".to_owned());
-            }
-            if clear_accounts || !accounts.is_empty() {
-                let base = if clear_accounts {
+                let full = limits.apply(base);
+                hashi::api::LimitsPatch {
+                    daily_requests: full.daily_requests,
+                    monthly_requests: full.monthly_requests,
+                    daily_budget_usd: full.daily_budget_usd,
+                    monthly_budget_usd: full.monthly_budget_usd,
+                    max_pending: Some(full.max_pending),
+                }
+            });
+            let accounts = (clear_accounts || !accounts.is_empty()).then(|| {
+                let mut map = if clear_accounts {
                     AccountMap::new()
                 } else {
                     t.accounts.clone()
                 };
-                t.accounts = bindings(store, base, accounts)?;
-                changes.push(format!("accounts {}", acct::format_bindings(&t.accounts)));
-            }
-            if clear_project {
-                t.project = None;
-                changes.push("project default".to_owned());
-            } else if project.is_some() {
-                t.project =
-                    hashi::api::check_project_name(project).map_err(|e| anyhow::anyhow!("{e}"))?;
-                changes.push(format!(
-                    "project {}",
-                    t.project.as_deref().unwrap_or(hashi::projects::DEFAULT)
-                ));
-            }
-            if changes.is_empty() {
+                for (agent, names) in accounts {
+                    map.insert(agent, names);
+                }
+                map
+            });
+            let body = hashi::api::UpdateTokenBody {
+                name: None,
+                note,
+                paused: if pause {
+                    Some(true)
+                } else if resume {
+                    Some(false)
+                } else {
+                    None
+                },
+                expires_in_days,
+                limits: limits_patch,
+                accounts,
+                project: if clear_project {
+                    Some(None)
+                } else {
+                    project.map(Some)
+                },
+            };
+            let nothing = body.note.is_none()
+                && body.paused.is_none()
+                && body.expires_in_days.is_none()
+                && body.limits.is_none()
+                && body.accounts.is_none()
+                && body.project.is_none();
+            if nothing {
                 bail!("nothing to update; see `hashi token update --help`");
             }
-            // Every change is checked, so neither a new project nor new
-            // accounts can take the token outside its project.
-            t.project = bind(store, t.project.clone(), &t.agents, &t.accounts)?;
+            let (t, changes) =
+                hashi::api::apply_token_update(store, t, body, None).map_err(api_err)?;
             store.save_token_policy(&t)?;
             let detail = changes.join(", ");
             store.audit("cli", "token.update", &t.name, &detail)?;
@@ -747,64 +747,14 @@ fn read_hidden() -> Result<String> {
     result.map(|()| key)
 }
 
-/// The account variable and directory, and the sign-in command line, as
-/// shown to the owner.
-fn sign_in_line(home: &Path, agent: AgentKind, name: &str, bin: &Path) -> Option<String> {
-    let sign = acct::sign_in(agent)?;
-    acct::dir_var(agent)?;
-    let dir = acct::account_dir(home, agent, name);
-    let mut parts: Vec<String> = acct::account_vars(agent, &dir)
-        .iter()
-        .map(|(k, v)| format!("{k}={}", shell_quote(v)))
-        .collect();
-    parts.extend(sign.env.iter().map(|(k, v)| format!("{k}={v}")));
-    parts.push(shell_quote(&bin.to_string_lossy()));
-    parts.extend(sign.args.iter().map(|a| (*a).to_owned()));
-    Some(parts.join(" "))
-}
-
-fn shell_quote(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ':' | '~'))
-    {
-        s.to_owned()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
-    }
-}
-
-/// A command run with the account's directory and none of the owner's
-/// credential variables or Hashi's own secrets.
-fn account_command(home: &Path, agent: AgentKind, name: &str, bin: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new(bin);
-    for (key, _) in std::env::vars_os() {
-        let upper = key.to_string_lossy().to_ascii_uppercase();
-        let removed = acct::credential_vars(agent)
-            .iter()
-            .chain(acct::always_removed(agent))
-            .any(|p| hashi::agent::runner::env_name_matches(p, &upper));
-        if hashi::agent::runner::is_hashi_secret(&key) || removed {
-            cmd.env_remove(&key);
-        }
-    }
-    cmd.envs(acct::account_vars(
-        agent,
-        &acct::account_dir(home, agent, name),
-    ));
-    cmd
-}
-
 /// Runs the sign-in command on the owner's terminal, only after they
 /// confirm and only when standard input is a terminal. Otherwise prints it.
 fn sign_in(home: &Path, agent: AgentKind, name: &str, yes: bool, bins: &BinArgs) -> Result<()> {
     let bin = bins.bin(agent);
-    let Some(line) = sign_in_line(home, agent, name, &bin) else {
-        bail!(
-            "{} has no sign-in command Hashi knows",
-            agent.display_name()
-        );
-    };
-    let Some(sign) = acct::sign_in(agent) else {
+    let (Some(line), Some(sign)) = (
+        acct::ops::sign_in_line(home, agent, name, &bin),
+        acct::sign_in(agent),
+    ) else {
         bail!(
             "{} has no sign-in command Hashi knows",
             agent.display_name()
@@ -822,82 +772,12 @@ fn sign_in(home: &Path, agent: AgentKind, name: &str, yes: bool, bins: &BinArgs)
         println!("not run; run the command above when you are ready");
         return Ok(());
     }
-    let status = account_command(home, agent, name, &bin)
-        .args(sign.args)
-        .envs(sign.env.iter().copied())
-        .status()
-        .with_context(|| format!("starting {}", bin.display()))?;
-    if !status.success() {
-        eprintln!("the sign-in command exited with {status}");
+    if !acct::ops::run_sign_in(home, agent, name, &bin)? {
+        eprintln!("the sign-in command did not exit cleanly");
     }
-    let state = signed_in(home, agent, name, AccountKind::Login, &bin);
+    let state = acct::ops::signed_in(home, agent, name, AccountKind::Login, &bin, true);
     println!("signed in: {state}");
     Ok(())
-}
-
-/// Whether an account is signed in, as far as can be checked: Claude Code
-/// answers `claude auth status --json`; for the other CLIs, whether they
-/// wrote anything into the account directory; for a key account, whether
-/// its key file is there.
-fn signed_in(home: &Path, agent: AgentKind, name: &str, kind: AccountKind, bin: &Path) -> String {
-    match kind {
-        AccountKind::Default => "-".to_owned(),
-        AccountKind::ApiKey | AccountKind::OauthToken => {
-            if acct::read_key(home, agent, name).is_ok() {
-                "key set".to_owned()
-            } else {
-                "no key".to_owned()
-            }
-        }
-        AccountKind::Login => match acct::status_args(agent) {
-            Some(args) => match run_status(account_command(home, agent, name, bin).args(args)) {
-                Some(true) => "yes".to_owned(),
-                Some(false) => "no".to_owned(),
-                None => "unknown".to_owned(),
-            },
-            None if acct::has_files(&acct::account_dir(home, agent, name)) => {
-                "files present".to_owned()
-            }
-            None => "no".to_owned(),
-        },
-    }
-}
-
-/// Runs a status command with a ten second limit. `Some(true)` when it
-/// reports a login: a `loggedIn` field when its output is JSON with one,
-/// else a zero exit.
-fn run_status(cmd: &mut std::process::Command) -> Option<bool> {
-    use std::process::Stdio;
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let out = child.wait_with_output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let field = serde_json::from_str::<serde_json::Value>(text.trim())
-        .ok()
-        .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool));
-    Some(field.unwrap_or(out.status.success()))
-}
-
-fn account_name(name: &str) -> Result<()> {
-    acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Runs a `hashi account` command.
@@ -916,62 +796,15 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             yes,
             bins,
         } => {
-            account_name(&name)?;
             let keyed = key_stdin || key_env.is_some();
-            let kind = match kind {
-                Some(AccountKind::Default) => bail!("the default account is always there"),
-                Some(AccountKind::Login) if keyed => {
-                    bail!("a login account has no key; drop --key-stdin and --key-env")
-                }
-                Some(k) => k,
-                None if keyed => AccountKind::ApiKey,
-                None => AccountKind::Login,
-            };
-            if !acct::supports(agent, kind) {
-                bail!(
-                    "{} does not support {kind} accounts{}",
-                    agent.display_name(),
-                    match agent {
-                        AgentKind::Cursor => "; add an API key with --kind api-key",
-                        AgentKind::Opencode | AgentKind::Qwen | AgentKind::Crush =>
-                            "; add a login account",
-                        _ => "",
-                    }
-                );
-            }
-            if store
-                .get_account(agent, &name)?
-                .is_some_and(|a| a.kind != AccountKind::Default)
-            {
-                bail!("{agent} already has an account named {name}");
-            }
+            let kind = acct::ops::check_new(store, agent, &name, kind, keyed)?;
             // The key is read before anything is created, so a mistyped
             // key leaves nothing behind.
             let key = kind
                 .is_key()
                 .then(|| read_key(key_env.as_deref()))
                 .transpose()?;
-            // A row left by a limit mark on a since removed account.
-            store.remove_account(agent, &name)?;
-            store.add_account(agent, &name, kind)?;
-            let made = match &key {
-                Some(key) => acct::write_key(home, agent, &name, key)
-                    .map(|()| acct::account_dir(home, agent, &name)),
-                None => acct::create_dir(home, agent, &name),
-            };
-            let dir = match made {
-                Ok(dir) => dir,
-                Err(e) => {
-                    store.remove_account(agent, &name)?;
-                    return Err(e).context("creating the account directory");
-                }
-            };
-            store.audit(
-                "cli",
-                "account.add",
-                &format!("{agent}:{name}"),
-                kind.as_str(),
-            )?;
+            let dir = acct::ops::create(store, home, agent, &name, kind, key.as_deref(), "cli")?;
             println!(
                 "added {} account {name} ({kind}) in {}",
                 agent.display_name(),
@@ -992,20 +825,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
         } => {
             // Crush's default account has a Hashi-owned directory too, so
             // the owner's own Crush config never loads; sign it in here.
-            if agent == AgentKind::Crush && name == acct::DEFAULT {
-                acct::crush_default_dir(home).context("preparing the account directory")?;
-                sign_in(home, agent, &name, yes, &bins)?;
-                return Ok(());
-            }
-            account_name(&name)?;
-            match store.get_account(agent, &name)? {
-                Some(a) if a.kind == AccountKind::Login => {}
-                Some(a) if a.kind != AccountKind::Default => {
-                    bail!("{agent}:{name} is a {} account, not a login", a.kind)
-                }
-                _ => bail!("no {agent} account named {name}"),
-            }
-            acct::create_dir(home, agent, &name).context("preparing the account directory")?;
+            acct::ops::prepare_login(store, home, agent, &name)?;
             sign_in(home, agent, &name, yes, &bins)?;
         }
         AccountCommand::List { bins } => {
@@ -1037,7 +857,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     a.agent.as_str(),
                     a.name,
                     a.kind.as_str(),
-                    signed_in(home, a.agent, &a.name, a.kind, &bins.bin(a.agent)),
+                    acct::ops::signed_in(home, a.agent, &a.name, a.kind, &bins.bin(a.agent), true),
                     state,
                     used,
                     today,
@@ -1045,17 +865,16 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                 );
             }
         }
-        AccountCommand::Disable { agent, name } => set_disabled(store, agent, &name, true)?,
-        AccountCommand::Enable { agent, name } => set_disabled(store, agent, &name, false)?,
+        AccountCommand::Disable { agent, name } => {
+            acct::ops::set_disabled(store, agent, &name, true, "cli")?;
+            println!("disabled {agent}:{name}");
+        }
+        AccountCommand::Enable { agent, name } => {
+            acct::ops::set_disabled(store, agent, &name, false, "cli")?;
+            println!("enabled {agent}:{name}");
+        }
         AccountCommand::Remove { agent, name, yes } => {
-            account_name(&name)?;
-            if store
-                .get_account(agent, &name)?
-                .is_none_or(|a| a.kind == AccountKind::Default)
-            {
-                bail!("no {agent} account named {name}");
-            }
-            let using = store.tokens_using_account(agent, &name)?;
+            let using = acct::ops::check_removable(store, agent, &name)?;
             if !yes {
                 if !std::io::stdin().is_terminal() {
                     bail!("pass --yes to remove {agent}:{name} without being asked");
@@ -1067,9 +886,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     return Ok(());
                 }
             }
-            let removed = store.remove_account(agent, &name)?;
-            let dir = acct::remove_dir(home, agent, &name);
-            store.audit("cli", "account.remove", &format!("{agent}:{name}"), "")?;
+            let (removed, dir) = acct::ops::remove(store, home, agent, &name, "cli")?;
             println!(
                 "removed {agent}:{name}; taken off {} token(s) and {} invite(s)",
                 removed.tokens, removed.invites
@@ -1079,28 +896,6 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-fn set_disabled(store: &Store, agent: AgentKind, name: &str, disabled: bool) -> Result<()> {
-    if name == acct::DEFAULT {
-        bail!("the default account cannot be disabled; leave it out of a token's list instead");
-    }
-    if store
-        .get_account(agent, name)?
-        .is_none_or(|a| a.kind == AccountKind::Default)
-    {
-        bail!("no {agent} account named {name}");
-    }
-    store.set_account_disabled(agent, name, disabled)?;
-    let action = if disabled { "disabled" } else { "enabled" };
-    store.audit(
-        "cli",
-        &format!("account.{}", &action[..action.len() - 1]),
-        &format!("{agent}:{name}"),
-        "",
-    )?;
-    println!("{action} {agent}:{name}");
     Ok(())
 }
 
@@ -1186,7 +981,9 @@ pub enum ProjectCommand {
 /// Crush is opt-in, so it is never part of a project's default agents; list
 /// it with `--agents` to allow it.
 fn installed_agents(bins: &BinArgs) -> Vec<AgentKind> {
-    let candidates = AgentKind::ALL.into_iter().filter(|a| *a != AgentKind::Crush);
+    let candidates = AgentKind::ALL
+        .into_iter()
+        .filter(|a| *a != AgentKind::Crush);
     let found: Vec<AgentKind> = candidates
         .clone()
         .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
@@ -1352,49 +1149,4 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
         },
     }
     Ok(())
-}
-
-/// `hashi doctor`'s account lines: the accounts each agent has besides the
-/// default. Reads the database only when it exists.
-pub fn doctor_accounts(home: &Path) {
-    let none = || {
-        println!(
-            "  · {:<12} none: every agent uses your own login (hashi account add)",
-            "accounts"
-        );
-    };
-    if !home.join("hashi.db").exists() {
-        none();
-        return;
-    }
-    let Ok(store) = hashi::server::open_store(home) else {
-        println!("  ! {:<12} could not open the database", "accounts");
-        return;
-    };
-    let now = now_ms();
-    let list: Vec<_> = store
-        .list_accounts()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|a| a.kind != AccountKind::Default)
-        .collect();
-    if list.is_empty() {
-        none();
-        return;
-    }
-    for agent in AgentKind::ALL {
-        let names: Vec<String> = list
-            .iter()
-            .filter(|a| a.agent == agent)
-            .map(|a| format!("{} ({}, {})", a.name, a.kind, a.status(now).as_str()))
-            .collect();
-        if !names.is_empty() {
-            println!(
-                "  ✓ {:<12} {}: {}",
-                "accounts",
-                agent.as_str(),
-                names.join(", ")
-            );
-        }
-    }
 }

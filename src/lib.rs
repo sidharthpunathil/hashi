@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod agent;
 pub mod api;
 pub mod diagnostics;
+pub mod doctor;
 pub mod events;
 pub mod guard;
 pub mod install;

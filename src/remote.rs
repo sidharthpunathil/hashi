@@ -362,16 +362,30 @@ fn free_name(remotes: &[Remote], wanted: &str) -> String {
 ///
 /// Fails on a bad link, a refused claim, or when saving fails.
 pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
-    let link = parse_invite_url(&opts.url)?;
+    let (remote, server) = redeem(home, &opts.url, opts.name.as_deref())?;
+    print_connected(home, &remote, &server, opts.setup_claude.as_deref());
+    Ok(remote)
+}
+
+/// Redeems an invite link and saves the token under `name` (default: from
+/// the server's name), printing nothing. Returns the saved remote and the
+/// server's name as it gave it. `hashi connect` and the dashboard both use
+/// this.
+///
+/// # Errors
+///
+/// Fails on a bad link, a refused claim, or when saving fails.
+pub fn redeem(home: &Path, url: &str, name: Option<&str>) -> Result<(Remote, String)> {
+    let link = parse_invite_url(url)?;
     let mut remotes = load(home)?;
-    if let Some(n) = &opts.name {
+    if let Some(n) = name {
         if !valid_name(n) {
             bail!(
                 "--name must be 1 to {MAX_NAME_LEN} lowercase letters, digits, - or _, \
                  starting with a letter or digit"
             );
         }
-        if remotes.iter().any(|r| &r.name == n) {
+        if remotes.iter().any(|r| r.name == n) {
             bail!(
                 "a remote called {n} is already saved; pick another --name or run \
                  `hashi remote remove {n}` first"
@@ -390,8 +404,8 @@ pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
     if status != 200 {
         bail!("{}", error_text(status, &preview));
     }
-    let name = match &opts.name {
-        Some(n) => n.clone(),
+    let name = match name {
+        Some(n) => n.to_owned(),
         None => {
             let from_server = slug(preview["server"].as_str().unwrap_or_default());
             let base = [from_server, slug(&link.host)]
@@ -424,8 +438,14 @@ pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
     };
     remotes.push(remote.clone());
     save(home, &remotes)?;
+    let server = r["server"].as_str().unwrap_or("the bridge").to_owned();
+    Ok((remote, server))
+}
 
-    let server = terminal_safe(r["server"].as_str().unwrap_or("the bridge"));
+/// What `hashi connect` prints once a bridge is saved: where the token is
+/// and how to use it from Claude Code, Codex and this terminal.
+fn print_connected(home: &Path, remote: &Remote, server: &str, setup_claude: Option<&Path>) {
+    let server = terminal_safe(server);
     let path = remotes_path(home);
     println!();
     println!(
@@ -439,7 +459,7 @@ pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
     println!();
     let base = &remote.base_url;
     let quoted_header = shell_quote(&format!("Authorization: Bearer {}", remote.token));
-    if let Some(bin) = &opts.setup_claude {
+    if let Some(bin) = setup_claude {
         let status = std::process::Command::new(bin)
             .args(claude_mcp_args(&remote.name, base, &remote.token))
             .stdin(std::process::Stdio::null())
@@ -481,7 +501,6 @@ pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
     println!();
     println!("  Your limits and usage: {base}/me");
     println!();
-    Ok(remote)
 }
 
 /// Prints the saved remotes' names and base URLs. Tokens are never shown.
@@ -519,6 +538,17 @@ pub fn list(home: &Path) -> Result<()> {
 ///
 /// Fails when there is no remote with that name or saving fails.
 pub fn remove(home: &Path, name: &str) -> Result<()> {
+    forget(home, name)?;
+    println!("Removed {name}. Its token still works until the owner revokes it.");
+    Ok(())
+}
+
+/// Forgets a saved remote without printing anything.
+///
+/// # Errors
+///
+/// Fails when there is no remote with that name or saving fails.
+pub fn forget(home: &Path, name: &str) -> Result<()> {
     let mut remotes = load(home)?;
     let before = remotes.len();
     remotes.retain(|r| r.name != name);
@@ -528,9 +558,7 @@ pub fn remove(home: &Path, name: &str) -> Result<()> {
             terminal_safe(name)
         );
     }
-    save(home, &remotes)?;
-    println!("Removed {name}. Its token still works until the owner revokes it.");
-    Ok(())
+    save(home, &remotes)
 }
 
 // ── ask ─────────────────────────────────────────────────────────────────────

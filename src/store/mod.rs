@@ -19,7 +19,7 @@ mod cancel;
 mod invites;
 mod projects;
 
-pub use accounts::{AccountState, AccountStatus};
+pub use accounts::{AccountState, AccountStatus, RemovedAccount};
 pub use audit::AuditEntry;
 pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
 pub use projects::{ProjectStats, RemovedProject};

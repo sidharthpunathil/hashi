@@ -50,8 +50,8 @@ pub use projects::{
     check_project_name, project_json, usable_agents, validate_project,
 };
 pub use tokens::{
-    CreateTokenBody, LimitsPatch, UpdateTokenBody, check_accounts, validate_limits,
-    validate_new_token,
+    CreateTokenBody, LimitsPatch, UpdateTokenBody, apply_token_update, check_accounts,
+    validate_limits, validate_new_token,
 };
 
 use std::collections::HashMap;

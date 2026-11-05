@@ -380,6 +380,52 @@ fn section_crashes(out: &mut String, logs_dir: &Path) {
     }
 }
 
+/// The report for this machine: `store` (or why there is none), the agents
+/// found, cloudflared, the `HASHI_*` variables and the logs under `home`.
+/// `hashi report` and the dashboard both build it here.
+#[must_use]
+pub fn report_text(
+    home: &Path,
+    store: Result<&Store, String>,
+    agents: &[AgentInfo],
+    include_prompts: bool,
+) -> String {
+    let cloudflared = crate::tunnel::locate();
+    let env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("HASHI_"))
+        .collect();
+    build_report(&ReportInput {
+        store,
+        logs_dir: &home.join("logs"),
+        agents,
+        cloudflared: cloudflared.as_deref(),
+        env: &env,
+        include_prompts,
+        now_ms: crate::util::now_ms(),
+    })
+}
+
+/// Writes a report owner-only to `out` (a file, or a directory to put
+/// `hashi-report-<time>.md` in), or to the current directory when `out` is
+/// `None`. Returns the path written, made absolute.
+///
+/// # Errors
+///
+/// Fails if the file cannot be written.
+pub fn save_report(out: Option<&Path>, text: &str) -> std::io::Result<std::path::PathBuf> {
+    let name = format!(
+        "hashi-report-{}.md",
+        super::file_timestamp(time::OffsetDateTime::now_utc())
+    );
+    let path = match out {
+        Some(p) if p.is_dir() => p.join(name),
+        Some(p) => p.to_path_buf(),
+        None => std::path::PathBuf::from(name),
+    };
+    super::write_private(&path, text)?;
+    Ok(std::path::absolute(&path).unwrap_or(path))
+}
+
 /// A prefilled GitHub new-issue link. Nothing is sent until the user opens it
 /// and submits the form.
 #[must_use]

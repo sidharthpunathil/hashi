@@ -6,7 +6,7 @@
 
 mod report;
 
-pub use report::{ReportInput, build_report, issue_url};
+pub use report::{ReportInput, build_report, issue_url, report_text, save_report};
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
