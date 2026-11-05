@@ -13,8 +13,9 @@ use std::process::{Command, Stdio};
 ///
 /// Fails when neither a native tool nor OSC 52 could be used.
 pub fn copy(text: &str) -> Result<(), String> {
-    const TOOLS: [(&str, &[&str]); 4] = [
+    const TOOLS: [(&str, &[&str]); 5] = [
         ("pbcopy", &[]),
+        ("clip", &[]),
         ("wl-copy", &[]),
         ("xclip", &["-selection", "clipboard"]),
         ("xsel", &["--clipboard", "--input"]),

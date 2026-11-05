@@ -1,6 +1,6 @@
 [package]
 name = "hashi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
 description = "A bridge that turns your local Claude Code and Codex CLIs into an authenticated HTTP API, with a live terminal dashboard."

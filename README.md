@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <a href="#install">Install</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#api">API</a> ·
   <a href="#the-dashboard">Dashboard</a> ·
@@ -58,6 +59,51 @@ curl http://127.0.0.1:7878/v1/ask \
 | **A live dashboard** | A terminal UI shows each agent's state, queue, latency, throughput, recent requests and tokens. |
 | **One binary** | A single Rust executable with SQLite built in. It needs no runtime and no external database. |
 
+## Install
+
+**macOS and Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+```
+
+That's the whole install. The script picks the right build for your computer and checks its SHA-256 checksum before installing. It needs no admin rights. Hashi lands in `~/.local/bin` on macOS and Linux, or `%LOCALAPPDATA%\Programs\hashi\bin` on Windows, where it is added to your PATH. The script finishes by running `hashi doctor` to show which agents it found.
+
+<details>
+<summary>Other ways to install, and installer options</summary>
+
+| Variable | Effect |
+|---|---|
+| `HASHI_VERSION=v0.1.1` | Install a specific release instead of the latest |
+| `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
+| `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
+
+```bash
+# pin a version on macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.1.1 sh
+```
+
+```powershell
+# pin a version on Windows
+$env:HASHI_VERSION = "v0.1.1"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+```
+
+**Download by hand.** Every [release](https://github.com/sidharthpunathil/hashi/releases) has archives for Linux (x64, ARM64), macOS (Intel, Apple Silicon) and Windows (x64), each with a `.sha256` file.
+
+**With Cargo.** `cargo install --locked --git https://github.com/sidharthpunathil/hashi`
+
+**From source.** Clone the repo and run `cargo build --release`. The binary is `target/release/hashi`.
+
+**Uninstall.** Delete the `hashi` binary, and `~/.hashi` if you also want to remove tokens and history.
+
+</details>
+
 ## Quick start
 
 **1. Have at least one agent installed and signed in.**
@@ -67,18 +113,11 @@ claude --version      # Claude Code
 codex --version       # Codex
 ```
 
-**2. Install Hashi.**
+**2. Install Hashi** with the one-liner above.
+
+**3. Start the bridge.**
 
 ```bash
-cargo install --git https://github.com/sidharthpunathil/hashi
-```
-
-Or build from a clone with `cargo build --release`. The binary lands in `target/release/hashi`.
-
-**3. Check your setup, then start the bridge.**
-
-```bash
-hashi doctor
 hashi
 ```
 
@@ -285,6 +324,7 @@ A request is written to SQLite and the matching agent's worker is woken. The wor
 - The machine running Hashi has to stay on, with the agents signed in.
 - Each run is a full agent session, so answers take seconds to minutes.
 - With the default `--concurrency 1`, prompts for the same agent run one at a time.
+- On Windows, npm installs Codex as a `codex.cmd` batch shim. Rust refuses to pass arguments it cannot quote safely for a batch file, so a prompt containing such characters fails with a clear error instead of running.
 - Using your subscription this way is subject to each provider's terms. Check them for your plan before you share access.
 
 ## Contributing

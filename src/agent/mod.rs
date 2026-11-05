@@ -229,23 +229,49 @@ pub fn is_safe_arg(s: &str) -> bool {
 }
 
 /// Finds an executable on `PATH` or in the usual per-user install locations.
+///
+/// On Windows each directory is tried with `.exe`, `.cmd` and `.bat`, because
+/// npm installs CLIs such as Codex as `.cmd` shims.
 #[must_use]
 pub fn locate(name: &str) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     if let Some(home) = dirs::home_dir() {
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join(".claude/local"));
-        dirs.push(home.join(".cargo/bin"));
-        dirs.push(home.join(".npm-global/bin"));
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".claude").join("local"));
+        dirs.push(home.join(".cargo").join("bin"));
+        dirs.push(home.join(".npm-global").join("bin"));
     }
-    dirs.push(PathBuf::from("/opt/homebrew/bin"));
-    dirs.push(PathBuf::from("/usr/local/bin"));
+    if cfg!(windows) {
+        for var in ["APPDATA", "LOCALAPPDATA"] {
+            if let Some(base) = std::env::var_os(var).map(PathBuf::from) {
+                dirs.push(base.join("npm"));
+                dirs.push(base.join("Programs").join("hashi").join("bin"));
+            }
+        }
+    } else {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
 
-    dirs.into_iter()
-        .map(|d| d.join(name))
+    let names = candidate_names(name, cfg!(windows));
+    dirs.iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
         .find(|p| is_executable(p))
+}
+
+/// File names to try for `name`, most preferred first.
+#[must_use]
+pub fn candidate_names(name: &str, windows: bool) -> Vec<String> {
+    if windows && Path::new(name).extension().is_none() {
+        [".exe", ".cmd", ".bat", ""]
+            .iter()
+            .map(|ext| format!("{name}{ext}"))
+            .collect()
+    } else {
+        vec![name.to_owned()]
+    }
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -300,6 +326,16 @@ mod tests {
         assert!(is_safe_arg("claude-opus-5-5"));
         assert!(is_safe_arg("gpt-5.4"));
         assert!(is_safe_arg("7a9ad98b-c4ef-44fe-ad92-7fb361223d15"));
+    }
+
+    #[test]
+    fn candidate_names_try_windows_extensions_in_order() {
+        assert_eq!(
+            candidate_names("codex", true),
+            ["codex.exe", "codex.cmd", "codex.bat", "codex"]
+        );
+        assert_eq!(candidate_names("codex", false), ["codex"]);
+        assert_eq!(candidate_names("clip.exe", true), ["clip.exe"]);
     }
 
     #[test]
