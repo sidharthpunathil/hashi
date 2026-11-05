@@ -309,6 +309,9 @@ fn init_logging(home: &std::path::Path, tui: bool) -> Result<()> {
 }
 
 async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
+    if args.tunnel_token.is_some() && hashi::tunnel::token_in_argv(std::env::args_os()) {
+        eprintln!("{}", hashi::tunnel::ARGV_TOKEN_WARNING);
+    }
     let tui = !args.headless && std::io::stdout().is_terminal();
     server::prepare_home(home)?;
     init_logging(home, tui)?;
