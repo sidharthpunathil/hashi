@@ -132,7 +132,9 @@ pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
         return None;
     }
     let now = time::OffsetDateTime::now_utc();
-    Some(super::limit::local_offset().and_then(|offset| reset_at(error, now, offset)))
+    // The offset is read for the reset time itself on every call, so a
+    // daylight saving change since Hashi started is seen.
+    Some(reset_at(error, now, super::limit::offset_at))
 }
 
 /// The reset time in Codex's " Try again at {t}." suffix, which is local
@@ -142,10 +144,10 @@ pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
 fn reset_at(
     error: &str,
     now: time::OffsetDateTime,
-    offset: time::UtcOffset,
+    offset_at: impl Fn(time::OffsetDateTime) -> Option<time::UtcOffset>,
 ) -> Option<time::OffsetDateTime> {
     let rest = super::limit::after_marker(error, "try again at ")?;
-    super::limit::local_clock(&rest, now, offset).filter(|t| *t > now)
+    super::limit::local_clock_at(&rest, now, offset_at).filter(|t| *t > now)
 }
 
 #[cfg(test)]
@@ -240,14 +242,14 @@ mod tests {
     #[test]
     fn limit_reset_is_read_from_the_try_again_at_suffix() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap(); // 08:00 UTC
-        let utc = time::UtcOffset::UTC;
+        let utc = |_| Some(time::UtcOffset::UTC);
         let today = "You\u{2019}ve hit your usage limit. Try again at 3:45 PM.";
         let t = reset_at(today, now, utc).unwrap();
         assert_eq!((t - now).whole_minutes(), 7 * 60 + 45);
         let other = "You\u{2019}ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again at Jan 16th, 2027 9:05 AM.";
         let t = reset_at(other, now, utc).unwrap();
         assert_eq!((t - now).whole_minutes(), 25 * 60 + 5);
-        let minus5 = time::UtcOffset::from_hms(-5, 0, 0).unwrap();
+        let minus5 = |_| time::UtcOffset::from_hms(-5, 0, 0).ok();
         let t = reset_at(today, now, minus5).unwrap();
         assert_eq!((t - now).whole_minutes(), 12 * 60 + 45);
         assert_eq!(
@@ -262,5 +264,21 @@ mod tests {
             limit_hit("You\u{2019}ve hit your usage limit. Try again later."),
             Some(None)
         );
+    }
+
+    #[test]
+    fn a_reset_after_a_daylight_saving_change_uses_the_offset_then() {
+        // 2026-11-01 06:00 UTC: New York leaves daylight saving time (-04:00
+        // before, -05:00 after). `now` is the evening before, at -04:00.
+        let switch = time::macros::datetime!(2026-11-01 06:00 UTC);
+        let now = time::macros::datetime!(2026-10-31 22:00 UTC);
+        let new_york = |t: time::OffsetDateTime| {
+            let h = if t < switch { -4 } else { -5 };
+            time::UtcOffset::from_hms(h, 0, 0).ok()
+        };
+        let msg = "You\u{2019}ve hit your usage limit. Try again at Nov 1st, 2026 9:00 AM.";
+        let t = reset_at(msg, now, new_york).unwrap();
+        // 9:00 AM at -05:00, not at the -04:00 in force when the run failed.
+        assert_eq!(t, time::macros::datetime!(2026-11-01 14:00 UTC));
     }
 }

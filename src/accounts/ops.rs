@@ -214,6 +214,30 @@ pub fn set_disabled(
     Ok(())
 }
 
+/// Clears an account's limited mark and the limit window its failed run
+/// recorded, so it takes runs again now. For an account wrongly shelved,
+/// for example by a reset time far in the future. Returns whether it was
+/// marked limited.
+///
+/// # Errors
+///
+/// Fails for an unknown account (the default one always exists) or on
+/// database errors.
+pub fn clear_limit(store: &Store, agent: AgentKind, name: &str, actor: &str) -> Result<bool> {
+    acct::check_name(name, true).map_err(|e| anyhow::anyhow!(e))?;
+    if name != acct::DEFAULT
+        && store
+            .get_account(agent, name)?
+            .is_none_or(|a| a.kind == AccountKind::Default)
+    {
+        bail!("no {agent} account named {name}");
+    }
+    let was = store.clear_account_limit(agent, name)?;
+    store.clear_error_usage(agent, name)?;
+    store.audit(actor, "account.clear-limit", &format!("{agent}:{name}"), "")?;
+    Ok(was)
+}
+
 /// The tokens using an account that may be removed.
 ///
 /// # Errors

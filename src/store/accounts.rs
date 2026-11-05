@@ -129,6 +129,27 @@ fn without(mut map: AccountMap, agent: AgentKind, name: &str) -> Option<AccountM
     Some(map)
 }
 
+/// `until_ms` capped at [`crate::agent::limit::MAX_RESET`] after `now`.
+pub(super) fn cap_limit(until_ms: i64, now: i64) -> i64 {
+    let max = i64::try_from(crate::agent::limit::MAX_RESET.as_millis()).unwrap_or(i64::MAX);
+    until_ms.min(now.saturating_add(max))
+}
+
+/// Whether rows kept per account may be written for `(agent, name)`: the
+/// default account always exists, any other only while it has its row.
+pub(super) fn account_known(
+    conn: &rusqlite::Connection,
+    agent: AgentKind,
+    name: &str,
+) -> Result<bool> {
+    if name == acct::DEFAULT {
+        return Ok(true);
+    }
+    Ok(conn
+        .prepare_cached("SELECT 1 FROM accounts WHERE agent = ?1 AND name = ?2")?
+        .exists(params![agent.as_str(), name])?)
+}
+
 impl Store {
     /// Records a new account. Returns `false` if it already exists.
     ///
@@ -288,38 +309,109 @@ impl Store {
         Ok(out)
     }
 
-    /// Marks an account as at its limit until `until_ms` and records the use.
+    /// Marks an account as at its limit until `until_ms` (capped at
+    /// [`crate::agent::limit::MAX_RESET`] from now) and records the use. An
+    /// account other than `default` that has no row (removed while a run
+    /// on it was going) is left alone rather than brought back.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn mark_account_limited(&self, agent: AgentKind, name: &str, until_ms: i64) -> Result<()> {
-        self.conn()?
+        let now = now_ms();
+        let until = cap_limit(until_ms, now);
+        let conn = self.conn()?;
+        let n = conn
             .prepare_cached(
-                "INSERT INTO accounts (agent, name, kind, limited_until, last_used, created_at)
-             VALUES (?1, ?2, 'default', ?3, ?4, ?4)
-             ON CONFLICT(agent, name) DO UPDATE SET limited_until = ?3, last_used = ?4",
+                "UPDATE accounts SET limited_until = ?3, last_used = ?4
+                 WHERE agent = ?1 AND name = ?2",
             )?
-            .execute(params![agent.as_str(), name, until_ms, now_ms()])?;
+            .execute(params![agent.as_str(), name, until, now])?;
+        if n == 0 && name == acct::DEFAULT {
+            conn.prepare_cached(
+                "INSERT INTO accounts (agent, name, kind, limited_until, last_used, created_at)
+                 VALUES (?1, ?2, 'default', ?3, ?4, ?4)
+                 ON CONFLICT(agent, name) DO UPDATE SET limited_until = ?3, last_used = ?4",
+            )?
+            .execute(params![agent.as_str(), name, until, now])?;
+        }
         Ok(())
     }
 
     /// Records a run on an account. A run that succeeded also clears the
-    /// account's limited mark.
+    /// account's limited mark. As for [`Store::mark_account_limited`], only
+    /// the default account gets a row here; a removed one stays removed.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn mark_account_used(&self, agent: AgentKind, name: &str, succeeded: bool) -> Result<()> {
-        self.conn()?
+        let now = now_ms();
+        let conn = self.conn()?;
+        let n = conn
             .prepare_cached(
-                "INSERT INTO accounts (agent, name, kind, last_used, created_at)
-             VALUES (?1, ?2, 'default', ?3, ?3)
-             ON CONFLICT(agent, name) DO UPDATE SET last_used = ?3,
-                 limited_until = CASE WHEN ?4 THEN NULL ELSE limited_until END",
+                "UPDATE accounts SET last_used = ?3,
+                     limited_until = CASE WHEN ?4 THEN NULL ELSE limited_until END
+                 WHERE agent = ?1 AND name = ?2",
             )?
-            .execute(params![agent.as_str(), name, now_ms(), succeeded])?;
+            .execute(params![agent.as_str(), name, now, succeeded])?;
+        if n == 0 && name == acct::DEFAULT {
+            conn.prepare_cached(
+                "INSERT INTO accounts (agent, name, kind, last_used, created_at)
+                 VALUES (?1, ?2, 'default', ?3, ?3)
+                 ON CONFLICT(agent, name) DO UPDATE SET last_used = ?3,
+                     limited_until = CASE WHEN ?4 THEN NULL ELSE limited_until END",
+            )?
+            .execute(params![agent.as_str(), name, now, succeeded])?;
+        }
         Ok(())
+    }
+
+    /// Clears an account's limited mark, so it takes runs again before the
+    /// reset Hashi was told. Returns `false` when the account has no mark
+    /// to clear (or no row).
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn clear_account_limit(&self, agent: AgentKind, name: &str) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "UPDATE accounts SET limited_until = NULL
+             WHERE agent = ?1 AND name = ?2 AND limited_until IS NOT NULL",
+            params![agent.as_str(), name],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Deletes what account removal leaves behind when a run or a poll on
+    /// the account finished after it: rows of kind `default` under another
+    /// name (which older versions created for a removed account), and the
+    /// usage windows, usage reads and conversations of accounts that have
+    /// no row. The default account needs no row and keeps its own. Returns
+    /// how many rows were deleted.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn prune_orphan_account_rows(&self) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let mut n = tx.execute(
+            "DELETE FROM accounts WHERE kind = 'default' AND name <> 'default'",
+            [],
+        )?;
+        for table in ["usage", "usage_polls", "sessions"] {
+            n += tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE account <> 'default' AND NOT EXISTS (
+                         SELECT 1 FROM accounts a
+                         WHERE a.agent = {table}.agent AND a.name = {table}.account)"
+                ),
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Runs started on an account since the start of the UTC day containing
@@ -469,6 +561,150 @@ mod tests {
 
     fn map(agent: AgentKind, names: &[&str]) -> AccountMap {
         AccountMap::from([(agent, names.iter().map(|n| (*n).to_owned()).collect())])
+    }
+
+    fn limit_window(until: i64) -> crate::usage::Window {
+        crate::usage::Window::new(
+            "limit",
+            "limit",
+            100.0,
+            Some(until),
+            None,
+            crate::usage::Source::Error,
+        )
+    }
+
+    #[test]
+    fn a_run_or_poll_ending_after_removal_does_not_bring_the_account_back() {
+        let s = store();
+        let (agent, name) = (AgentKind::Codex, "work");
+        assert!(s.add_account(agent, name, AccountKind::Login).unwrap());
+        s.remove_account(agent, name).unwrap();
+        let later = now_ms() + 60_000;
+        s.mark_account_used(agent, name, true).unwrap();
+        s.mark_account_limited(agent, name, later).unwrap();
+        s.set_account_limited(agent, name, later).unwrap();
+        s.record_usage(agent, name, &[limit_window(later)]).unwrap();
+        s.replace_usage(agent, name, &[limit_window(later)])
+            .unwrap();
+        s.set_poll_status(agent, name, true, Some("plus"), None)
+            .unwrap();
+        assert!(s.get_account(agent, name).unwrap().is_none());
+        assert!(s.usage_windows(agent, name).unwrap().is_empty());
+        assert!(s.poll_status(agent, name).unwrap().is_none());
+        assert!(s.usage_accounts().unwrap().is_empty());
+        assert!(
+            s.add_account(agent, name, AccountKind::Login).unwrap(),
+            "the name can be added again"
+        );
+
+        // The default account needs no row, and gets one when it is used.
+        s.mark_account_used(agent, acct::DEFAULT, false).unwrap();
+        s.set_poll_status(agent, acct::DEFAULT, true, None, None)
+            .unwrap();
+        s.record_usage(agent, acct::DEFAULT, &[limit_window(later)])
+            .unwrap();
+        assert!(s.get_account(agent, acct::DEFAULT).unwrap().is_some());
+        assert!(s.poll_status(agent, acct::DEFAULT).unwrap().is_some());
+        assert_eq!(s.usage_windows(agent, acct::DEFAULT).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_far_future_limit_is_capped_and_a_fresh_poll_replaces_it() {
+        let s = store();
+        s.add_remote_account(AgentKind::Claude, "bob", "bob", AgentKind::Claude)
+            .unwrap();
+        let month = i64::try_from(crate::agent::limit::MAX_RESET.as_millis()).unwrap();
+        let far = now_ms() + 100 * 365 * 86_400_000;
+        s.set_account_limited(AgentKind::Claude, "bob", far)
+            .unwrap();
+        let until = |s: &Store| {
+            s.get_account(AgentKind::Claude, "bob")
+                .unwrap()
+                .unwrap()
+                .limited_until
+                .unwrap()
+        };
+        assert!(until(&s) <= now_ms() + month, "capped at MAX_RESET");
+        // A later, saner poll lowers it.
+        let soon = now_ms() + 60_000;
+        s.set_account_limited(AgentKind::Claude, "bob", soon)
+            .unwrap();
+        assert_eq!(until(&s), soon);
+        // A run's mark is capped too.
+        s.mark_account_limited(AgentKind::Claude, "bob", far)
+            .unwrap();
+        assert!(until(&s) <= now_ms() + month);
+        // And the owner can clear it.
+        assert!(s.clear_account_limit(AgentKind::Claude, "bob").unwrap());
+        assert!(!s.clear_account_limit(AgentKind::Claude, "bob").unwrap());
+        let a = s.get_account(AgentKind::Claude, "bob").unwrap().unwrap();
+        assert_eq!(a.status(now_ms()), AccountStatus::Ready);
+    }
+
+    #[test]
+    fn rows_of_removed_accounts_are_pruned() {
+        let s = store();
+        let t = token(&s, AccountMap::new());
+        s.add_account(AgentKind::Claude, "work", AccountKind::Login)
+            .unwrap();
+        let later = now_ms() + 60_000;
+        for name in ["work", acct::DEFAULT] {
+            s.record_usage(AgentKind::Claude, name, &[limit_window(later)])
+                .unwrap();
+            s.set_poll_status(AgentKind::Claude, name, true, None, None)
+                .unwrap();
+            s.set_project_session(&t.id, AgentKind::Claude, name, "default", "sess")
+                .unwrap();
+        }
+        // What an older version left: the account removed without its
+        // rows, and a `default`-kind row that brought a removed one back.
+        {
+            let conn = s.conn().unwrap();
+            conn.execute(
+                "DELETE FROM accounts WHERE agent = 'claude' AND name = 'work'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO accounts (agent, name, kind, created_at)
+                 VALUES ('codex', 'ghost', 'default', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        crate::maintenance::run_once(&s, 30).unwrap();
+        assert_eq!(
+            s.prune_orphan_account_rows().unwrap(),
+            0,
+            "the maintenance pass already pruned them"
+        );
+        assert!(s.get_account(AgentKind::Codex, "ghost").unwrap().is_none());
+        assert!(
+            s.usage_windows(AgentKind::Claude, "work")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(s.poll_status(AgentKind::Claude, "work").unwrap().is_none());
+        let accounts = [acct::DEFAULT.to_owned(), "work".to_owned()];
+        assert_eq!(
+            s.latest_conversation(&t.id, AgentKind::Claude, "default", &accounts)
+                .unwrap()
+                .as_deref(),
+            Some(acct::DEFAULT),
+            "the default account keeps its conversation"
+        );
+        assert_eq!(
+            s.usage_windows(AgentKind::Claude, acct::DEFAULT)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            s.poll_status(AgentKind::Claude, acct::DEFAULT)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

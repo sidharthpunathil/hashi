@@ -235,7 +235,8 @@ const LIMIT_MESSAGES: [&str; 5] = [
 
 /// Whether a failed run's error says this account is at its limit, and when
 /// it resets if the message says: "The quota will reset at MM-DD HH:MM:SS
-/// UTC." has no year, so it is the next such time. See
+/// UTC." has no year, so it is read as the nearest such time (one up to a day
+/// ago has already reset). See
 /// [`super::limit_hit`].
 #[must_use]
 pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
@@ -556,7 +557,8 @@ mod tests {
             past.minute(),
             past.second()
         );
+        // Three hours ago is a reset that already happened, not next year's.
         let at = limit_hit(&msg).unwrap().unwrap();
-        assert!(at > now && at.year() >= now.year(), "{at}");
+        assert!(at <= now && (now - at).whole_hours() <= 3, "{at}");
     }
 }

@@ -97,6 +97,7 @@ hashi account add claude bot --kind oauth-token --key-stdin   # a token from `cl
 hashi account login <agent> <name>                   # sign a login account in again
 hashi account list                                   # kind, signed in, state, last use, runs today, tokens
 hashi account disable <agent> <name>                 # skip it until `hashi account enable`
+hashi account clear-limit <agent> <name>             # take runs again now, before the reset it was marked limited until (dashboard: c)
 hashi account remove <agent> <name>                  # asks first (--yes), deletes it and takes it off every token and invite
 
 hashi token create ci --account claude=work,personal --account codex=ci
@@ -121,14 +122,14 @@ Crush's `default` account is not your own Crush login: it is `~/.hashi/accounts/
 
 A login account is the directory `~/.hashi/accounts/<agent>/<name>/` (mode `0700`). `hashi account add` prints the sign-in command with that variable set and, on a terminal, runs it with the terminal attached once you confirm (`--yes` skips the question); without a terminal it only prints it. It then checks the result with `claude auth status --json` for Claude Code, and for the other CLIs that the CLI wrote something into the directory. Every run on the account sets the variable to the same absolute path, which matters to Claude Code on macOS, whose Keychain entry is tied to that exact string. Hashi never reads, copies or refreshes what the CLI keeps there.
 
-A key account keeps its key in `~/.hashi/accounts/<agent>/<name>/key` (mode `0600`) and passes it in the variable above. The key is never accepted as an argument and never printed, logged or returned by the API.
+A key account keeps its key in `~/.hashi/accounts/<agent>/<name>/key` (mode `0600`) and passes it in the variable above. Its runs also point the login directory variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`) at that same directory, so your own `~/.claude`, `~/.codex` or `~/.gemini` settings never decide which credentials the run uses. The key is never accepted as an argument and never printed, logged or returned by the API.
 
 **Failover.** A run uses the first account in the token's list that is enabled and not limited. When it fails with that agent's usage limit message, the account is marked limited until the reset time in the message, or for `--account-cooldown`, and the prompt goes back to the front of the queue to run on the next account. This is not counted as an interruption, and each account is tried at most once per prompt. With none left, the prompt fails with "every account for <agent> this token can use is at its limit until <time>". A successful run clears the account's limited mark. Messages recognised:
 
 - Claude Code: the session, weekly and Opus limits, "Credit balance is too low" and "Request rejected (429)".
 - Codex: "hit your usage limit", "out of credits" and "spend cap". The reset comes from "Try again at 3:45 PM." or "Try again at Nov 7th, 2026 3:45 PM.", read in this machine's time zone; "Try again later." uses the cooldown.
 - Gemini CLI: "exhausted your daily quota", "exhausted your capacity", "quota exceeded", `QUOTA_EXHAUSTED`, `RATE_LIMIT_EXCEEDED` and "Please retry in Ns". N is the reset when it is over 300 seconds; a shorter wait uses the cooldown.
-- Qwen Code: an exhausted token plan ("The quota will reset at MM-DD HH:MM:SS UTC.", the next such time), "free allocated quota exceeded", `insufficient_quota` and "Qwen OAuth free tier has been discontinued".
+- Qwen Code: an exhausted token plan ("The quota will reset at MM-DD HH:MM:SS UTC.", read in whichever year puts it nearest now; one up to a day ago has already reset), "free allocated quota exceeded", `insufficient_quota` and "Qwen OAuth free tier has been discontinued".
 - opencode: its typed limit errors (`provider.rate-limit`, `provider.quota`, `provider.go-limit`, `provider.budget-limit`, `provider.model-budget-limit`, `provider.free-limit`, `provider.chatgpt-limit`), with `retryAfterMs` as the reset, and "usage limit reached".
 - Crush: Crush retries provider errors itself and then reports the provider's own message, so only generic wording is matched: "rate limit" (also `rate-limit`, `rate_limit`), "too many requests", "quota", "usage limit", `resource_exhausted` and a bare 429. Crush reports no quota of its own.
 - Cursor CLI: "usage limit", "rate limit", `resource_exhausted`, "quota", its limit codes (`FREE_USER_USAGE_LIMIT`, `PRO_USER_USAGE_LIMIT`, `FREE_USER_RATE_LIMIT_EXCEEDED`, `PRO_USER_RATE_LIMIT_EXCEEDED`, `RATE_LIMITED`, `GENERIC_RATE_LIMIT_EXCEEDED`) and a bare 429. "monthly cycle ends on M/D/YYYY" gives the reset date.

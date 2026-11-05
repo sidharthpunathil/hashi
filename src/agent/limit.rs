@@ -45,12 +45,22 @@ pub fn hit(text: &str) -> Option<Option<OffsetDateTime>> {
     Some(reset_time(text, OffsetDateTime::now_utc()))
 }
 
+/// `now` plus `d`, with `d` first capped at [`MAX_RESET`]. `None` when the
+/// sum is outside what [`OffsetDateTime`] can hold, so a hostile duration
+/// can never panic (a release build aborts on a panic).
+#[must_use]
+pub fn add_capped(now: OffsetDateTime, d: Duration) -> Option<OffsetDateTime> {
+    let d = time::Duration::try_from(d.min(MAX_RESET)).ok()?;
+    now.checked_add(d)
+}
+
 /// The reset time named in `text`, relative to `now`: the first RFC 3339
 /// timestamp after `now`, or else the first "in <duration>" or
-/// "after <duration>". Capped at [`MAX_RESET`] from `now`.
+/// "after <duration>". Capped at [`MAX_RESET`] from `now`. A time that
+/// cannot be represented is no reset time at all.
 #[must_use]
 pub fn reset_time(text: &str, now: OffsetDateTime) -> Option<OffsetDateTime> {
-    let latest = now + MAX_RESET;
+    let latest = add_capped(now, MAX_RESET)?;
     let stamp = text
         .split_whitespace()
         .map(|w| {
@@ -73,7 +83,7 @@ pub fn reset_time(text: &str, now: OffsetDateTime) -> Option<OffsetDateTime> {
             return None;
         }
         let d = duration_at(&words[i + 1..])?;
-        Some((now + d).min(latest))
+        Some(add_capped(now, d)?.min(latest))
     })
 }
 
@@ -127,18 +137,35 @@ fn month(word: &str) -> Option<time::Month> {
 }
 
 /// A local wall-clock time in a "try again at" suffix, as Codex prints it:
-/// `3:45 PM` for today, or `Nov 7th, 2026 3:45 PM` for another day.
-/// `offset` is the machine's UTC offset, which Codex formats in.
+/// `3:45 PM` for today, or `Nov 7th, 2026 3:45 PM` for another day, read
+/// at the fixed UTC offset `offset`. See [`local_clock_at`] for the form
+/// that follows daylight saving time.
 #[must_use]
 pub fn local_clock(
     text: &str,
     now: OffsetDateTime,
     offset: time::UtcOffset,
 ) -> Option<OffsetDateTime> {
+    local_clock_at(text, now, |_| Some(offset))
+}
+
+/// Like [`local_clock`], with `offset_at` giving the machine's UTC offset
+/// at a given instant, as Codex formats in local time. "Today" is today at
+/// `now`'s offset; the wall-clock time is then read at the offset in force
+/// at that time, so a reset on the other side of a daylight saving change
+/// is not an hour off. Anything that cannot be represented (year 9999 at a
+/// negative offset, say) is `None`, never a panic.
+#[must_use]
+pub fn local_clock_at(
+    text: &str,
+    now: OffsetDateTime,
+    offset_at: impl Fn(OffsetDateTime) -> Option<time::UtcOffset>,
+) -> Option<OffsetDateTime> {
+    let now_offset = offset_at(now)?;
     let w = words(text);
     let (date, (h, m)) = match w.as_slice() {
         [t, mer, ..] if clock_12(t, mer).is_some() => {
-            (now.to_offset(offset).date(), clock_12(t, mer)?)
+            (now.checked_to_offset(now_offset)?.date(), clock_12(t, mer)?)
         }
         [mon, day, year, t, mer, ..] => {
             let day: u8 = day.trim_end_matches(char::is_alphabetic).parse().ok()?;
@@ -147,12 +174,26 @@ pub fn local_clock(
         }
         _ => return None,
     };
-    let at = time::PrimitiveDateTime::new(date, time::Time::from_hms(h, m, 0).ok()?);
-    Some(at.assume_offset(offset).to_offset(time::UtcOffset::UTC))
+    let wall = time::PrimitiveDateTime::new(date, time::Time::from_hms(h, m, 0).ok()?);
+    let read = |offset: time::UtcOffset| {
+        wall.assume_offset(offset)
+            .checked_to_offset(time::UtcOffset::UTC)
+    };
+    let first = read(now_offset)?;
+    // The offset at the reset itself; when it differs (a daylight saving
+    // change in between), read the wall-clock time again at that offset.
+    match offset_at(first) {
+        Some(at) if at != now_offset => read(at),
+        _ => Some(first),
+    }
 }
 
-/// The next `MM-DD HH:MM:SS` UTC after `now`: Qwen Code's reset time, which
-/// has no year.
+/// The `MM-DD HH:MM:SS` UTC time closest to `now`: Qwen Code's reset time,
+/// which has no year. The year is whichever of last year, this year and
+/// next year puts it nearest `now`, so a reset seconds ago is not taken as
+/// next year's. A result at or before `now` (by up to a day) means the
+/// limit has already reset; a nearest time more than a day ago is not a
+/// reset time Hashi believes, and gives `None`.
 #[must_use]
 pub fn next_month_day_utc(text: &str, now: OffsetDateTime) -> Option<OffsetDateTime> {
     let w = words(text);
@@ -168,11 +209,15 @@ pub fn next_month_day_utc(text: &str, now: OffsetDateTime) -> Option<OffsetDateT
     let d: u8 = d.parse().ok()?;
     let time = time::Time::from_hms(h, mi, s).ok()?;
     let year = now.year();
-    [year, year + 1].into_iter().find_map(|y| {
-        let date = time::Date::from_calendar_date(y, mo, d).ok()?;
-        let at = time::PrimitiveDateTime::new(date, time).assume_utc();
-        (at > now).then_some(at)
-    })
+    let at = [year - 1, year, year + 1]
+        .into_iter()
+        .filter_map(|y| {
+            let date = time::Date::from_calendar_date(y, mo, d).ok()?;
+            Some(time::PrimitiveDateTime::new(date, time).assume_utc())
+        })
+        .min_by_key(|at| (*at - now).unsigned_abs())?;
+    let day_ago = now.checked_sub(time::Duration::DAY)?;
+    (at > day_ago).then_some(at)
 }
 
 /// Midnight UTC at the start of an `M/D/YYYY` date, as Cursor prints the end
@@ -206,36 +251,56 @@ pub fn leading_seconds(text: &str) -> Option<u64> {
     (secs.is_finite() && secs >= 0.0).then(|| secs.ceil() as u64)
 }
 
-/// This machine's UTC offset, read once from `date +%z`. Parsing the offset
-/// in process is not possible from a multithreaded program on Unix, which
-/// Hashi is. `None` when it cannot be read, for example on Windows.
+/// This machine's UTC offset now. See [`offset_at`].
 #[must_use]
 pub fn local_offset() -> Option<time::UtcOffset> {
-    static OFFSET: std::sync::OnceLock<Option<time::UtcOffset>> = std::sync::OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        if !cfg!(unix) {
-            return None;
-        }
-        let out = std::process::Command::new("date")
-            .arg("+%z")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let t = text.trim();
-        let (sign, digits) = match t.as_bytes().first()? {
-            b'+' => (1, &t[1..]),
-            b'-' => (-1, &t[1..]),
-            _ => return None,
-        };
-        if digits.len() != 4 {
-            return None;
-        }
-        let h: i8 = digits[..2].parse().ok()?;
-        let m: i8 = digits[2..].parse().ok()?;
-        time::UtcOffset::from_hms(sign * h, sign * m, 0).ok()
-    })
+    offset_at(OffsetDateTime::now_utc())
+}
+
+/// This machine's UTC offset at the instant `t`, read from `date +%z` for
+/// that instant (`date -d @<secs>` on Linux, `date -r <secs>` on macOS and
+/// the BSDs) on every call, so a daylight saving change since Hashi started
+/// is seen. The `time` crate cannot do this in process without `unsafe`:
+/// `UtcOffset::local_offset_at` refuses in a multithreaded program on
+/// Unix, which Hashi is. `None` when it cannot be read, for example on
+/// Windows; callers then fall back to the cooldown.
+#[must_use]
+pub fn offset_at(t: OffsetDateTime) -> Option<time::UtcOffset> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let secs = t.unix_timestamp().to_string();
+    let mut cmd = std::process::Command::new("date");
+    if cfg!(target_os = "linux") {
+        cmd.arg("-d").arg(format!("@{secs}"));
+    } else {
+        cmd.arg("-r").arg(&secs);
+    }
+    let out = cmd
+        .arg("+%z")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_z(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// Parses a `%z` offset such as `+0530` or `-0400`.
+fn parse_z(t: &str) -> Option<time::UtcOffset> {
+    let (sign, digits) = match t.as_bytes().first()? {
+        b'+' => (1, t.get(1..)?),
+        b'-' => (-1, t.get(1..)?),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let h: i8 = digits[..2].parse().ok()?;
+    let m: i8 = digits[2..].parse().ok()?;
+    time::UtcOffset::from_hms(sign * h, sign * m, 0).ok()
 }
 
 /// Seconds in one `unit`, for the spellings CLIs use.
@@ -377,8 +442,11 @@ mod tests {
 
         let t = next_month_day_utc("01-15 09:30:00 utc.", now()).unwrap();
         assert_eq!((t - now()).whole_minutes(), 90);
+        // 22.5 hours ago: already reset, not next year's.
         let t = next_month_day_utc("01-14 09:30:00 utc.", now()).unwrap();
-        assert_eq!(t.year(), 2028, "a date already past is next year's");
+        assert_eq!(t.year(), 2027);
+        assert!(t < now());
+        assert_eq!(next_month_day_utc("01-10 09:30:00 utc.", now()), None);
 
         let t = us_date_utc("2/1/2027.").unwrap();
         assert_eq!(
@@ -387,6 +455,222 @@ mod tests {
         );
         assert_eq!(leading_seconds(" 412.2s."), Some(413));
         assert_eq!(leading_seconds("soon"), None);
+    }
+
+    #[test]
+    fn huge_relative_durations_are_capped_not_a_panic() {
+        assert_eq!(after("try again in 99999999999 days"), Some(31 * 86_400));
+        assert_eq!(
+            after("retry after 18446744073709551615 seconds"),
+            Some(31 * 86_400)
+        );
+        let edge = time::macros::datetime!(9999-12-31 23:00 UTC);
+        assert_eq!(reset_time("try again in 2 days", edge), None);
+        assert_eq!(add_capped(edge, Duration::from_secs(86_400)), None);
+    }
+
+    #[test]
+    fn agents_limit_messages_with_huge_durations_do_not_panic() {
+        use crate::agent::{AgentKind, limit_hit};
+        let claude = limit_hit(
+            AgentKind::Claude,
+            "You've hit your session limit. try again in 99999999999 days",
+        );
+        let reset = claude.expect("a limit").expect("a reset time");
+        let ahead = reset - OffsetDateTime::now_utc();
+        assert!(ahead <= time::Duration::try_from(MAX_RESET).unwrap());
+        let crush = limit_hit(AgentKind::Crush, "quota exceeded, retry after 3000000 days");
+        assert!(crush.expect("a limit").is_some());
+    }
+
+    #[test]
+    fn a_far_wall_clock_at_a_negative_offset_is_no_reset_time() {
+        let minus5 = time::UtcOffset::from_hms(-5, 0, 0).unwrap();
+        assert_eq!(local_clock("dec 31st, 9999 11:59 pm.", now(), minus5), None);
+    }
+
+    #[test]
+    fn a_qwen_reset_seconds_ago_has_already_happened() {
+        let now = time::macros::datetime!(2026-11-06 00:00:05 UTC);
+        let at = next_month_day_utc("11-06 00:00:00 utc.", now).unwrap();
+        assert_eq!(at, time::macros::datetime!(2026-11-06 00:00:00 UTC));
+        assert!(at <= now, "already reset, not next year's");
+        // Across new year, both ways.
+        let now = time::macros::datetime!(2026-12-31 23:59:00 UTC);
+        let at = next_month_day_utc("01-01 00:00:30 utc.", now).unwrap();
+        assert_eq!(at, time::macros::datetime!(2027-01-01 00:00:30 UTC));
+        let now = time::macros::datetime!(2027-01-01 00:00:10 UTC);
+        let at = next_month_day_utc("12-31 23:59:50 utc.", now).unwrap();
+        assert_eq!(at, time::macros::datetime!(2026-12-31 23:59:50 UTC));
+    }
+
+    #[test]
+    fn offsets_parse_from_date_output() {
+        assert_eq!(parse_z("+0530"), time::UtcOffset::from_hms(5, 30, 0).ok());
+        assert_eq!(parse_z("-0400"), time::UtcOffset::from_hms(-4, 0, 0).ok());
+        for bad in [
+            "",
+            "+",
+            "0400",
+            "+04",
+            "+04:00",
+            "+9999",
+            "-0a00",
+            "+\u{e9}00",
+        ] {
+            assert_eq!(parse_z(bad), None, "{bad}");
+        }
+        #[cfg(unix)]
+        {
+            let then = time::macros::datetime!(2026-01-15 12:00 UTC);
+            let off = offset_at(then).expect("`date` reads an offset");
+            assert!(off.whole_hours().abs() <= 14, "{off}");
+        }
+    }
+
+    /// A small deterministic generator, so the hostile inputs are the same
+    /// on every run.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(self.0 >> 33).unwrap_or(0)
+        }
+
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            from[self.next() % from.len()]
+        }
+    }
+
+    /// Feeds thousands of hostile strings, built from the pieces the
+    /// parsers look for, to every parser and every agent's `limit_hit`.
+    /// Nothing may panic: a release build aborts on a panic, and the
+    /// recovered run would hit the same message again.
+    #[test]
+    fn hostile_limit_messages_never_panic() {
+        const PIECES: &[&str] = &[
+            "try again in",
+            "retry after",
+            "in",
+            "after",
+            "and",
+            "reset at",
+            "resets at",
+            "try again at",
+            "please retry in",
+            "cycle ends on",
+            "quota",
+            "rate limit",
+            "You've hit your session limit",
+            "hit your usage limit",
+            "exhausted your daily quota",
+            "usage limit reached",
+            "HTTP 429:",
+            "429",
+            "0",
+            "1",
+            "59",
+            "99999999999",
+            "18446744073709551615",
+            "18446744073709551616",
+            "340282366920938463463374607431768211455",
+            "-1",
+            "1e309s",
+            "NaNs",
+            "infs",
+            "412.7s",
+            "99999999999999999999.9s",
+            "days",
+            "d",
+            "h",
+            "m",
+            "s",
+            "hours",
+            "1h20m",
+            "9999999999d9999999999h",
+            "9999-12-31T23:59:59Z",
+            "9999-12-31T23:59:59-23:59",
+            "0000-01-01T00:00:00+23:59",
+            "2027-01-15T10:00:00Z",
+            "dec",
+            "jan",
+            "feb",
+            "31st,",
+            "29th,",
+            "0th,",
+            "9999",
+            "-9999",
+            "10000",
+            "11:59",
+            "12:00",
+            "13:00",
+            "pm",
+            "am",
+            "pm.",
+            "12-31",
+            "02-29",
+            "13-45",
+            "23:59:59",
+            "24:00:00",
+            "utc.",
+            "2/1/2027",
+            "12/31/9999",
+            "13/45/99999",
+            "2/29/-9999",
+            "\u{2019}",
+            "\u{130}",
+            "\u{1F600}",
+            "\u{0}",
+            "(",
+            ".",
+            ",",
+            "\"",
+            "",
+        ];
+        let edges = [
+            OffsetDateTime::now_utc(),
+            now(),
+            time::macros::datetime!(9999-12-31 23:59:59 UTC),
+            time::macros::datetime!(-9999-01-01 00:00:00 UTC),
+            time::macros::datetime!(2026-12-31 23:59:59 UTC),
+        ];
+        let offsets = [
+            time::UtcOffset::UTC,
+            time::UtcOffset::from_hms(-23, -59, -59).unwrap(),
+            time::UtcOffset::from_hms(23, 59, 59).unwrap(),
+            time::UtcOffset::from_hms(-5, 0, 0).unwrap(),
+        ];
+        let mut rng = Lcg(0x5eed);
+        for round in 0..4_000 {
+            let n = 1 + rng.next() % 9;
+            let parts: Vec<&str> = (0..n).map(|_| rng.pick(PIECES)).collect();
+            let text = parts.join(if round % 3 == 0 { "" } else { " " });
+            let at = edges[round % edges.len()];
+            let off = offsets[round % offsets.len()];
+            let _ = reset_time(&text, at);
+            let _ = local_clock(&text, at, off);
+            let _ = local_clock_at(&text, at, |t| {
+                Some(if t < at { off } else { time::UtcOffset::UTC })
+            });
+            let _ = next_month_day_utc(&text, at);
+            let _ = us_date_utc(&text);
+            let _ = leading_seconds(&text);
+            let _ = has_status(&text, "429");
+            for marker in ["try again at ", "reset at ", "please retry in "] {
+                if let Some(rest) = after_marker(&text, marker) {
+                    let _ = local_clock(&rest, at, off);
+                    let _ = next_month_day_utc(&rest, at);
+                    let _ = leading_seconds(&rest);
+                }
+            }
+            for agent in crate::agent::AgentKind::ALL {
+                let _ = crate::agent::limit_hit(agent, &text);
+            }
+        }
     }
 
     #[test]

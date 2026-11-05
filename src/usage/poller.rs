@@ -467,8 +467,7 @@ impl Poller {
             AccountKind::Default => self.settings.codex_home.clone(),
             _ => Some(acct::account_dir(&self.home, AgentKind::Codex, name)),
         };
-        let cwd = std::env::temp_dir();
-        let quota = codex::read(&bin, env.as_ref(), expected.as_deref(), &cwd)
+        let quota = codex::read(&bin, env.as_ref(), expected.as_deref(), &self.home)
             .await
             .map_err(|why| PollError::Failed {
                 note: format!("unknown, {why}"),

@@ -40,7 +40,12 @@ version=v0.100.0
   done
   if [ -c /dev/stdin ]; then echo "stdin:char"; elif [ -p /dev/stdin ]; then echo "stdin:pipe"; else echo "stdin:other"; fi
 } >> "$log"
-if [ "$1" = "--version" ]; then echo "crush version $version"; exit 0; fi
+if [ "$1" = "--version" ]; then
+  # `plant`: drop a project config in the working directory, as a run in
+  # the same workspace could while this one is between its checks.
+  [ -f "$here/plant" ] && echo "echo pwned" > "$(pwd)/.crushrc"
+  echo "crush version $version"; exit 0
+fi
 data="$2"
 acct=$(basename "$HOME")
 session_json() {
@@ -307,6 +312,51 @@ async fn a_project_config_in_the_workspace_or_a_parent_refuses_the_run() {
     }
     assert!(calls(&bin).is_empty(), "Crush never ran");
     run_default(&home, &cfg, &work, "hi").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_project_config_planted_after_the_first_check_refuses_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = write_fake(dir.path());
+    let home = home(dir.path());
+    let work = workspace(dir.path());
+    let cfg = crush_cfg(bin.clone());
+    std::fs::write(bin.parent().unwrap().join("plant"), "").unwrap();
+    let err = run_default(&home, &cfg, &work, "hi")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("refusing to run Crush") && err.contains(".crushrc"),
+        "{err}"
+    );
+    assert!(work.join(".crushrc").exists(), "the probe planted it");
+    assert!(run_calls(&bin).is_empty(), "the run itself never started");
+}
+
+#[tokio::test]
+async fn a_pre_release_version_is_refused_unless_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = write_fake(dir.path());
+    let home = home(dir.path());
+    let work = workspace(dir.path());
+    let version = bin.parent().unwrap().join("version");
+    let mut cfg = crush_cfg(bin.clone());
+    for v in [
+        "v0.100.1-0.20261105120000-abcdef123456",
+        "v0.100.0-devel+dirty",
+    ] {
+        std::fs::write(&version, v).unwrap();
+        let err = run_default(&home, &cfg, &work, "hi")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--crush-allow-newer"), "{err}");
+    }
+    assert!(run_calls(&bin).is_empty());
+    cfg.allow_newer = true;
+    run_default(&home, &cfg, &work, "hi").await.unwrap();
+    assert_eq!(run_calls(&bin).len(), 1);
 }
 
 #[tokio::test]

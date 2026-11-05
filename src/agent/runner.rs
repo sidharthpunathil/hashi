@@ -155,6 +155,55 @@ impl Drop for Supervised {
     }
 }
 
+/// A helper process outside a run (such as Codex's `app-server` for a
+/// quota read) started by [`spawn_contained`]: in its own process group on
+/// Unix, in a Job Object on Windows, and stopped with its whole tree by
+/// [`Contained::stop`], or on drop if a timeout or cancellation drops it
+/// first, exactly as a run is.
+pub(crate) struct Contained(Supervised);
+
+impl Contained {
+    /// The child, for its pipes and its exit.
+    pub(crate) fn child_mut(&mut self) -> &mut Child {
+        &mut self.0.child
+    }
+
+    /// Stops the whole tree without blocking the runtime.
+    pub(crate) async fn stop(self) {
+        self.0.finish().await;
+    }
+}
+
+/// Spawns `cmd` as [`Contained`]. The caller sets the program, arguments,
+/// environment and pipes; this adds the process group, `kill_on_drop` and
+/// the Job Object.
+///
+/// # Errors
+///
+/// Fails when the process cannot start.
+pub(crate) fn spawn_contained(cmd: &mut Command) -> std::io::Result<Contained> {
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        super::tree::register_leader(pid);
+    }
+    #[cfg(windows)]
+    let job = contain(&child);
+    Ok(Contained(Supervised {
+        child,
+        pid,
+        exited: false,
+        stopped: false,
+        scope: Arc::new(Mutex::new(RunScope::new(pid.unwrap_or(0)))),
+        #[cfg(windows)]
+        job,
+    }))
+}
+
 /// Kills the process group led by `pid`, then every other process of the
 /// run (see [`super::tree::sweep`]). After a normal exit this sweeps up
 /// anything the run left behind.

@@ -34,6 +34,120 @@ pub fn env(_workdir: &Path) -> Vec<(String, String)> {
     ]
 }
 
+/// The settings Hashi requires in a non-default account's Gemini home, as
+/// `(path, value)` pairs in `settings.json`.
+///
+/// - `advanced.ignoreLocalEnv`: `findEnvFile` in
+///   `packages/cli/src/config/settings.ts:607-643` walks up from the working
+///   directory to the filesystem root and loads the first `.env` it finds
+///   (and `~/.env` as a fallback), which for a workspace under the owner's
+///   home is the owner's `~/.env`. No environment variable turns this off
+///   (`--ignore-env` is sniffed from argv at `settings.ts:724-726` but is
+///   not a declared option, and `config.ts:515` parses strictly); the setting
+///   (`settingsSchema.ts:2059`) does, and then only a `.env` directly in
+///   `homedir()` loads (`settings.ts:623`), which with `GEMINI_CLI_HOME`
+///   set is the account directory (`packages/core/src/utils/paths.ts:22-28`).
+///   The `.gemini/.env` files on the walk load only in a trusted workspace,
+///   which a Hashi workspace is not when the settings load: `--skip-trust`
+///   takes effect after them (`config.ts:527-529`, `gemini.tsx:494,522`),
+///   and an inherited `GEMINI_CLI_TRUST_WORKSPACE` is removed with the other
+///   credential variables.
+/// - `security.auth.selectedType`, for a key account only: `gemini-api-key`
+///   (`AuthType.USE_GEMINI`, `packages/core/src/core/contentGenerator.ts:65`),
+///   which `validateNonInteractiveAuth` prefers over the environment
+///   (`packages/cli/src/validateNonInterActiveAuth.ts:27`).
+fn required_settings(key: bool) -> Vec<(&'static [&'static str], Value)> {
+    let mut out: Vec<(&'static [&'static str], Value)> =
+        vec![(&["advanced", "ignoreLocalEnv"], Value::Bool(true))];
+    if key {
+        out.push((
+            &["security", "auth", "selectedType"],
+            Value::String("gemini-api-key".to_owned()),
+        ));
+    }
+    out
+}
+
+/// Gets a non-default account's Gemini home `dir` (its `GEMINI_CLI_HOME`)
+/// ready for a run: `<dir>/.gemini/settings.json` gets the
+/// [`required_settings`], keeping whatever else Gemini CLI wrote there
+/// (a login's chosen sign-in, say). `key` is set for a key account.
+///
+/// # Errors
+///
+/// Fails, so the run is refused, when the settings file is not a JSON
+/// object Hashi can read (Gemini CLI accepts comments; Hashi does not, and
+/// will not run without knowing `.env` loading is off), is not a regular
+/// file, or cannot be written.
+pub fn prepare_account_home(dir: &Path, key: bool) -> std::io::Result<()> {
+    let gemini_dir = dir.join(".gemini");
+    if std::fs::symlink_metadata(&gemini_dir).is_ok_and(|m| !m.is_dir()) {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            gemini_dir.display()
+        )));
+    }
+    std::fs::create_dir_all(&gemini_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gemini_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let path = gemini_dir.join("settings.json");
+    let mut settings = match std::fs::symlink_metadata(&path) {
+        Ok(m) if !m.is_file() => {
+            return Err(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        Ok(_) => {
+            let text = std::fs::read_to_string(&path)?;
+            match serde_json::from_str::<Value>(&text) {
+                Ok(v @ Value::Object(_)) => v,
+                _ if text.trim().is_empty() => Value::Object(serde_json::Map::new()),
+                _ => {
+                    return Err(std::io::Error::other(format!(
+                        "refusing to run Gemini CLI: {} is not plain JSON, so Hashi cannot \
+                         turn off its .env loading; remove the comments",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        Err(_) => Value::Object(serde_json::Map::new()),
+    };
+    let mut changed = false;
+    for (keys, value) in required_settings(key) {
+        let mut node = &mut settings;
+        for k in &keys[..keys.len() - 1] {
+            let Value::Object(map) = node else {
+                break;
+            };
+            let entry = map
+                .entry((*k).to_owned())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = Value::Object(serde_json::Map::new());
+                changed = true;
+            }
+            node = entry;
+        }
+        if let Value::Object(map) = node {
+            let last = keys[keys.len() - 1].to_owned();
+            if map.get(&last) != Some(&value) {
+                map.insert(last, value);
+                changed = true;
+            }
+        }
+    }
+    if changed || !path.exists() {
+        let text = serde_json::to_string_pretty(&settings).map_err(std::io::Error::other)?;
+        crate::diagnostics::write_private(&path, &text)?;
+    }
+    Ok(())
+}
+
 /// Builds the argument vector for a headless run.
 ///
 /// - `--skip-trust`: Hashi's per-token workspaces are never in the user's
@@ -216,9 +330,11 @@ pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
         return Some(
             super::limit::leading_seconds(&rest)
                 .filter(|n| *n > MIN_RETRY_SECS)
-                .map(|n| {
-                    time::OffsetDateTime::now_utc()
-                        + std::time::Duration::from_secs(n).min(super::limit::MAX_RESET)
+                .and_then(|n| {
+                    super::limit::add_capped(
+                        time::OffsetDateTime::now_utc(),
+                        std::time::Duration::from_secs(n),
+                    )
                 }),
         );
     }

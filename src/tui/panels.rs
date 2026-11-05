@@ -625,6 +625,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
         ("l", "sign in"),
         ("d", "disable"),
         ("e", "enable"),
+        ("c", "clear limit"),
         ("x", "remove"),
         ("esc", "close"),
     ]));
