@@ -970,7 +970,7 @@ fn commands_tab_selects_with_arrows_and_jk_and_stays_in_bounds() {
     assert_eq!(app.selected_action(), Action::TailscaleFunnel);
     app.on_key(key(KeyCode::Char('k')));
     assert_eq!(app.selected_action(), Action::TailscaleServe);
-    for _ in 0..20 {
+    for _ in 0..Action::ALL.len() {
         app.on_key(key(KeyCode::Down));
     }
     assert_eq!(app.selected_action(), Action::Help);
@@ -1875,4 +1875,366 @@ fn doctor_audit_and_update_popups_open_from_commands() {
     app.on_key(key(KeyCode::Char('y')));
     assert!(app.take_pending_command().is_none());
     assert!(toast(&app).contains("hashi update"));
+}
+
+// ── access requests ─────────────────────────────────────────────────────────
+
+/// A pending "new person" request from `name`, through an ask-access link.
+fn ask_for_access(app: &App, name: &str) -> hashi::store::AccessRequest {
+    use hashi::access::{self, NewPerson, OpenLink};
+    let store = &app.state.store;
+    let (_, code) = access::open_link(store, "cli", OpenLink::default()).unwrap();
+    access::submit_new(
+        store,
+        NewPerson {
+            code,
+            name: name.into(),
+            message: Some("for the docs site".into()),
+            agents: Some(vec![AgentKind::Claude]),
+        },
+    )
+    .unwrap()
+    .0
+}
+
+fn open_access_popup(app: &mut App) {
+    select_action(app, Action::AccessRequests);
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.popup, Some(Popup::AccessRequests { .. })),
+        "{:?}",
+        app.popup
+    );
+}
+
+#[test]
+fn the_access_popup_lists_a_pending_request() {
+    let mut app = App::new(state(), None, false);
+    let r = ask_for_access(&app, "alice");
+    app.refresh();
+    open_access_popup(&mut app);
+    let out = draw(&mut app, 150, 44);
+    for text in [
+        "access requests",
+        "alice",
+        "pending",
+        "for the docs site",
+        "The ask-access link is open",
+        "accept",
+        "decline",
+    ] {
+        assert!(out.contains(text), "missing {text:?}\n{out}");
+    }
+    assert!(!out.contains(&r.id), "ids stay out of the list");
+}
+
+#[test]
+fn the_commands_tab_badge_counts_pending_requests() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('5')));
+    let out = draw(&mut app, 170, 44);
+    assert!(!out.contains("Commands ·"), "no badge without requests");
+    assert!(out.contains("hashi requests list"));
+    let r = ask_for_access(&app, "alice");
+    // The event the API emits refreshes the count and raises a toast.
+    app.on_event(Event::AccessRequest {
+        id: r.id,
+        kind: r.kind,
+        name: r.name,
+    });
+    assert!(
+        toast(&app).contains("alice asks for access"),
+        "{}",
+        toast(&app)
+    );
+    app.on_tick();
+    assert_eq!(app.access_pending, 1);
+    let out = draw(&mut app, 170, 44);
+    assert!(out.contains("Commands ·1"), "{out}");
+    assert!(out.contains("1 pending"), "{out}");
+    // The regular refresh picks up a request without an event too.
+    ask_for_access(&app, "bob");
+    app.refresh();
+    assert!(draw(&mut app, 170, 44).contains("Commands ·2"));
+}
+
+#[test]
+fn accepting_a_new_person_creates_their_invite() {
+    let mut app = App::new(state(), None, false);
+    let r = ask_for_access(&app, "alice");
+    app.refresh();
+    open_access_popup(&mut app);
+    app.on_key(key(KeyCode::Char('a')));
+    let Some(Popup::AcceptRequest(form)) = &app.popup else {
+        panic!("expected the accept popup, got {:?}", app.popup)
+    };
+    assert_eq!(form.label, "alice");
+    assert_eq!(form.agents, "claude");
+    assert!(draw(&mut app, 150, 44).contains("accept request"));
+    // Prompts a day: the third field.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, "25");
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.popup, Some(Popup::AccessRequests { .. })),
+        "{:?}",
+        app.popup
+    );
+    assert!(toast(&app).contains("accepted alice"), "{}", toast(&app));
+    let store = &app.state.store;
+    let decided = store.get_access_request(&r.id).unwrap().unwrap();
+    assert_eq!(decided.state(hashi::util::now_ms()), "accepted");
+    let invite = store
+        .list_invites()
+        .unwrap()
+        .into_iter()
+        .find(|i| Some(&i.id) == decided.invite_id.as_ref())
+        .expect("an invite for the request");
+    assert_eq!(invite.label, "alice");
+    assert_eq!(invite.limits.daily_requests, Some(25));
+    assert_eq!(app.access_pending, 0);
+}
+
+#[test]
+fn accepting_a_request_for_more_applies_the_limits() {
+    let mut app = App::new(state(), None, false);
+    add_user(&mut app, "carol");
+    let token = app
+        .state
+        .store
+        .list_tokens()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == "carol")
+        .unwrap();
+    let r = hashi::access::submit_more(
+        &app.state.store,
+        &token,
+        hashi::access::MoreInput {
+            daily_requests: Some(400),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    app.refresh();
+    open_access_popup(&mut app);
+    assert!(draw(&mut app, 150, 44).contains("carol"));
+    app.on_key(key(KeyCode::Char('a')));
+    let out = draw(&mut app, 150, 44);
+    assert!(out.contains("More for") && out.contains("now:"), "{out}");
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::AccessRequests { .. })));
+    let saved = app.state.store.get_token(&token.id).unwrap().unwrap();
+    assert_eq!(saved.limits.daily_requests, Some(400));
+    let decided = app.state.store.get_access_request(&r.id).unwrap().unwrap();
+    assert_eq!(decided.state(hashi::util::now_ms()), "accepted");
+}
+
+#[test]
+fn declining_stores_the_reason_and_show_all_lists_it() {
+    let mut app = App::new(state(), None, false);
+    let r = ask_for_access(&app, "bob");
+    app.refresh();
+    open_access_popup(&mut app);
+    app.on_key(key(KeyCode::Char('d')));
+    assert!(matches!(app.popup, Some(Popup::DeclineRequest(_))));
+    typed(&mut app, "we are full");
+    assert!(draw(&mut app, 150, 44).contains("we are full"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(
+        app.popup,
+        Some(Popup::AccessRequests { all: false, .. })
+    ));
+    let decided = app.state.store.get_access_request(&r.id).unwrap().unwrap();
+    assert_eq!(decided.reason.as_deref(), Some("we are full"));
+    assert_eq!(decided.state(hashi::util::now_ms()), "declined");
+    // Pending only: the list is empty; show all brings it back.
+    assert!(draw(&mut app, 150, 44).contains("No requests"));
+    app.on_key(key(KeyCode::Char('s')));
+    assert!(matches!(
+        app.popup,
+        Some(Popup::AccessRequests { all: true, .. })
+    ));
+    let out = draw(&mut app, 150, 44);
+    assert!(out.contains("declined") && out.contains("bob"), "{out}");
+    // A decided request cannot be decided again.
+    app.on_key(key(KeyCode::Char('a')));
+    assert!(toast(&app).contains("not pending"), "{}", toast(&app));
+}
+
+#[test]
+fn the_access_popup_opens_and_closes_the_link() {
+    let mut app = App::new(state(), None, false);
+    open_access_popup(&mut app);
+    assert!(draw(&mut app, 150, 44).contains("link is closed"));
+    app.on_key(key(KeyCode::Char('o')));
+    let Some(Popup::AccessLink { code, .. }) = &app.popup else {
+        panic!("expected the link popup, got {:?}", app.popup)
+    };
+    let url = app.access_link_url(code);
+    assert!(
+        url.starts_with("http://127.0.0.1:7878/ask-access/hashi_ask_"),
+        "{url}"
+    );
+    let out = draw(&mut app, 150, 60);
+    assert!(out.contains(&url), "{out}");
+    assert!(out.contains("only works on this machine"), "{out}");
+    assert!(out.contains('█'), "a QR code when there is room");
+    let link = hashi::access::current_link(&app.state.store)
+        .unwrap()
+        .unwrap();
+    assert_eq!(link.status(hashi::util::now_ms()), "open");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 150, 44).contains("link is open"));
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(toast(&app).contains("closed the ask-access link"));
+    let link = hashi::access::current_link(&app.state.store)
+        .unwrap()
+        .unwrap();
+    assert_eq!(link.status(hashi::util::now_ms()), "closed");
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(toast(&app).contains("no ask-access link was open"));
+}
+
+#[test]
+fn bridges_show_the_requests_this_machine_sent_and_check_them() {
+    let dir = tempfile::tempdir().unwrap();
+    // A bridge that is not listening: the check reports it and keeps the
+    // request for the next try.
+    hashi::access_client::save(
+        dir.path(),
+        &[hashi::access_client::PendingRequest {
+            base_url: "http://127.0.0.1:1".into(),
+            id: "1".into(),
+            pickup: "hashi_pick_never_shown".into(),
+            name: "dana".into(),
+            server: "friend-bridge".into(),
+            remote_name: None,
+        }],
+    )
+    .unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Bridges);
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    for text in [
+        "Requests for access you sent",
+        "friend-bridge",
+        "asked as dana",
+        "request status",
+    ] {
+        assert!(out.contains(text), "missing {text:?}\n{out}");
+    }
+    assert!(
+        !out.contains("never_shown"),
+        "the pickup secret stays hidden"
+    );
+    app.on_key(key(KeyCode::Char('r')));
+    assert!(app.request_checking);
+    assert!(app.animating(), "the check shows a spinner");
+    let started = Instant::now();
+    while app.request_checking && started.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.on_tick();
+    }
+    assert!(!app.request_checking, "the check never finished");
+    let checks = app.request_checks.clone().unwrap();
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].state, "error");
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("friend-bridge: error"), "{out}");
+    assert_eq!(
+        hashi::access_client::load(dir.path()).unwrap().len(),
+        1,
+        "kept for the next check"
+    );
+}
+
+#[test]
+fn the_project_form_sets_the_account_strategy_and_rotate_threshold() {
+    use hashi::tui::forms::ProjectForm;
+    use hashi::usage::Strategy;
+    let dir = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Projects);
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(&mut app, "api");
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, &folder.path().display().to_string());
+    for _ in 1..ProjectForm::STRATEGY {
+        app.on_key(key(KeyCode::Down));
+    }
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("account strategy") && out.contains("server default"));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, "30");
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::Project(form)) = &app.popup else {
+        panic!("expected the form, got {:?}", app.popup)
+    };
+    assert_eq!(form.field, ProjectForm::ROTATE_AT);
+    assert_eq!(
+        form.error.as_ref().map(|e| e.0),
+        Some(ProjectForm::ROTATE_AT)
+    );
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("a percent from 50 to 99"), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let field = lines
+        .iter()
+        .position(|l| l.contains("rotate at %"))
+        .unwrap();
+    assert!(
+        lines[field + 1].contains("a percent from 50 to 99"),
+        "the error sits under its field"
+    );
+    assert!(app.state.store.get_project("api").unwrap().is_none());
+    app.on_key(key(KeyCode::Backspace));
+    app.on_key(key(KeyCode::Backspace));
+    typed(&mut app, "80");
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.popup, Some(Popup::Projects { .. })),
+        "{:?}",
+        app.popup
+    );
+    let p = app.state.store.get_project("api").unwrap().unwrap();
+    assert_eq!(p.account_strategy, Some(Strategy::InOrder));
+    assert_eq!(p.rotate_at, Some(80));
+
+    // Edit: soonest-reset and back to the server's threshold.
+    app.on_key(key(KeyCode::Char('e')));
+    let Some(Popup::Project(form)) = &app.popup else {
+        panic!("expected the form")
+    };
+    assert_eq!(form.strategy, Some(Strategy::InOrder));
+    assert_eq!(form.rotate_at, "80");
+    for _ in 1..ProjectForm::STRATEGY {
+        app.on_key(key(KeyCode::Down));
+    }
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Backspace));
+    app.on_key(key(KeyCode::Backspace));
+    app.on_key(key(KeyCode::Enter));
+    assert!(toast(&app).contains("soonest-reset"), "{}", toast(&app));
+    let p = app.state.store.get_project("api").unwrap().unwrap();
+    assert_eq!(p.account_strategy, Some(Strategy::SoonestReset));
+    assert_eq!(p.rotate_at, None);
+    // Left from in-order goes back to the server default.
+    app.on_key(key(KeyCode::Char('e')));
+    for _ in 1..ProjectForm::STRATEGY {
+        app.on_key(key(KeyCode::Down));
+    }
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Left));
+    }
+    app.on_key(key(KeyCode::Enter));
+    let p = app.state.store.get_project("api").unwrap().unwrap();
+    assert_eq!(p.account_strategy, None);
 }

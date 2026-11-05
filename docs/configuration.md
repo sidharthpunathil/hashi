@@ -230,7 +230,7 @@ hashi requests decline 1a2b3c4d --reason "Only the team for now"
 - **New people.** Accepting creates a single-use invite exactly as `hashi share` would, filled in with their name, the agents they asked for (within the link's project) and the project. Every `hashi share` flag works on `accept` and overrides what was filled in: `--label`, `--agents`, `--stateful`, `--expires-in-days`, `--link-hours` (default 168), `--account`, `--project` and the limit flags. The invite's code is derived from the requester's pickup secret and never shown to you, so their page, or `hashi request status`, collects it. If they never do, it expires like any invite.
 - **More.** A token holder asks from the "Ask for more" form on `/me`, `POST /v1/me/requests` or the MCP tool `request_more`: higher daily or monthly prompts or budget, more agents, a later expiry, or a message. `hashi requests list` shows their current limits next to what accepting would give. `accept` applies the asked values, with your flags replacing any of them (`--expires-in-days 0` removes the expiry); the result is saved as `hashi token update` would, and the token's project still bounds its agents.
 - **Limits.** Submissions count against the per-minute rate limit (`--rate-limit`) per client address, and failed lookups of codes and pickup secrets are throttled like invite claims. A link holds at most 50 pending requests and the server 200. A token holds at most 3 open requests and opens at most one an hour. A request nobody decides expires after 7 days, and decided or expired requests are deleted 30 days later by the hourly maintenance.
-- **The dashboard** shows a toast when a request arrives. Every link change, request, acceptance and decline is in `hashi audit`.
+- **The dashboard** shows a toast when a request arrives and the number waiting as a badge on the Commands tab (`5 Commands ·2`). The Commands row "Access requests" lists them and accepts, declines, opens and closes the link (see [What each popup does](#what-each-popup-does)). Every link change, request, acceptance and decline is in `hashi audit`, the dashboard's as `dashboard`.
 
 On a friend's machine, `hashi request` asks from a terminal:
 
@@ -277,13 +277,15 @@ Tab `5` lists everything the owner can do, grouped, one row each with its key (o
 | Group | Rows | Same from a terminal |
 |---|---|---|
 | Go public | Cloudflare quick tunnel (`t`), Tailscale serve, Tailscale funnel, stop going public | `hashi serve --tunnel`, `--tailscale serve`, `--tailscale funnel` |
-| Share | new invite (`s`), new token (`n`) | `hashi share`, `hashi token create` |
+| Share | new invite (`s`), new token (`n`), access requests | `hashi share`, `hashi token create`, `hashi requests list` |
 | Ask | ask an agent (`a`) | `hashi ask`, `hashi ask --remote` |
 | Manage | accounts, projects, bridges I use, connect to a bridge | `hashi account`, `hashi project`, `hashi remote`, `hashi connect` |
 | Server | port and bind address, copy the API URL (`c`) | `hashi serve --port --bind` |
 | Install | cloudflared, tailscale, Crush | `hashi install cloudflared\|tailscale\|crush` |
 | Maintenance | check for updates, install the update, doctor, diagnostic report, audit log | `hashi update [--check]`, `hashi doctor`, `hashi report`, `hashi audit` |
 | Help | all key bindings (`?`) | `hashi --help` |
+
+The tab label shows how many requests for access are waiting, as `Commands ·2`. It updates when a request arrives and with the regular refresh.
 
 States include "live at <url>", "starting", "approve at <url>", "not installed" and "signed out". In an install popup, `enter` runs the command with the terminal attached and brings the dashboard back afterwards, `c` copies it and `esc` cancels. Ctrl-C while it runs goes to the install, not to Hashi. Signing an account in and installing an update step aside the same way.
 
@@ -294,8 +296,9 @@ States include "live at <url>", "starting", "approve at <url>", "not installed" 
 | Ask | `Tab` field, `←` `→` change, `Enter` new line in the prompt, `Ctrl-S` send | Choose this Hashi or a saved bridge, the agent, and (here) the account. A local prompt goes through the normal queue as the oldest active admin token, so limits and the queue apply and it shows in Requests, where its answer appears in the detail. Picking an account runs that prompt on it only. A bridge's answer opens in its own popup |
 | Edit token | `↑` `↓` field, `←` `→` project, `Enter` save | Expiry takes days from now or `never`; empty keeps it. Empty limits mean none. Uses the same update as `hashi token update` and `PATCH /v1/tokens/{id}` |
 | Accounts | `a` add, `l` sign in again, `d` disable, `e` enable, `x` remove | Adding a login account steps aside for the agent's own sign-in, as `hashi account add` does. A key account takes the key in a masked field and stores it owner-only |
-| Projects | `a` add, `e` edit, `x` remove | The same checks as `hashi project add` and `update`. Removing a project with bound tokens puts them back on their own workspace; its folder is never touched |
-| Bridges I use | `c` connect, `a` ask it, `x` forget | Names and URLs only, never tokens. Connect takes a pasted invite link and saves it as `hashi connect` does |
+| Access requests | `a` accept, `d` decline, `o` open link, `x` close link, `s` show all | Pending requests, newest first, with what each asks for; `s` adds decided and expired ones, as `hashi requests list --all`. Accept opens a form prefilled as `hashi requests accept` would fill it (for a "more" request, next to the token's access now): `↑` `↓` field, type to edit, `←` `→` the invite's validity, `Enter` accept. Decline takes an optional reason the requester sees. Open makes a link with the defaults of `hashi requests open`, closing any open one, and shows it once with a QR code when there is room: `c` copies it, `t` goes public |
+| Projects | `a` add, `e` edit, `x` remove | The same checks as `hashi project add` and `update`, with the account strategy (`←` `→`: server default, in-order, most-left, soonest-reset) and rotate at % (50 to 99, empty for the server default). Removing a project with bound tokens puts them back on their own workspace; its folder is never touched |
+| Bridges I use | `c` connect, `a` ask it, `x` forget, `r` request status | Names and URLs only, never tokens. Connect takes a pasted invite link and saves it as `hashi connect` does. Below, the requests for access this machine sent: `r` checks them as `hashi request status` does, and an accepted one is saved as a bridge |
 | Audit log | `↑` `↓`, `PgUp` `PgDn` | The last 500 entries, newest first |
 | Doctor | `u` check for updates, `r` recheck | Agents with versions, Crush, cloudflared, Tailscale and its sign-in state, accounts, the update state, the home and the resource guard |
 | Diagnostic report | `←` `→` change, `Enter` write | `include prompts` is off by default. Saves in the current folder (like `hashi report`) or in `~/.hashi/reports/`, owner-only, and shows the path with `c` to copy it |

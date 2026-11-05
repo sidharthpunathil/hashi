@@ -50,6 +50,13 @@ All notable changes to this project are documented here. The format follows [Kee
 - `hashi requests list|accept <id> [share flags]|decline <id> [--reason]` and admin `GET /v1/access-requests`, `POST /v1/access-requests/{id}/accept` and `/decline`. Accepting a new person creates a single-use invite through the invite code, prefilled with their name, agents and the link's project, with the owner's values on top; its code is derived from the pickup secret, so only the requester can collect it and the owner never handles a link. Accepting a "more" request applies the asked values with the owner's edits, as `token update` does. The decline reason is shown to the requester. Every link change, request, acceptance and decline is audited.
 - Abuse limits for access requests: submissions count against the per-address rate limit, failed code and pickup lookups are throttled like invite claims, at most 50 pending requests per link and 200 in total, 3 open per token and one an hour, a 7-day expiry, a 30-day purge of decided and expired requests by the hourly maintenance, and every field length-limited and stripped of control, bidi and zero-width characters when stored and when shown.
 - `Event::AccessRequest` is published when a request arrives (headless mode prints a line, the dashboard feed shows it), and `hashi::tui::access` has the request list, the accept and decline popups and their forms for the dashboard. The database moves to schema version 7 (version 6 is reserved).
+- Access requests in the dashboard: a Commands row "Access requests" (`hashi requests list`) lists pending requests, `s` shows all, `a` accepts through the prefilled form, `d` declines with an optional reason, `o` opens the ask-access link and shows it with `c` to copy and a QR code, and `x` closes it. The Commands tab shows the number waiting as a badge, refreshed when a request arrives and with the regular refresh. Decisions are audited as `dashboard`.
+- The Bridges I use popup lists the requests for access this machine sent, and `r` checks them as `hashi request status` does.
+- The dashboard's project form sets the account strategy (server default, in-order, most-left or soonest-reset) and rotate at % (50 to 99, empty for the server default), with errors next to the field.
+
+### Fixed
+
+- The dashboard picked up finished background work only while nothing animated, so a bridge's answer or a connect result waited until its own spinner stopped, which it never did.
 
 ## [0.2.0] - 2026-11-05
 

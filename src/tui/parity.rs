@@ -61,6 +61,35 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     ("share", Entry::Row(Action::NewInvite)),
+    ("requests list", Entry::Row(Action::AccessRequests)),
+    (
+        "requests accept",
+        Entry::InPopup {
+            row: Action::AccessRequests,
+            key: "a",
+        },
+    ),
+    (
+        "requests decline",
+        Entry::InPopup {
+            row: Action::AccessRequests,
+            key: "d",
+        },
+    ),
+    (
+        "requests open",
+        Entry::InPopup {
+            row: Action::AccessRequests,
+            key: "o",
+        },
+    ),
+    (
+        "requests close",
+        Entry::InPopup {
+            row: Action::AccessRequests,
+            key: "x",
+        },
+    ),
     (
         "invite list",
         Entry::Key {
@@ -139,6 +168,15 @@ pub const TABLE: &[(&str, Entry)] = &[
     ("ask", Entry::Row(Action::Ask)),
     ("connect", Entry::Row(Action::Connect)),
     ("remote list", Entry::Row(Action::Bridges)),
+    // Requests this machine sent; asking itself needs the link, so it
+    // stays `hashi request <link>`.
+    (
+        "request status",
+        Entry::InPopup {
+            row: Action::Bridges,
+            key: "r",
+        },
+    ),
     (
         "remote remove",
         Entry::InPopup {

@@ -1,6 +1,6 @@
 //! Key handling and actions for the dashboard's management popups: token
-//! edit, the prompt popup, accounts, projects, bridges, the audit log, the
-//! doctor, the report, updates and the listen address. Each change goes
+//! edit, the prompt popup, access requests, accounts, projects, bridges,
+//! the audit log, the doctor, the report, updates and the listen address. Each change goes
 //! through the library function the CLI uses and is audited as
 //! `dashboard`.
 
@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::access::{AcceptForm, DeclineForm, FormAction};
 use super::app::{Action, App, Done, PendingCommand, Popup, Tab};
 use super::forms::{
     self, AccountForm, AskForm, ConnectForm, EditTokenForm, FieldError, ListenForm, ProjectForm,
@@ -137,6 +138,31 @@ impl App {
                     }) if *r == remote => *answer = Some(result),
                     _ => self.notify(format!("{remote} answered; ask again to see it")),
                 },
+                Done::RequestStatus(result) => {
+                    self.request_checking = false;
+                    match result {
+                        Ok(found) => {
+                            let connected: Vec<&str> = found
+                                .iter()
+                                .filter(|c| c.state == "connected")
+                                .map(|c| c.detail.as_str())
+                                .collect();
+                            let msg = match (found.len(), connected.as_slice()) {
+                                (0, _) => "no pending requests".to_owned(),
+                                (_, []) => format!("checked {} request(s)", found.len()),
+                                (_, names) => format!("accepted; saved as {}", names.join(", ")),
+                            };
+                            for name in &connected {
+                                self.state
+                                    .bus
+                                    .log(format!("access accepted; saved as {name}"));
+                            }
+                            self.notify(msg);
+                            self.request_checks = Some(found);
+                        }
+                        Err(e) => self.notify(format!("request status failed: {e}")),
+                    }
+                }
             }
         }
         any
@@ -277,6 +303,10 @@ impl App {
                 self.open_ask(None);
                 return;
             }
+            Action::AccessRequests => Some(Popup::AccessRequests {
+                selected: 0,
+                all: false,
+            }),
             Action::Accounts => Some(Popup::Accounts { selected: 0 }),
             Action::Projects => Some(Popup::Projects { selected: 0 }),
             Action::Bridges => Some(Popup::Remotes { selected: 0 }),
@@ -439,8 +469,218 @@ impl App {
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
                 _ => Some(Popup::ConfirmUpdate),
             },
+            Popup::AccessRequests { selected, all } => self.access_key(selected, all, code),
+            Popup::AcceptRequest(mut form) => match form.on_key(key) {
+                FormAction::Edit => Some(Popup::AcceptRequest(form)),
+                FormAction::Cancel => Some(Popup::AccessRequests {
+                    selected: 0,
+                    all: false,
+                }),
+                FormAction::Submit => self.accept_request(form),
+            },
+            Popup::DeclineRequest(mut form) => match form.on_key(key) {
+                FormAction::Edit => Some(Popup::DeclineRequest(form)),
+                FormAction::Cancel => Some(Popup::AccessRequests {
+                    selected: 0,
+                    all: false,
+                }),
+                FormAction::Submit => self.decline_request(form),
+            },
+            Popup::AccessLink {
+                code: link,
+                hours,
+                project,
+            } => {
+                match code {
+                    KeyCode::Char('c') => {
+                        let url = self.access_link_url(&link);
+                        self.copy(&url, "ask-access link copied to clipboard");
+                    }
+                    // No popups from here: they would replace the link.
+                    KeyCode::Char('t') => {
+                        self.start_route(crate::server::PublicRoute::Cloudflare, false);
+                    }
+                    KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                        return Some(Popup::AccessRequests {
+                            selected: 0,
+                            all: false,
+                        });
+                    }
+                    _ => {}
+                }
+                Some(Popup::AccessLink {
+                    code: link,
+                    hours,
+                    project,
+                })
+            }
             other => Some(other),
         }
+    }
+
+    // ── access requests ────────────────────────────────────────────────────
+
+    /// The requests the access popup lists: pending ones, or all with `all`.
+    #[must_use]
+    pub fn access_rows(&self, all: bool) -> Vec<crate::store::AccessRequest> {
+        let store = &self.state.store;
+        if all {
+            crate::access::list(store)
+        } else {
+            crate::access::pending(store)
+        }
+        .unwrap_or_default()
+    }
+
+    /// The ask-access link for `code`, against the current base URL.
+    #[must_use]
+    pub fn access_link_url(&self, code: &str) -> String {
+        crate::access::link_url(&self.state.runtime.base_url(), code)
+    }
+
+    fn access_key(&mut self, mut selected: usize, mut all: bool, code: KeyCode) -> Option<Popup> {
+        let rows = self.access_rows(all);
+        if closes(code) {
+            return None;
+        }
+        if list_nav(&mut selected, rows.len(), code) {
+            return Some(Popup::AccessRequests { selected, all });
+        }
+        let row = rows.get(selected);
+        let now = now_ms();
+        match (code, row) {
+            (KeyCode::Char('a'), Some(r)) if r.is_pending(now) => {
+                match AcceptForm::new(&self.state.store, r) {
+                    Ok(form) => return Some(Popup::AcceptRequest(Box::new(form))),
+                    Err(e) => self.notify(e),
+                }
+            }
+            (KeyCode::Char('d'), Some(r)) if r.is_pending(now) => {
+                return Some(Popup::DeclineRequest(Box::new(DeclineForm::new(r))));
+            }
+            (KeyCode::Char('a' | 'd'), Some(r)) => {
+                self.notify(format!("this request is {}, not pending", r.state(now)));
+            }
+            (KeyCode::Char('o'), _) => return self.open_access_link(),
+            (KeyCode::Char('x'), _) => match crate::access::close_link(&self.state.store, ACTOR) {
+                Ok(true) => {
+                    self.state.bus.log("ask-access link closed");
+                    self.notify("closed the ask-access link");
+                }
+                Ok(false) => self.notify("no ask-access link was open"),
+                Err(e) => self.notify(format!("could not close the link: {e}")),
+            },
+            (KeyCode::Char('s'), _) => {
+                all = !all;
+                selected = 0;
+            }
+            _ => {}
+        }
+        Some(Popup::AccessRequests { selected, all })
+    }
+
+    /// Opens the ask-access link with the defaults of `hashi requests
+    /// open`, closing any open one, and shows it.
+    fn open_access_link(&mut self) -> Option<Popup> {
+        let input = crate::access::OpenLink::default();
+        match crate::access::open_link(&self.state.store, ACTOR, input) {
+            Ok((link, code)) => {
+                self.state.bus.log("ask-access link opened");
+                let hours = u32::try_from((link.expires_at - link.created_at) / 3_600_000)
+                    .unwrap_or(crate::access::DEFAULT_LINK_HOURS);
+                Some(Popup::AccessLink {
+                    code,
+                    hours,
+                    project: link.project,
+                })
+            }
+            Err(e) => {
+                self.notify(format!("could not open the link: {e}"));
+                Some(Popup::AccessRequests {
+                    selected: 0,
+                    all: false,
+                })
+            }
+        }
+    }
+
+    fn accept_request(&mut self, mut form: Box<AcceptForm>) -> Option<Popup> {
+        use crate::access::Accepted;
+        let back = Some(Popup::AccessRequests {
+            selected: 0,
+            all: false,
+        });
+        match form.submit(&self.state.store) {
+            Ok(Accepted::Invite { invite, .. }) => {
+                let name = crate::diagnostics::terminal_safe(&invite.label);
+                self.state
+                    .bus
+                    .log(format!("access accepted: {name} (invite waits for them)"));
+                self.notify(format!(
+                    "accepted {name}: they collect their invite themselves"
+                ));
+            }
+            Ok(Accepted::Token { token, changes, .. }) => {
+                let name = crate::diagnostics::terminal_safe(&token.name);
+                self.state
+                    .bus
+                    .log(format!("access accepted: {name}: {changes}"));
+                self.notify(format!("accepted {name}: {changes}"));
+            }
+            // The form keeps the error and shows it.
+            Err(_) => return Some(Popup::AcceptRequest(form)),
+        }
+        self.refresh();
+        back
+    }
+
+    fn decline_request(&mut self, mut form: Box<DeclineForm>) -> Option<Popup> {
+        match form.submit(&self.state.store) {
+            Ok(r) => {
+                let name = crate::diagnostics::terminal_safe(&r.name);
+                self.state.bus.log(format!("access declined: {name}"));
+                self.notify(format!("declined the request from {name}"));
+                self.refresh();
+                Some(Popup::AccessRequests {
+                    selected: 0,
+                    all: false,
+                })
+            }
+            Err(_) => Some(Popup::DeclineRequest(form)),
+        }
+    }
+
+    /// Checks the requests this machine sent, as `hashi request status`
+    /// does, in the background: it asks each bridge over the network.
+    fn check_requests(&mut self) {
+        if self.request_checking {
+            return;
+        }
+        let Some(home) = self.home() else {
+            self.notify("no Hashi home here");
+            return;
+        };
+        let slot = std::sync::Arc::clone(&self.done);
+        let spawned = std::thread::Builder::new()
+            .name("hashi-request-status".to_owned())
+            .spawn(move || {
+                let result = crate::access_client::check(&home).map_err(|e| format!("{e:#}"));
+                Self::finish(&slot, Done::RequestStatus(result));
+            });
+        if spawned.is_err() {
+            self.notify("could not start the check");
+        } else {
+            self.request_checking = true;
+            self.notify("checking your requests");
+        }
+    }
+
+    /// The requests this machine sent that wait for an answer.
+    #[must_use]
+    pub fn outgoing_requests(&self) -> Vec<crate::access_client::PendingRequest> {
+        self.home()
+            .and_then(|h| crate::access_client::load(&h).ok())
+            .unwrap_or_default()
     }
 
     // ── token edit ─────────────────────────────────────────────────────────
@@ -889,14 +1129,19 @@ impl App {
             _ if nav(&mut form.field, ProjectForm::FIELDS, code, |f| {
                 f == 0 && editing
             }) => {}
-            KeyCode::Left if form.field == ProjectForm::DEFAULT_AGENT => form.step(-1),
-            KeyCode::Right | KeyCode::Char(' ') if form.field == ProjectForm::DEFAULT_AGENT => {
+            KeyCode::Left if form.is_choice() => {
+                form.step(-1);
+                form.error = None;
+            }
+            KeyCode::Right | KeyCode::Char(' ') if form.is_choice() => {
                 form.step(1);
+                form.error = None;
             }
             _ => {
                 let max = match form.field {
                     0 => 32,
                     1 => 1024,
+                    ProjectForm::ROTATE_AT => 2,
                     _ => 200,
                 };
                 if let Some(text) = form.text_mut()
@@ -929,6 +1174,8 @@ impl App {
 
     fn save_project(&mut self, form: Box<ProjectForm>) -> Option<Popup> {
         let words: &[(&str, usize)] = &[
+            ("rotate", ProjectForm::ROTATE_AT),
+            ("strategy", ProjectForm::STRATEGY),
             ("name", 0),
             ("model", 5),
             ("account", 3),
@@ -946,9 +1193,10 @@ impl App {
                 form.parse_agents()?,
                 form.parse_accounts()?,
                 form.parse_models()?,
+                form.parse_rotate_at()?,
             ))
         })();
-        let (agents, accounts, models) = match parsed {
+        let (agents, accounts, models, rotate_at) = match parsed {
             Ok(v) => v,
             Err(e) => return fail(form, e),
         };
@@ -973,10 +1221,8 @@ impl App {
                 default_agent: form.default_agent,
                 models,
                 note,
-                // Strategy and threshold are set with `hashi project update`
-                // until the form grows fields for them.
-                account_strategy: None,
-                rotate_at: None,
+                account_strategy: form.strategy,
+                rotate_at,
                 created_at: now_ms(),
             };
             let path = PathBuf::from(form.path.trim());
@@ -1019,8 +1265,8 @@ impl App {
                 .then_some(form.default_agent),
             models: (models != current.models).then_some(models),
             note: (note != current.note).then(|| note.unwrap_or_default()),
-            account_strategy: None,
-            rotate_at: None,
+            account_strategy: (form.strategy != current.account_strategy).then_some(form.strategy),
+            rotate_at: (rotate_at != current.rotate_at).then_some(rotate_at),
         };
         match crate::api::apply_update(&store, home.as_deref(), current, body) {
             Ok((p, changes)) => {
@@ -1079,6 +1325,7 @@ impl App {
         }
         match (code, names.get(selected)) {
             (KeyCode::Char('c'), _) => return Some(Popup::Connect(Box::default())),
+            (KeyCode::Char('r'), _) => self.check_requests(),
             (KeyCode::Char('x'), Some(n)) => {
                 return Some(Popup::ConfirmRemoveRemote { name: n.clone() });
             }
