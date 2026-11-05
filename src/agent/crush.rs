@@ -27,9 +27,13 @@
 //! - `config/load.go` `lookupConfigs`: `.crushrc`, `crushrc`, `.crush.json`
 //!   and `crush.json` are searched upward from the working directory to the
 //!   git root, and a crushrc is executed as shell code.
-//!   [`crush_config_present`] refuses the run when any of them exists, as
-//!   does a system config at `/etc/crush/crush.json`, which could add MCP
-//!   servers or hooks that Hashi cannot turn off.
+//!   [`crush_config_present`] refuses the run when any of them exists in
+//!   the working directory or any parent up to the filesystem root (past
+//!   the git root, so the check holds whatever Crush's walk does), as does
+//!   a system config at `/etc/crush/crush.json`, which could add MCP
+//!   servers or hooks that Hashi cannot turn off. [`execute`] checks before
+//!   the version probe and again under the data directory's lock right
+//!   before each spawn that could load a config.
 //! - `CRUSH_GLOBAL_CONFIG`, `CRUSH_GLOBAL_DATA`, `CRUSH_CACHE_DIR` and
 //!   `CRUSH_SKILLS_DIR` (`config/load.go`) move every user-level file, so
 //!   each account, including `default`, keeps its config, logins and skills
@@ -68,7 +72,8 @@ use super::{AgentConfig, AgentError, AgentOutput, EnvOverride, Invocation, Usage
 pub const MIN_VERSION: (u64, u64, u64) = (0, 100, 0);
 
 /// The newest Crush release (major and minor) whose tool list Hashi has
-/// checked. Patch releases of it are accepted; anything newer is refused
+/// checked. Patch releases of it are accepted; anything newer, and any
+/// pre-release or build (a version with a `-` or `+` suffix), is refused
 /// unless the owner passes `--crush-allow-newer`.
 pub const MAX_VERIFIED: (u64, u64) = (0, 100);
 
@@ -349,27 +354,21 @@ fn session_args(data: &Path, cmd: &[&str]) -> Vec<OsString> {
     args
 }
 
-/// The first project config file found in `workdir` or a parent, up to and
-/// including the git root (the first directory holding `.git`) or, without
-/// one, the filesystem root. Crush stops at the git root, so walking past
-/// it when there is none only makes the check stricter.
+/// The first project config file found in `workdir` or any parent, all the
+/// way to the filesystem root. Crush itself stops at the git root
+/// (`config/load.go` `lookupConfigs`), but where that is depends on Crush's
+/// version and on `.git` files Hashi does not control, so the check walks
+/// further and is safe whatever Crush does. A symlink by one of the names
+/// counts, even a dangling one.
 #[must_use]
 pub fn crush_config_present(workdir: &Path) -> Option<PathBuf> {
     let start = std::path::absolute(workdir).unwrap_or_else(|_| workdir.to_path_buf());
-    let mut dir = Some(start.as_path());
-    while let Some(d) = dir {
-        for name in PROJECT_CONFIG_NAMES {
-            let path = d.join(name);
-            if std::fs::symlink_metadata(&path).is_ok() {
-                return Some(path);
-            }
-        }
-        if std::fs::symlink_metadata(d.join(".git")).is_ok() {
-            break;
-        }
-        dir = d.parent();
-    }
-    None
+    start.ancestors().find_map(|d| {
+        PROJECT_CONFIG_NAMES
+            .iter()
+            .map(|name| d.join(name))
+            .find(|path| std::fs::symlink_metadata(path).is_ok())
+    })
 }
 
 /// Refuses a run whose config Hashi does not control: a project config in
@@ -407,20 +406,26 @@ pub fn check_config(workdir: &Path, system: Option<&Path>) -> Result<(), String>
 }
 
 /// Reads `x.y.z` out of `crush --version` output such as
-/// `crush version v0.100.0`. A pre-release or build suffix is ignored.
+/// `crush version v0.100.0`: the first word that starts with a digit
+/// (after an optional `v`). A release with a pre-release or build suffix
+/// (`v0.100.1-0.20261105...`, `v0.100.0-devel+dirty`) is not a release
+/// whose tools Hashi checked, so it gives `None`, which
+/// [`check_version`] refuses unless `--crush-allow-newer` is set.
 #[must_use]
 pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    text.split_whitespace().find_map(|word| {
-        let word = word.trim_start_matches('v').trim_end_matches(',');
-        let core = word.split(['-', '+']).next()?;
-        let mut parts = core.split('.');
-        let v = (
-            parts.next()?.parse().ok()?,
-            parts.next()?.parse().ok()?,
-            parts.next()?.parse().ok()?,
-        );
-        parts.next().is_none().then_some(v)
-    })
+    let word = text
+        .split_whitespace()
+        .map(|w| w.trim_start_matches('v').trim_end_matches(','))
+        .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut parts = word.split('.');
+    let mut num = || -> Option<u64> {
+        let p = parts.next()?;
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse().ok())
+            .flatten()
+    };
+    let v = (num()?, num()?, num()?);
+    parts.next().is_none().then_some(v)
 }
 
 /// The tool gate. Crush has no command that lists its tools, so Hashi
@@ -640,6 +645,9 @@ pub async fn execute(
 
     let lock = lock_for(&data);
     let _held = lock.lock().await;
+    // Again under the lock: a config planted while the version probe ran, or
+    // while this run waited for the lock, would load in the next spawn.
+    check_config(&workdir, system_config()).map_err(AgentError::Reported)?;
 
     let before = match inv.resume {
         Some(id) => {
@@ -657,6 +665,8 @@ pub async fn execute(
         None => None,
     };
 
+    // And once more right before the run itself, after the `session show`.
+    check_config(&workdir, system_config()).map_err(AgentError::Reported)?;
     let args = build_args(cfg, inv, &data);
     let raw = runner::run_with(&cfg.bin, &args, &env, remove, &workdir, limits).await?;
     if !raw.success {
@@ -836,7 +846,7 @@ mod tests {
     #[test]
     fn versions_are_gated() {
         assert_eq!(parse_version("crush version v0.100.0"), Some((0, 100, 0)));
-        assert_eq!(parse_version("v0.100.2-nightly+abc"), Some((0, 100, 2)));
+        assert_eq!(parse_version("crush version 0.100.3,"), Some((0, 100, 3)));
         assert_eq!(parse_version("crush version devel"), None);
         assert!(check_version(Some("crush version v0.100.0"), false).is_ok());
         assert!(check_version(Some("crush version v0.100.7"), false).is_ok());
@@ -851,16 +861,42 @@ mod tests {
     }
 
     #[test]
-    fn project_config_is_found_up_to_the_git_root() {
+    fn suffixed_versions_are_refused_unless_newer_is_allowed() {
+        for v in [
+            "crush version v0.100.1-0.20261105120000-abcdef123456",
+            "crush version v0.100.0-devel+dirty",
+            "v0.100.2-nightly+abc",
+            "crush version v0.100.0+build.7",
+            "crush version v0.100.0.1",
+            "crush version v0.100.x",
+        ] {
+            assert_eq!(parse_version(v), None, "{v}");
+            let err = check_version(Some(v), false).unwrap_err();
+            assert!(err.contains("--crush-allow-newer"), "{err}");
+            assert!(check_version(Some(v), true).is_ok(), "{v}");
+        }
+    }
+
+    #[test]
+    fn project_config_is_found_in_any_parent() {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("repo");
         let work = repo.join("a").join("b");
         std::fs::create_dir_all(&work).unwrap();
         std::fs::create_dir(repo.join(".git")).unwrap();
         assert_eq!(crush_config_present(&work), None);
-        // Above the git root: Crush does not load it, and neither does the check.
-        std::fs::write(root.path().join("crush.json"), "{}").unwrap();
-        assert_eq!(crush_config_present(&work), None);
+        // Above the git root counts too, whatever Crush's own walk does.
+        let above = root.path().join("crush.json");
+        std::fs::write(&above, "{}").unwrap();
+        assert_eq!(crush_config_present(&work), Some(above.clone()));
+        std::fs::remove_file(&above).unwrap();
+        #[cfg(unix)]
+        {
+            let link = root.path().join(".crushrc");
+            std::os::unix::fs::symlink(root.path().join("missing"), &link).unwrap();
+            assert_eq!(crush_config_present(&work), Some(link.clone()));
+            std::fs::remove_file(&link).unwrap();
+        }
         for name in PROJECT_CONFIG_NAMES {
             let path = repo.join("a").join(name);
             std::fs::write(&path, "").unwrap();
@@ -881,12 +917,13 @@ mod tests {
     #[test]
     fn system_config_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let sys = root.path().join("crush.json");
-        assert!(check_config(root.path(), Some(&sys)).is_ok());
-        std::fs::write(&sys, "{}").unwrap();
+        let etc = root.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let sys = etc.join("crush.json");
         let work = root.path().join("w");
         std::fs::create_dir(&work).unwrap();
-        std::fs::create_dir(work.join(".git")).unwrap();
+        assert!(check_config(&work, Some(&sys)).is_ok());
+        std::fs::write(&sys, "{}").unwrap();
         assert!(
             check_config(&work, Some(&sys))
                 .unwrap_err()

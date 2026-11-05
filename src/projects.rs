@@ -367,20 +367,15 @@ pub fn effective(token: &Token, project: Option<&Project>) -> Effective {
 
 /// Crush's project config files. Crush can run shell code as soon as it
 /// loads one of these, so Hashi refuses to run Crush in a folder that has
-/// any of them.
-pub const CRUSH_CONFIG_FILES: [&str; 4] = [".crushrc", "crushrc", ".crush.json", "crush.json"];
+/// any of them, or under one that does.
+pub const CRUSH_CONFIG_FILES: [&str; 4] = crate::agent::crush::PROJECT_CONFIG_NAMES;
 
-/// Whether `dir` holds a Crush project config file (see
-/// [`CRUSH_CONFIG_FILES`]). A symlink by one of those names counts, even a
-/// dangling one.
-///
-/// TODO: Crush is not an agent yet. When the Crush backend lands, its runs
-/// in a project must refuse to start when this returns `true`.
+/// Whether `dir` or any parent holds a Crush project config file (see
+/// [`CRUSH_CONFIG_FILES`]): the same check every Crush run makes,
+/// [`crate::agent::crush::crush_config_present`].
 #[must_use]
 pub fn crush_config_present(dir: &Path) -> bool {
-    CRUSH_CONFIG_FILES
-        .iter()
-        .any(|name| std::fs::symlink_metadata(dir.join(name)).is_ok())
+    crate::agent::crush::crush_config_present(dir).is_some()
 }
 
 /// Encodes a model map for the database.
@@ -727,5 +722,10 @@ mod tests {
             assert!(crush_config_present(d.path()), "{name}");
         }
         assert!(!crush_config_present(&dir.path().join("missing")));
+        // A config in a parent counts, as it does for a Crush run.
+        let nested = dir.path().join("sub").join("deeper");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.path().join(".crushrc"), "echo hi").unwrap();
+        assert!(crush_config_present(&nested));
     }
 }
