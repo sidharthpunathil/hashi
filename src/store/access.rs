@@ -781,19 +781,46 @@ mod tests {
                 .unwrap(),
             AccessAdmission::TotalFull
         ));
-        assert!(matches!(
-            s.insert_access_request(&more_from(&s)).unwrap(),
-            AccessAdmission::Created(_, None)
-        ));
-        // And "more" requests have a cap of their own.
-        for _ in 1..MAX_PENDING_MORE {
-            assert!(matches!(
-                s.insert_access_request(&more_from(&s)).unwrap(),
-                AccessAdmission::Created(..)
-            ));
+        // Tokens are capped too, and each may open one "more" request an
+        // hour, so the "more" cap is reached over several rounds of every
+        // token asking once, with the clock moved on between rounds.
+        let tokens: Vec<NewAccessRequest> = (0..super::super::MAX_TOKENS)
+            .map(|_| more_from(&s))
+            .collect();
+        let mut made = 0;
+        'rounds: loop {
+            for req in &tokens {
+                if made == MAX_PENDING_MORE {
+                    break 'rounds;
+                }
+                assert!(
+                    matches!(
+                        s.insert_access_request(req).unwrap(),
+                        AccessAdmission::Created(..)
+                    ),
+                    "request {made} for more was refused"
+                );
+                made += 1;
+            }
+            s.conn()
+                .unwrap()
+                .execute(
+                    "UPDATE access_requests SET created_at = created_at - ?1 WHERE kind = 'more'",
+                    [MORE_EVERY_MS * 2],
+                )
+                .unwrap();
         }
+        // Every token now has two open, under its own limit of three, so
+        // the next one is refused only by the "more" cap.
+        s.conn()
+            .unwrap()
+            .execute(
+                "UPDATE access_requests SET created_at = created_at - ?1 WHERE kind = 'more'",
+                [MORE_EVERY_MS * 2],
+            )
+            .unwrap();
         assert!(matches!(
-            s.insert_access_request(&more_from(&s)).unwrap(),
+            s.insert_access_request(&tokens[0]).unwrap(),
             AccessAdmission::TotalFull
         ));
     }
