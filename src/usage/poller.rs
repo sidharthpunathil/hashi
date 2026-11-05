@@ -11,6 +11,11 @@
 //! A read is skipped while a run on the same account is active: Codex may
 //! refresh its token during a read, and two refreshes must never race.
 //!
+//! Remote accounts, of any agent, are read the same way and on the same
+//! cadence: `GET /v1/me` on the friend's bridge with the remote's token
+//! (see [`crate::forward::me_windows`]). Their figures have source
+//! `remote`.
+//!
 //! Nothing here logs a token. Errors are redacted before they are stored or
 //! logged.
 
@@ -165,29 +170,41 @@ impl Poller {
     }
 
     /// The accounts the background loop reads: each supported agent's
-    /// default account, and its enabled login accounts bound to a token or
-    /// project.
+    /// default account, its enabled login accounts bound to a token or
+    /// project, and every enabled remote account bound to one, whatever
+    /// its agent.
     #[must_use]
     pub fn eligible(&self) -> Vec<Key> {
         let mut out = Vec::new();
         let accounts = self.store.list_accounts().unwrap_or_default();
         let projects = self.store.list_projects().unwrap_or_default();
+        let bound = |agent: AgentKind, name: &str| {
+            self.store
+                .tokens_using_account(agent, name)
+                .is_ok_and(|n| n > 0)
+                || projects.iter().any(|p| {
+                    p.accounts
+                        .get(&agent)
+                        .is_some_and(|l| l.iter().any(|n| n == name))
+                })
+        };
         for agent in &self.agents {
             out.push((*agent, acct::DEFAULT.to_owned()));
             for a in accounts
                 .iter()
                 .filter(|a| a.agent == *agent && a.kind == AccountKind::Login && !a.disabled)
             {
-                let bound = self
-                    .store
-                    .tokens_using_account(*agent, &a.name)
-                    .is_ok_and(|n| n > 0)
-                    || projects
-                        .iter()
-                        .any(|p| p.accounts.get(agent).is_some_and(|l| l.contains(&a.name)));
-                if bound {
+                if bound(*agent, &a.name) {
                     out.push((*agent, a.name.clone()));
                 }
+            }
+        }
+        for a in accounts
+            .iter()
+            .filter(|a| a.kind == AccountKind::Remote && !a.disabled)
+        {
+            if bound(a.agent, &a.name) {
+                out.push((a.agent, a.name.clone()));
             }
         }
         out
@@ -212,17 +229,11 @@ impl Poller {
                 return Err(PollError::TooSoon(MIN_GAP.saturating_sub(last.elapsed())));
             }
         }
-        if !supports(agent) {
-            return Err(PollError::NotSupported(format!(
-                "{} has no live usage to read",
-                agent.display_name()
-            )));
-        }
-        let kind = if name == acct::DEFAULT {
-            AccountKind::Default
+        let state = if name == acct::DEFAULT {
+            None
         } else {
             match self.store.get_account(agent, name) {
-                Ok(Some(a)) => a.kind,
+                Ok(Some(a)) => Some(a),
                 Ok(None) => {
                     return Err(PollError::NotSupported(format!(
                         "no {agent} account named {name}"
@@ -233,6 +244,30 @@ impl Poller {
                         note: e.to_string(),
                         retry: MIN_GAP,
                     });
+                }
+            }
+        };
+        if let Some(a) = state.as_ref().filter(|a| a.kind == AccountKind::Remote) {
+            self.mark(&key, None);
+            let result = self.read_remote(a).await;
+            self.finish(&key, agent, name, &result);
+            return result;
+        }
+        if !supports(agent) {
+            return Err(PollError::NotSupported(format!(
+                "{} has no live usage to read",
+                agent.display_name()
+            )));
+        }
+        let kind = if name == acct::DEFAULT {
+            AccountKind::Default
+        } else {
+            match state {
+                Some(a) => a.kind,
+                None => {
+                    return Err(PollError::NotSupported(format!(
+                        "no {agent} account named {name}"
+                    )));
                 }
             }
         };
@@ -249,25 +284,83 @@ impl Poller {
             AgentKind::Claude => self.read_claude(name, kind).await,
             _ => self.read_codex(name, kind).await,
         };
-        match &result {
-            Ok(()) => {}
-            Err(PollError::Failed { note, retry }) => {
-                let note = crate::util::truncate(&crate::diagnostics::redact(note), 200);
-                tracing::info!(agent = %agent, account = %name, "usage unknown: {note}");
-                if let Err(e) = self
-                    .store
-                    .set_poll_status(agent, name, false, None, Some(&note))
-                {
-                    tracing::warn!(error = %e, "could not record a usage read");
-                }
-                self.mark(&key, Some(*retry));
+        self.finish(&key, agent, name, &result);
+        result
+    }
+
+    /// Records a failed read as the account's note and schedules the
+    /// retry, then publishes the account's usage.
+    fn finish(&self, key: &Key, agent: AgentKind, name: &str, result: &Result<(), PollError>) {
+        if let Err(PollError::Failed { note, retry }) = result {
+            let note = crate::util::truncate(&crate::diagnostics::redact(note), 200);
+            tracing::info!(agent = %agent, account = %name, "usage unknown: {note}");
+            if let Err(e) = self
+                .store
+                .set_poll_status(agent, name, false, None, Some(&note))
+            {
+                tracing::warn!(error = %e, "could not record a usage read");
             }
-            Err(_) => {}
+            self.mark(key, Some(*retry));
         }
         if let Some(hub) = self.hub.upgrade() {
             super::publish(&self.store, &self.bus, &hub, agent, name);
         }
-        result
+    }
+
+    /// Reads a remote account's `/v1/me` on the friend's bridge and keeps
+    /// what it says as the account's usage (source `remote`): the shared
+    /// headroom, or the token's own caps. The token is never stored or
+    /// logged.
+    async fn read_remote(&self, a: &crate::store::AccountState) -> Result<(), PollError> {
+        let remote = a.remote.clone().unwrap_or_default();
+        let target =
+            crate::forward::Target::load(&self.home, &remote, a.remote_agent.unwrap_or(a.agent))
+                .map_err(|why| PollError::Failed {
+                    note: format!("unknown, {why}"),
+                    retry: self.settings.interval,
+                })?;
+        let remote_agent = target.agent;
+        let me = tokio::task::spawn_blocking(move || crate::forward::read_me(&target))
+            .await
+            .unwrap_or_else(|_| {
+                Err(crate::forward::Failure::Retryable(
+                    "the usage read stopped".to_owned(),
+                ))
+            });
+        let me = me.map_err(|f| PollError::Failed {
+            note: match f {
+                crate::forward::Failure::Disabled(why) => format!("unknown, {why}"),
+                crate::forward::Failure::Limited { message, .. }
+                | crate::forward::Failure::Retryable(message)
+                | crate::forward::Failure::Failed(message) => format!("unknown, {message}"),
+                crate::forward::Failure::TimedOut => {
+                    "unknown, the bridge did not answer".to_owned()
+                }
+            },
+            retry: claude::DEFAULT_RETRY,
+        })?;
+        let reading = crate::forward::me_windows(&me, remote_agent, &remote);
+        let store_err = |e: crate::store::StoreError| PollError::Failed {
+            note: e.to_string(),
+            retry: MIN_GAP,
+        };
+        self.store
+            .replace_usage(a.agent, &a.name, &reading.windows)
+            .map_err(store_err)?;
+        let plan = if reading.shared {
+            format!("via {remote}, shared")
+        } else {
+            format!("via {remote}")
+        };
+        self.store
+            .set_poll_status(a.agent, &a.name, true, Some(&plan), reading.note.as_deref())
+            .map_err(store_err)?;
+        if let Some(until) = reading.limited_until.filter(|u| *u > now_ms()) {
+            self.store
+                .set_account_limited(a.agent, &a.name, until)
+                .map_err(store_err)?;
+        }
+        Ok(())
     }
 
     /// Records a read of `key` now; the next is after `retry`, or after the

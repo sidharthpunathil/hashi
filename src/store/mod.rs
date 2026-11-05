@@ -134,6 +134,9 @@ pub struct Request {
     /// The project its token was bound to when it was sent, or `None` for
     /// the token's own workspace.
     pub project: Option<String>,
+    /// How many bridges forwarded it here (`X-Hashi-Hops`), 0 for a prompt
+    /// sent straight to this one.
+    pub hops: u8,
 }
 
 impl Request {
@@ -514,8 +517,31 @@ ALTER TABLE projects ADD COLUMN account_strategy TEXT;
 ALTER TABLE projects ADD COLUMN rotate_at INTEGER;
 ";
 
-const MIGRATIONS: [&str; 6] = [
-    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+/// Version 7 is reserved for a parallel change and does nothing here. The
+/// next step must not depend on anything it creates.
+const SCHEMA_V7: &str = "";
+
+/// Version 8: remote accounts and shared usage. Tokens and invites gain
+/// `share_usage` (opt-in: `/v1/me` then shows the headroom of the accounts
+/// serving each agent), accounts gain the saved remote and remote agent
+/// they forward to and the reason an account was switched off on its own,
+/// requests remember how many bridges forwarded them, and `meta` keeps this
+/// bridge's instance id.
+const SCHEMA_V8: &str = r"
+ALTER TABLE tokens ADD COLUMN share_usage INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE invites ADD COLUMN share_usage INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN remote TEXT;
+ALTER TABLE accounts ADD COLUMN remote_agent TEXT;
+ALTER TABLE accounts ADD COLUMN disabled_reason TEXT;
+ALTER TABLE requests ADD COLUMN hops INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+const MIGRATIONS: [&str; 8] = [
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
 ];
 
 /// Usage of token `?1` since day start `?2` and month start `?3`. Every
@@ -531,11 +557,11 @@ const TOKEN_USAGE_SQL: &str = "SELECT
 
 const TOKEN_COLUMNS: &str = "id, name, prefix, role, session_mode, agents, expires_at, created_at, \
      last_used_at, paused, note, daily_requests, monthly_requests, daily_budget_usd, \
-     monthly_budget_usd, max_pending, accounts, project";
+     monthly_budget_usd, max_pending, accounts, project, share_usage";
 
 const REQUEST_COLUMNS: &str = "id, token_id, token_name, agent, model, message, stateful, status, \
      response, error, input_tokens, output_tokens, cost_usd, created_at, started_at, completed_at, \
-     account, accounts_tried, project";
+     account, accounts_tried, project, hops";
 
 impl Store {
     /// Opens (or creates) the database at `path`.
@@ -660,7 +686,8 @@ impl Store {
         self.conn()?.execute(
             "UPDATE tokens SET name = ?1, note = ?2, paused = ?3, expires_at = ?4,
                  daily_requests = ?5, monthly_requests = ?6, daily_budget_usd = ?7,
-                 monthly_budget_usd = ?8, max_pending = ?9, accounts = ?11, project = ?12
+                 monthly_budget_usd = ?8, max_pending = ?9, accounts = ?11, project = ?12,
+                 share_usage = ?13
              WHERE id = ?10",
             params![
                 t.name,
@@ -675,9 +702,45 @@ impl Store {
                 t.id,
                 acct::encode(&t.accounts),
                 t.project,
+                t.share_usage,
             ],
         )?;
         Ok(())
+    }
+
+    /// Sets whether `/v1/me` shows token `id` the headroom of the accounts
+    /// serving it. Returns `false` if there is no such token.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_token_share_usage(&self, id: &str, share: bool) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "UPDATE tokens SET share_usage = ?2 WHERE id = ?1",
+            params![id, share],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// This bridge's instance id, a random id made the first time it is
+    /// asked for and kept in the database. `/v1/status` shows it, so a
+    /// remote account can be refused when it points back at this bridge.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn instance_id(&self) -> Result<String> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('instance_id', ?1)
+             ON CONFLICT(key) DO NOTHING",
+            [uuid::Uuid::new_v4().simple().to_string()],
+        )?;
+        Ok(conn.query_row(
+            "SELECT value FROM meta WHERE key = 'instance_id'",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     /// A token's use in the UTC day and month containing `now_ms`. Served
@@ -784,6 +847,24 @@ impl Store {
         queue_limit: u64,
         admin_reserve: u64,
     ) -> Result<Admission> {
+        self.insert_request_forwarded(new, limits, queue_limit, admin_reserve, 0)
+    }
+
+    /// [`Store::insert_request_checked`] for a prompt that `hops` bridges
+    /// forwarded here, recorded in the same transaction so the worker that
+    /// claims it forwards it with the right count.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn insert_request_forwarded(
+        &self,
+        new: NewRequest<'_>,
+        limits: &Limits,
+        queue_limit: u64,
+        admin_reserve: u64,
+        hops: u8,
+    ) -> Result<Admission> {
         let now = now_ms();
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -826,6 +907,12 @@ impl Store {
             return Ok(Admission::QueueFull);
         }
         insert_request_row(&tx, new)?;
+        if hops > 0 {
+            tx.execute(
+                "UPDATE requests SET hops = ?2 WHERE id = ?1",
+                params![new.id, hops],
+            )?;
+        }
         tx.commit()?;
         Ok(Admission::Accepted)
     }
@@ -997,7 +1084,7 @@ impl Store {
         let sql = format!(
             "SELECT id, token_id, token_name, agent, model, substr(message, 1, {n}), stateful,
                  status, NULL, substr(error, 1, {n}), input_tokens, output_tokens, cost_usd,
-                 created_at, started_at, completed_at, account, accounts_tried, project
+                 created_at, started_at, completed_at, account, accounts_tried, project, hops
              FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?1",
             n = BRIEF_MESSAGE_CHARS
         );
@@ -1448,6 +1535,7 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
         limits: new.limits,
         accounts: new.accounts.clone(),
         project: new.project.clone(),
+        share_usage: false,
     };
     let l = token.limits;
     conn.execute(
@@ -1505,6 +1593,7 @@ fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
             },
             accounts: acct::decode(&accounts),
             project: r.get(17)?,
+            share_usage: r.get(18)?,
         })
     };
     Ok(build())
@@ -1550,6 +1639,7 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<Result<Request>> {
                 .map(str::to_owned)
                 .collect(),
             project: r.get(18)?,
+            hops: u8::try_from(r.get::<_, i64>(19)?).unwrap_or(u8::MAX),
         })
     };
     Ok(build())
@@ -1616,7 +1706,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 8);
         // Opening again is a no-op.
         drop(s);
         assert!(Store::open(&path).is_ok());
@@ -1655,7 +1745,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 2).unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 6);
+        assert_eq!(s.schema_version().unwrap(), 8);
         let conn = s.conn().unwrap();
         let mode: i64 = conn
             .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
@@ -1705,7 +1795,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 6);
+        assert_eq!(s.schema_version().unwrap(), 8);
         let t = s.get_token("t1").unwrap().unwrap();
         assert!(t.accounts.is_empty());
         assert_eq!(
@@ -1773,7 +1863,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 6);
+        assert_eq!(s.schema_version().unwrap(), 8);
         let t = s.get_token("t1").unwrap().unwrap();
         assert_eq!(t.project, None);
         assert_eq!(t.accounts[&AgentKind::Claude], ["work"]);
@@ -1846,7 +1936,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 6);
+        assert_eq!(s.schema_version().unwrap(), 8);
         // Existing projects keep the server's defaults.
         let p = s.get_project("api").unwrap().unwrap();
         assert_eq!((p.account_strategy, p.rotate_at), (None, None));

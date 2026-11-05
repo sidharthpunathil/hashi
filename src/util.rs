@@ -22,6 +22,12 @@ pub fn rfc3339(ms: i64) -> Option<String> {
         .ok()
 }
 
+/// Parses an RFC 3339 time into Unix ms, or `None` when it is not one.
+#[must_use]
+pub fn parse_rfc3339(s: &str) -> Option<i64> {
+    OffsetDateTime::parse(s.trim(), &Rfc3339).ok().map(to_ms)
+}
+
 fn to_ms(dt: OffsetDateTime) -> i64 {
     i64::try_from(dt.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
 }

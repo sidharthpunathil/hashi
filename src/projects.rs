@@ -428,6 +428,7 @@ mod tests {
             limits: Limits::default(),
             accounts,
             project: None,
+            share_usage: false,
         }
     }
 

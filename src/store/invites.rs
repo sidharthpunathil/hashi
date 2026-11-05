@@ -64,6 +64,9 @@ pub struct Invite {
     /// The project the created token is bound to. The claim page shows
     /// only this name.
     pub project: Option<String>,
+    /// Whether the created token may see the headroom of the accounts
+    /// serving it, in `/v1/me`.
+    pub share_usage: bool,
 }
 
 impl Invite {
@@ -111,7 +114,7 @@ pub enum Redeemed {
 
 const INVITE_COLUMNS: &str = "id, label, session_mode, agents, token_expires_in_days, \
      daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd, max_pending, \
-     expires_at, created_at, claimed_at, token_id, accounts, project";
+     expires_at, created_at, claimed_at, token_id, accounts, project, share_usage";
 
 impl Store {
     /// Creates an invite and returns it with its one-time code.
@@ -136,6 +139,7 @@ impl Store {
             token_id: None,
             accounts: new.accounts.clone(),
             project: new.project.clone(),
+            share_usage: false,
         };
         let l = invite.limits;
         self.conn()?.execute(
@@ -176,6 +180,20 @@ impl Store {
         let rows = stmt.query_map([], row_to_invite)?;
         rows.map(|r| r.map_err(StoreError::from).and_then(|i| i))
             .collect()
+    }
+
+    /// Sets whether the token an invite creates may see shared usage.
+    /// Returns `false` if there is no such invite.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_invite_share_usage(&self, id: &str, share: bool) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "UPDATE invites SET share_usage = ?2 WHERE id = ?1",
+            params![id, share],
+        )?;
+        Ok(n == 1)
     }
 
     /// Deletes a pending invite. Claimed invites are kept as history.
@@ -245,7 +263,7 @@ impl Store {
         if usize::try_from(tokens).unwrap_or(usize::MAX) >= super::MAX_TOKENS {
             return Ok(Redeemed::TokenLimit);
         }
-        let (token, secret) = insert_token(
+        let (mut token, secret) = insert_token(
             &tx,
             &NewToken {
                 name: invite.label.clone(),
@@ -269,6 +287,13 @@ impl Store {
         if changed != 1 {
             // Dropping the transaction rolls the new token back.
             return Ok(Redeemed::Claimed);
+        }
+        if invite.share_usage {
+            tx.execute(
+                "UPDATE tokens SET share_usage = 1 WHERE id = ?1",
+                [&token.id],
+            )?;
+            token.share_usage = true;
         }
         tx.commit()?;
         Ok(Redeemed::Token(Box::new(token), secret))
@@ -308,6 +333,7 @@ fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Result<Invite>> {
             token_id: r.get(13)?,
             accounts: acct::decode(&accounts),
             project: r.get(15)?,
+            share_usage: r.get(16)?,
         })
     };
     Ok(build())

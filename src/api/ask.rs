@@ -106,7 +106,7 @@ impl Drop for WaitSlot {
 }
 
 /// A prompt to submit, from any front end.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SubmitInput {
     /// The prompt.
     pub message: String,
@@ -114,6 +114,9 @@ pub struct SubmitInput {
     pub agent: Option<String>,
     /// Model override.
     pub model: Option<String>,
+    /// How many bridges already forwarded it (`X-Hashi-Hops`), 0 for a
+    /// prompt sent straight here.
+    pub hops: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -262,17 +265,30 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         ));
     }
     let model = eff.model(agent, input.model.as_deref());
-    if !state
-        .runtime
-        .agents
-        .iter()
-        .any(|a| a.agent == agent && a.available)
+    // A remote account runs on a friend's bridge, so the agent need not be
+    // installed here.
+    let remote = eff.accounts.get(&agent).is_some_and(|list| {
+        list.iter().any(|n| {
+            state
+                .store
+                .get_account(agent, n)
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.kind == crate::accounts::AccountKind::Remote && !a.disabled)
+        })
+    });
+    if !remote
+        && !state
+            .runtime
+            .agents
+            .iter()
+            .any(|a| a.agent == agent && a.available)
     {
         return Err(ApiError::Unavailable(agent::unavailable_message(agent)));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let admission = state.store.insert_request_checked(
+    let admission = state.store.insert_request_forwarded(
         NewRequest {
             id: &id,
             token,
@@ -283,6 +299,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         &token.limits,
         state.queue_limit,
         admin_reserve(state.queue_limit),
+        input.hops,
     )?;
     let l = token.limits;
     match admission {
@@ -393,12 +410,61 @@ pub async fn wait_until_done(
         .ok_or(ApiError::NotFound("request not found"))
 }
 
+/// The hop count of a prompt another bridge forwarded here, from
+/// [`crate::forward::HOPS_HEADER`]. A prompt past
+/// [`crate::forward::MAX_HOPS`] hops, or one whose sender
+/// ([`crate::forward::FROM_HEADER`]) is this bridge itself, is refused, so
+/// a chain of bridges cannot loop.
+///
+/// # Errors
+///
+/// `508 hop_limit` or `508 loop`, or `400` for a malformed header.
+pub fn forwarded_hops(state: &AppState, headers: &axum::http::HeaderMap) -> ApiResult<u8> {
+    let hops = match headers.get(crate::forward::HOPS_HEADER) {
+        None => 0,
+        Some(v) => v
+            .to_str()
+            .ok()
+            .and_then(|s| s.trim().parse::<u8>().ok())
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "{} must be a small number",
+                    crate::forward::HOPS_HEADER
+                ))
+            })?,
+    };
+    if hops > crate::forward::MAX_HOPS {
+        return Err(ApiError::coded(
+            StatusCode::LOOP_DETECTED,
+            "hop_limit",
+            format!(
+                "this prompt was already forwarded through {hops} bridges (at most {})",
+                crate::forward::MAX_HOPS
+            ),
+        ));
+    }
+    if let Some(from) = headers
+        .get(crate::forward::FROM_HEADER)
+        .and_then(|v| v.to_str().ok())
+        && state.store.instance_id()? == from.trim()
+    {
+        return Err(ApiError::coded(
+            StatusCode::LOOP_DETECTED,
+            "loop",
+            "this prompt was forwarded by this same bridge",
+        ));
+    }
+    Ok(hops)
+}
+
 pub(super) async fn ask(
     State(state): State<AppState>,
     Auth(token): Auth,
+    headers: axum::http::HeaderMap,
     body: Result<Json<AskBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    let hops = forwarded_hops(&state, &headers)?;
     let wait = body.wait;
     let req = submit(
         &state,
@@ -407,6 +473,7 @@ pub(super) async fn ask(
             message: body.message,
             agent: body.agent,
             model: body.model,
+            hops,
         },
     )
     .await?;
@@ -465,7 +532,68 @@ pub(super) async fn reset_session(
     Ok(Json(json!({ "ok": true, "agent": agent })))
 }
 
-/// A token's own view of its access: status, scope, limits and usage.
+/// The headroom a token with `shareUsage` sees for each agent it may use:
+/// across the accounts serving that agent for it, the most headroom left
+/// on an account that can take a run, that account's next reset and its
+/// state; or, when every one is at its limit or off, `limited` with the
+/// soonest time one comes back. Never account names, how many accounts
+/// there are, or their windows.
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub fn shared_usage(state: &AppState, token: &Token, now: i64) -> ApiResult<Value> {
+    let project = match &token.project {
+        Some(name) => state.store.get_project(name)?,
+        None => None,
+    };
+    let eff = crate::projects::effective(token, project.as_ref());
+    let rotate_at = eff
+        .rotate_at
+        .unwrap_or_else(|| state.dispatcher.usage().policy().rotate_at);
+    let mut out = serde_json::Map::new();
+    for agent in super::usable_agents(&state.store, token) {
+        let mut best: Option<crate::usage::Summary> = None;
+        let mut back: Option<i64> = None;
+        for name in crate::accounts::for_agent(&eff.accounts, agent) {
+            let row = state.store.get_account(agent, &name)?;
+            if row.as_ref().is_some_and(|a| a.disabled) {
+                continue;
+            }
+            let summary = state.store.account_summary(agent, &name, rotate_at, now)?;
+            if summary.state == crate::usage::UsageState::Limited {
+                if let Some(u) = summary.limited_until {
+                    back = Some(back.map_or(u, |b| b.min(u)));
+                }
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some(b) => summary.headroom.unwrap_or(-1.0) > b.headroom.unwrap_or(-1.0),
+            };
+            if better {
+                best = Some(summary);
+            }
+        }
+        let view = match best {
+            Some(s) => json!({
+                "headroom": s.headroom_pct(),
+                "nextReset": s.next_reset.and_then(rfc3339),
+                "state": s.state,
+            }),
+            None => json!({
+                "headroom": 0,
+                "nextReset": back.and_then(rfc3339),
+                "state": crate::usage::UsageState::Limited,
+            }),
+        };
+        out.insert(agent.as_str().to_owned(), view);
+    }
+    Ok(Value::Object(out))
+}
+
+/// A token's own view of its access: status, scope, limits and usage, and
+/// with `shareUsage` the headroom left per agent ([`shared_usage`]).
 ///
 /// # Errors
 ///
@@ -473,7 +601,7 @@ pub(super) async fn reset_session(
 pub async fn me_json(state: &AppState, token: &Token) -> ApiResult<Value> {
     let now = now_ms();
     let usage = state.store.token_usage(&token.id, now)?;
-    Ok(json!({
+    let mut v = json!({
         "name": token.name,
         "note": token.note,
         "role": token.role,
@@ -487,7 +615,13 @@ pub async fn me_json(state: &AppState, token: &Token) -> ApiResult<Value> {
         "usage": usage,
         "resets": { "day": rfc3339(next_day_utc(now)), "month": rfc3339(next_month_utc(now)) },
         "server": { "name": state.runtime.name, "version": env!("CARGO_PKG_VERSION") },
-    }))
+    });
+    if token.share_usage
+        && let Some(obj) = v.as_object_mut()
+    {
+        obj.insert("agentUsage".into(), shared_usage(state, token, now)?);
+    }
+    Ok(v)
 }
 
 pub(super) async fn me(

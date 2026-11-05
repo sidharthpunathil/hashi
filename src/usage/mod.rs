@@ -8,6 +8,9 @@
 //! - **run**: a Claude Code run's `rate_limit_event` messages.
 //! - **error**: a run that failed with the agent's limit message, which
 //!   counts as the whole window used until it resets.
+//! - **remote**: a remote account's `GET /v1/me` on the friend's bridge:
+//!   the headroom the friend shares (`shareUsage`), or else the remote
+//!   token's own request and budget caps. Read on the poll cadence.
 //!
 //! [`summarize`] folds an account's windows into a [`Summary`]: the
 //! headroom (100 minus the highest used percent), the window that binds,
@@ -125,16 +128,19 @@ pub enum Source {
     Run,
     /// A run that failed with the agent's limit message.
     Error,
+    /// A remote account's `/v1/me` on the friend's bridge.
+    Remote,
 }
 
 impl Source {
-    /// `poll`, `run` or `error`.
+    /// `poll`, `run`, `error` or `remote`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Poll => "poll",
             Self::Run => "run",
             Self::Error => "error",
+            Self::Remote => "remote",
         }
     }
 }
@@ -147,6 +153,7 @@ impl FromStr for Source {
             "poll" => Ok(Self::Poll),
             "run" => Ok(Self::Run),
             "error" => Ok(Self::Error),
+            "remote" => Ok(Self::Remote),
             other => Err(format!("unknown usage source `{other}`")),
         }
     }

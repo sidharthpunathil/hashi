@@ -88,6 +88,7 @@ function claimPage() {
       $("lifetime").textContent = p.tokenExpiresInDays ? `${p.tokenExpiresInDays} day(s) after you claim it` : "Until the owner revokes it";
       $("link-expires").textContent = when(p.linkExpiresAt);
       $("notice").textContent = p.notice;
+      show("share-usage", p.shareUsage === true);
       const setup = setupCommands(location.origin, code);
       if (setup) {
         $("setup-sh").textContent = setup.sh;
@@ -172,6 +173,15 @@ function mePage() {
       meters.append(wrap);
     }
     $("resets").textContent = `Daily limits reset ${when(m.resets.day)}. Spend is the estimate the agent reports (Claude only).`;
+    // Shown only when the bridge owner shares how much quota is left.
+    const shared = m.agentUsage && typeof m.agentUsage === "object" ? Object.entries(m.agentUsage) : [];
+    const parts = shared.map(([agent, u]) => {
+      const left = typeof u.headroom === "number" ? `${u.headroom}% left` : "unknown";
+      const reset = u.nextReset ? `, resets ${when(u.nextReset)}` : "";
+      return `${agent}: ${left} (${u.state})${reset}`;
+    });
+    $("headroom").textContent = parts.length ? `Quota left: ${parts.join("; ")}` : "";
+    show("headroom", parts.length > 0);
     show("login", false);
     show("access");
   };

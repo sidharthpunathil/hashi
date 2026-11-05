@@ -291,6 +291,7 @@ async fn ask(
             message: a.prompt,
             agent: Some(agent.as_str().to_owned()),
             model: a.model,
+            hops: 0,
         },
     )
     .await?;

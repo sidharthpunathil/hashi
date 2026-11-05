@@ -114,6 +114,11 @@ pub enum TokenCommand {
         /// with the agents both allow and accounts inside the project's.
         #[arg(long)]
         project: Option<String>,
+        /// Let the token see how much quota is left for each of its agents
+        /// (`GET /v1/me`): headroom, next reset and state only, never
+        /// account names or counts.
+        #[arg(long)]
+        share_usage: bool,
         #[command(flatten)]
         limits: LimitArgs,
     },
@@ -152,6 +157,9 @@ pub enum TokenCommand {
         /// Put the token back on its own workspace.
         #[arg(long)]
         clear_project: bool,
+        /// Show the token how much quota is left (`true`) or stop (`false`).
+        #[arg(long, value_name = "BOOL")]
+        share_usage: Option<bool>,
         #[command(flatten)]
         limits: LimitArgs,
     },
@@ -198,6 +206,10 @@ pub struct ShareArgs {
     /// Bind the token to this project. The claim page shows only its name.
     #[arg(long)]
     pub project: Option<String>,
+    /// Let the token see how much quota is left for each of its agents
+    /// (headroom, next reset and state only). The claim page says so.
+    #[arg(long)]
+    pub share_usage: bool,
     #[command(flatten)]
     pub limits: LimitArgs,
 }
@@ -264,6 +276,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             note,
             accounts,
             project,
+            share_usage,
             limits,
         } => {
             let accounts = bindings(store, AccountMap::new(), accounts)?;
@@ -290,6 +303,9 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                 project,
             };
             let (t, secret) = store.create_token(&new)?;
+            if share_usage {
+                store.set_token_share_usage(&t.id, true)?;
+            }
             store.audit("cli", "token.create", &t.name, t.role.as_str())?;
             eprintln!("created {} token `{}` ({})", t.role, t.name, t.id);
             eprintln!("store it now, it will not be shown again:");
@@ -350,6 +366,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             clear_accounts,
             project,
             clear_project,
+            share_usage,
             limits,
         } => {
             let mut t = find_token(store, &id)?;
@@ -402,6 +419,17 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     "project {}",
                     t.project.as_deref().unwrap_or(hashi::projects::DEFAULT)
                 ));
+            }
+            if let Some(share) = share_usage {
+                t.share_usage = share;
+                changes.push(
+                    if share {
+                        "usage shared"
+                    } else {
+                        "usage not shared"
+                    }
+                    .to_owned(),
+                );
             }
             if changes.is_empty() {
                 bail!("nothing to update; see `hashi token update --help`");
@@ -474,6 +502,9 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         accounts,
         project,
     })?;
+    if args.share_usage {
+        store.set_invite_share_usage(&invite.id, true)?;
+    }
     store.audit(
         "cli",
         "invite.create",
@@ -619,7 +650,8 @@ impl BinArgs {
 #[derive(Debug, Subcommand)]
 pub enum AccountCommand {
     /// Add an account: a login directory Hashi owns (signed in with the
-    /// agent's own command), or an API key.
+    /// agent's own command), an API key, or a friend's bridge you connected
+    /// to (--remote).
     Add {
         /// Agent the account is for.
         agent: AgentKind,
@@ -629,6 +661,15 @@ pub enum AccountCommand {
         /// Code only, from `claude setup-token`).
         #[arg(long)]
         kind: Option<AccountKind>,
+        /// Use the access a friend shared with you: the remote saved by
+        /// `hashi connect` (see `hashi remote list`). Runs on this account
+        /// go to their bridge.
+        #[arg(long, value_name = "REMOTE", conflicts_with_all = ["key_stdin", "key_env"])]
+        remote: Option<String>,
+        /// The agent to ask for on the remote bridge. Default: the same as
+        /// this account's.
+        #[arg(long, value_name = "AGENT", requires = "remote")]
+        remote_agent: Option<AgentKind>,
         /// Read the key from standard input; on a terminal it is not shown.
         #[arg(long, conflicts_with = "key_env")]
         key_stdin: bool,
@@ -859,6 +900,7 @@ fn sign_in(home: &Path, agent: AgentKind, name: &str, yes: bool, bins: &BinArgs)
 fn signed_in(home: &Path, agent: AgentKind, name: &str, kind: AccountKind, bin: &Path) -> String {
     match kind {
         AccountKind::Default => "-".to_owned(),
+        AccountKind::Remote => "-".to_owned(),
         AccountKind::ApiKey | AccountKind::OauthToken => {
             if acct::read_key(home, agent, name).is_ok() {
                 "key set".to_owned()
@@ -928,12 +970,30 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             agent,
             name,
             kind,
+            remote,
+            remote_agent,
             key_stdin,
             key_env,
             yes,
             bins,
         } => {
             account_name(&name)?;
+            if let Some(remote) = remote {
+                if kind.is_some_and(|k| k != AccountKind::Remote) {
+                    bail!("--remote adds a remote account; drop --kind");
+                }
+                return add_remote_account(
+                    store,
+                    home,
+                    agent,
+                    &name,
+                    &remote,
+                    remote_agent.unwrap_or(agent),
+                );
+            }
+            if kind == Some(AccountKind::Remote) {
+                bail!("a remote account needs --remote <name> (see `hashi remote list`)");
+            }
             let keyed = key_stdin || key_env.is_some();
             let kind = match kind {
                 Some(AccountKind::Default) => bail!("the default account is always there"),
@@ -1045,6 +1105,12 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     hashi::store::AccountStatus::Limited(until) => {
                         format!("limited until {}", rfc3339(until).unwrap_or_default())
                     }
+                    hashi::store::AccountStatus::Disabled => match &a.disabled_reason {
+                        Some(why) => {
+                            format!("disabled: {}", hashi::diagnostics::terminal_safe(why))
+                        }
+                        None => "disabled".to_owned(),
+                    },
                     s => s.as_str().to_owned(),
                 };
                 let used = a
@@ -1055,7 +1121,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {:<7} {}",
                     a.agent.as_str(),
                     a.name,
-                    a.kind.as_str(),
+                    kind_cell(&a),
                     signed_in(home, a.agent, &a.name, a.kind, &bins.bin(a.agent)),
                     state,
                     used,
@@ -1105,6 +1171,73 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// The `account list` kind column: the kind, and for a remote account the
+/// bridge it goes through, `remote via bob`.
+fn kind_cell(a: &hashi::store::AccountState) -> String {
+    match (&a.remote, a.remote_agent) {
+        (Some(r), Some(ra)) if ra != a.agent => format!("remote via {r} ({ra})"),
+        (Some(r), _) => format!("remote via {r}"),
+        _ => a.kind.as_str().to_owned(),
+    }
+}
+
+/// Printed whenever a remote account is added.
+pub const REMOTE_PRIVACY: &str = "privacy: the friend who runs that bridge can see every prompt sent through this account and every answer, as their claim page told you. People you share with never see that this account is remote.";
+
+/// `hashi account add <agent> <name> --remote <remote>`: an account whose
+/// runs go to a friend's bridge, through a remote saved by `hashi connect`.
+/// Refused when the remote is this same Hashi.
+fn add_remote_account(
+    store: &Store,
+    home: &Path,
+    agent: AgentKind,
+    name: &str,
+    remote: &str,
+    remote_agent: AgentKind,
+) -> Result<()> {
+    let remotes = hashi::remote::load(home)?;
+    let saved = hashi::remote::pick(&remotes, Some(remote))?;
+    if store
+        .get_account(agent, name)?
+        .is_some_and(|a| a.kind != AccountKind::Default)
+    {
+        bail!("{agent} already has an account named {name}");
+    }
+    // A remote account that points back here would only forward prompts
+    // to itself.
+    let ours = store.instance_id()?;
+    match hashi::forward::instance_id(&saved.base_url) {
+        Ok(Some(theirs)) if theirs == ours => bail!(
+            "the remote {remote} is this same Hashi; a remote account must point at a friend's bridge"
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "warning: could not reach {} to check it ({}); runs check again and refuse a loop",
+            hashi::diagnostics::terminal_safe(&saved.base_url),
+            hashi::diagnostics::terminal_safe(&e)
+        ),
+    }
+    // A row left by a limit mark on a since removed account.
+    store.remove_account(agent, name)?;
+    store.add_remote_account(agent, name, remote, remote_agent)?;
+    store.audit(
+        "cli",
+        "account.add",
+        &format!("{agent}:{name}"),
+        &format!("remote via {remote}"),
+    )?;
+    println!(
+        "added {} account {name} (remote via {remote}, {} on their bridge)",
+        agent.display_name(),
+        remote_agent.display_name()
+    );
+    println!("{REMOTE_PRIVACY}");
+    println!(
+        "use it with: hashi token update <id> --account {agent}={name}  (or --account on token create and share)"
+    );
     Ok(())
 }
 
@@ -1260,6 +1393,8 @@ fn account_usage(
         let mut head = format!("{}:{}", a.agent, a.name);
         if let Some(plan) = poll.as_ref().and_then(|p| p.plan.as_deref()) {
             head.push_str(&format!("  {plan}"));
+        } else if let Some(remote) = &a.remote {
+            head.push_str(&format!("  via {remote}"));
         }
         head.push_str(&format!("  {}", summary_cell(&summary)));
         if let Some(w) = windows.iter().max_by_key(|w| w.observed_at)

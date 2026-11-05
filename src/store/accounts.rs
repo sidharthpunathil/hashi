@@ -29,6 +29,14 @@ pub struct AccountState {
     pub last_used: Option<i64>,
     /// When it was added, Unix ms.
     pub created_at: i64,
+    /// For a remote account: the saved remote (in `remotes.json`) it
+    /// forwards to. Never its token.
+    pub remote: Option<String>,
+    /// For a remote account: the agent it asks for on that bridge.
+    pub remote_agent: Option<AgentKind>,
+    /// Why Hashi switched the account off on its own, for example because
+    /// the remote bridge paused or revoked its token. Cleared on enable.
+    pub disabled_reason: Option<String>,
 }
 
 /// Whether an account can take a run.
@@ -79,11 +87,13 @@ pub struct RemovedAccount {
     pub projects: usize,
 }
 
-const ACCOUNT_COLUMNS: &str = "agent, name, kind, disabled, limited_until, last_used, created_at";
+const ACCOUNT_COLUMNS: &str = "agent, name, kind, disabled, limited_until, last_used, created_at, \
+     remote, remote_agent, disabled_reason";
 
 fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
     let agent: String = r.get(0)?;
     let kind: String = r.get(2)?;
+    let remote_agent: Option<String> = r.get(8)?;
     let build = || -> Result<AccountState> {
         Ok(AccountState {
             agent: agent
@@ -95,6 +105,9 @@ fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
             limited_until: r.get(4)?,
             last_used: r.get(5)?,
             created_at: r.get(6)?,
+            remote: r.get(7)?,
+            remote_agent: remote_agent.and_then(|a| a.parse().ok()),
+            disabled_reason: r.get(9)?,
         })
     };
     Ok(build())
@@ -125,6 +138,54 @@ impl Store {
             "INSERT INTO accounts (agent, name, kind, created_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(agent, name) DO NOTHING",
             params![agent.as_str(), name, kind.as_str(), now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Records a new remote account: `name` for `agent`, forwarding to the
+    /// saved remote `remote` and its agent `remote_agent`. Returns `false`
+    /// if it already exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn add_remote_account(
+        &self,
+        agent: AgentKind,
+        name: &str,
+        remote: &str,
+        remote_agent: AgentKind,
+    ) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "INSERT INTO accounts (agent, name, kind, created_at, remote, remote_agent)
+             VALUES (?1, ?2, 'remote', ?3, ?4, ?5)
+             ON CONFLICT(agent, name) DO NOTHING",
+            params![
+                agent.as_str(),
+                name,
+                now_ms(),
+                remote,
+                remote_agent.as_str()
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Switches an account off on Hashi's own account, with the reason the
+    /// owner sees. Returns `false` if there is no such account.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn disable_account_because(
+        &self,
+        agent: AgentKind,
+        name: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "UPDATE accounts SET disabled = 1, disabled_reason = ?3 WHERE agent = ?1 AND name = ?2",
+            params![agent.as_str(), name, reason],
         )?;
         Ok(n == 1)
     }
@@ -169,7 +230,8 @@ impl Store {
         disabled: bool,
     ) -> Result<bool> {
         let n = self.conn()?.execute(
-            "UPDATE accounts SET disabled = ?3 WHERE agent = ?1 AND name = ?2",
+            "UPDATE accounts SET disabled = ?3, disabled_reason = NULL
+             WHERE agent = ?1 AND name = ?2",
             params![agent.as_str(), name, disabled],
         )?;
         Ok(n == 1)

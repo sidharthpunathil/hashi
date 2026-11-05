@@ -46,6 +46,11 @@ pub struct CreateTokenBody {
     /// project's, and its account lists must stay inside the project's.
     #[serde(default)]
     pub project: Option<String>,
+    /// Let the token see, in `GET /v1/me`, how much headroom the accounts
+    /// serving each of its agents have left (never their names, number or
+    /// windows). Off by default.
+    #[serde(default)]
+    pub share_usage: Option<bool>,
 }
 
 /// Body of `PATCH /v1/tokens/{id}`. Omitted fields are left as they are.
@@ -77,6 +82,9 @@ pub struct UpdateTokenBody {
     /// workspace.
     #[serde(default, deserialize_with = "present")]
     pub project: Option<Option<String>>,
+    /// Turns shared usage in `/v1/me` on or off.
+    #[serde(default)]
+    pub share_usage: Option<bool>,
 }
 
 /// The `limits` object of `PATCH /v1/tokens/{id}`.
@@ -262,6 +270,7 @@ pub(super) async fn create(
     body: Result<Json<CreateTokenBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    let share_usage = body.share_usage.unwrap_or(false);
     let mut new = validate_new_token(body)?;
     new.accounts = check_accounts(&state.store, new.accounts)?;
     super::check_binding(
@@ -273,7 +282,11 @@ pub(super) async fn create(
     if state.store.list_tokens()?.len() >= MAX_TOKENS {
         return Err(ApiError::Conflict("token limit reached, revoke one first"));
     }
-    let (token, secret) = state.store.create_token(&new)?;
+    let (mut token, secret) = state.store.create_token(&new)?;
+    if share_usage {
+        state.store.set_token_share_usage(&token.id, true)?;
+        token.share_usage = true;
+    }
     state.store.audit(
         &admin.name,
         "token.create",
@@ -351,6 +364,17 @@ pub(super) async fn update(
             "project {}",
             token.project.as_deref().unwrap_or(crate::projects::DEFAULT)
         ));
+    }
+    if let Some(share) = body.share_usage {
+        token.share_usage = share;
+        changes.push(
+            if share {
+                "usage shared"
+            } else {
+                "usage not shared"
+            }
+            .to_owned(),
+        );
     }
     if changes.is_empty() {
         return Err(ApiError::BadRequest("nothing to update".to_owned()));
@@ -464,6 +488,7 @@ mod tests {
             limits: None,
             accounts: None,
             project: None,
+            share_usage: None,
         }
     }
 

@@ -6,6 +6,7 @@ pub mod agent;
 pub mod api;
 pub mod diagnostics;
 pub mod events;
+pub mod forward;
 pub mod guard;
 pub mod install;
 pub mod maintenance;
