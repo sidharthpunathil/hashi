@@ -96,6 +96,7 @@ impl Fake {
         Sources {
             api: format!("{}/latest", self.base),
             downloads: format!("{}/dl", self.base),
+            https_only: false,
         }
     }
 
@@ -254,6 +255,7 @@ fn install_refuses_a_cargo_binary_before_any_download() {
         &fake.sources(),
         &exe,
         None,
+        false,
         &mut |_| true,
     )
     .unwrap_err();
@@ -355,11 +357,18 @@ mod end_to_end {
             return;
         };
         let mut asked = 0;
-        let out = update::install(&s.home, &s.fake.sources(), &s.exe, None, &mut |plan| {
-            asked += 1;
-            assert_eq!(plan.tag, "v99.0.0");
-            true
-        })
+        let out = update::install(
+            &s.home,
+            &s.fake.sources(),
+            &s.exe,
+            None,
+            false,
+            &mut |plan| {
+                asked += 1;
+                assert_eq!(plan.tag, "v99.0.0");
+                true
+            },
+        )
         .unwrap();
         assert_eq!(out, Outcome::Updated("v99.0.0".into()));
         assert_eq!(asked, 1);
@@ -375,18 +384,38 @@ mod end_to_end {
             return;
         };
         // The latest is older than this build, so a plain update does nothing...
-        let out = update::install(&s.home, &s.fake.sources(), &s.exe, None, &mut |_| true).unwrap();
+        let out = update::install(&s.home, &s.fake.sources(), &s.exe, None, false, &mut |_| {
+            true
+        })
+        .unwrap();
         assert!(matches!(out, Outcome::UpToDate(_)));
         assert!(exe_text(&s).contains("old"));
-        // ...but --version installs it anyway.
+        // ...and --version refuses an older one without --allow-downgrade.
         let out = update::install(
             &s.home,
             &s.fake.sources(),
             &s.exe,
             Some("0.0.1"),
+            false,
             &mut |_| true,
+        );
+        let e = format!("{:#}", out.unwrap_err());
+        assert!(e.contains("--allow-downgrade"), "{e}");
+        assert!(exe_text(&s).contains("old"));
+        let mut warned = false;
+        let out = update::install(
+            &s.home,
+            &s.fake.sources(),
+            &s.exe,
+            Some("0.0.1"),
+            true,
+            &mut |plan| {
+                warned = update::downgrade_warning(plan).is_some();
+                true
+            },
         )
         .unwrap();
+        assert!(warned);
         assert_eq!(out, Outcome::Updated("v0.0.1".into()));
         assert!(exe_text(&s).contains("hashi 0.0.1"));
     }
@@ -396,8 +425,10 @@ mod end_to_end {
         let Some(s) = setup("v99.0.0", "99.0.0", true) else {
             return;
         };
-        let err =
-            update::install(&s.home, &s.fake.sources(), &s.exe, None, &mut |_| true).unwrap_err();
+        let err = update::install(&s.home, &s.fake.sources(), &s.exe, None, false, &mut |_| {
+            true
+        })
+        .unwrap_err();
         assert!(format!("{err:#}").contains("checksum mismatch"), "{err:#}");
         assert!(exe_text(&s).contains("old"));
         assert!(home_is_clean(&s.home));
@@ -408,8 +439,10 @@ mod end_to_end {
         let Some(s) = setup("v99.0.0", "98.0.0", false) else {
             return;
         };
-        let err =
-            update::install(&s.home, &s.fake.sources(), &s.exe, None, &mut |_| true).unwrap_err();
+        let err = update::install(&s.home, &s.fake.sources(), &s.exe, None, false, &mut |_| {
+            true
+        })
+        .unwrap_err();
         assert!(format!("{err:#}").contains("expected 99.0.0"), "{err:#}");
         assert!(exe_text(&s).contains("old"));
         assert!(home_is_clean(&s.home));
@@ -421,8 +454,10 @@ mod end_to_end {
             return;
         };
         let before = s.fake.hits();
-        let out =
-            update::install(&s.home, &s.fake.sources(), &s.exe, None, &mut |_| false).unwrap();
+        let out = update::install(&s.home, &s.fake.sources(), &s.exe, None, false, &mut |_| {
+            false
+        })
+        .unwrap();
         assert_eq!(out, Outcome::Declined);
         assert_eq!(s.fake.hits(), before + 1, "only the release lookup");
         assert!(exe_text(&s).contains("old"));
@@ -436,7 +471,9 @@ mod end_to_end {
         let bindir = s.exe.parent().unwrap().to_path_buf();
         std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o555)).unwrap();
         let probe = std::fs::write(bindir.join("probe"), "x").is_ok();
-        let result = update::install(&s.home, &s.fake.sources(), &s.exe, None, &mut |_| true);
+        let result = update::install(&s.home, &s.fake.sources(), &s.exe, None, false, &mut |_| {
+            true
+        });
         std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o755)).unwrap();
         if probe {
             // Running as root: permissions do not apply.
@@ -445,5 +482,103 @@ mod end_to_end {
         let err = result.unwrap_err();
         assert!(format!("{err:#}").contains("cannot write to"), "{err:#}");
         assert_eq!(s.fake.hits(), 0);
+    }
+}
+
+// A release archive whose binary is a link must never make anything outside
+// the extract directory executable, or run it.
+#[cfg(unix)]
+mod extraction {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use hashi::update;
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// Packs what `build` puts in the inner directory as this target's
+    /// release archive.
+    fn archive(root: &Path, build: impl FnOnce(&Path)) -> Option<PathBuf> {
+        let target = update::current_target().ok()?;
+        let src = root.join("src");
+        let inner = src.join(format!("hashi-{target}"));
+        std::fs::create_dir_all(&inner).unwrap();
+        build(&inner);
+        let out = root.join("a.tar.gz");
+        let ok = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&out)
+            .arg("-C")
+            .arg(&src)
+            .arg(format!("hashi-{target}"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        Some(out)
+    }
+
+    fn victim(root: &Path) -> PathBuf {
+        let v = root.join("secret.key");
+        std::fs::write(&v, "PRIVATE KEY").unwrap();
+        std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o600)).unwrap();
+        v
+    }
+
+    fn extract(root: &Path, archive: &Path) -> anyhow::Result<PathBuf> {
+        let dest = root.join("x");
+        std::fs::create_dir_all(&dest).unwrap();
+        update::extract(archive, &dest, update::current_target().unwrap())
+    }
+
+    #[test]
+    fn a_symlinked_binary_is_refused_and_its_target_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let v = victim(root.path());
+        let Some(a) = archive(root.path(), |d| {
+            std::os::unix::fs::symlink(&v, d.join("hashi")).unwrap();
+        }) else {
+            return;
+        };
+        let e = format!("{:#}", extract(root.path(), &a).unwrap_err());
+        assert!(e.contains("not a regular file"), "{e}");
+        assert_eq!(mode(&v), 0o600);
+        // Called directly, the version check refuses a link too.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&v, &link).unwrap();
+        assert!(update::verify_binary(&link, "v9.9.9").is_err());
+        assert_eq!(mode(&v), 0o600);
+    }
+
+    #[test]
+    fn a_hard_linked_binary_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let Some(a) = archive(root.path(), |d| {
+            std::fs::write(d.join("other"), "#!/bin/sh\n").unwrap();
+            std::fs::hard_link(d.join("other"), d.join("hashi")).unwrap();
+        }) else {
+            return;
+        };
+        let e = format!("{:#}", extract(root.path(), &a).unwrap_err());
+        assert!(e.contains("hard link"), "{e}");
+    }
+
+    #[test]
+    fn a_regular_binary_is_copied_and_the_copy_made_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let Some(a) = archive(root.path(), |d| {
+            std::fs::write(d.join("hashi"), "#!/bin/sh\necho hashi 9.9.9\n").unwrap();
+            std::fs::set_permissions(d.join("hashi"), std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+        }) else {
+            return;
+        };
+        let bin = extract(root.path(), &a).unwrap();
+        let name = bin.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(".staged-"), "{name}");
+        assert_eq!(mode(&bin), 0o755);
+        update::verify_binary(&bin, "v9.9.9").unwrap();
     }
 }

@@ -137,7 +137,11 @@ struct UpdateArgs {
     /// Install this release (for example v0.3.0) instead of the latest.
     #[arg(long, conflicts_with = "check")]
     version: Option<String>,
-    /// Do not ask for confirmation.
+    /// Let --version install a release older than this one. Its database
+    /// support may be older too: back up the Hashi home first.
+    #[arg(long, requires = "version")]
+    allow_downgrade: bool,
+    /// Do not ask for confirmation. Required without a terminal.
     #[arg(long, short = 'y')]
     yes: bool,
 }
@@ -917,10 +921,12 @@ fn update(home: &std::path::Path, args: &UpdateArgs) -> Result<()> {
     }
     let exe = std::env::current_exe().context("finding the running binary")?;
     server::prepare_home(home)?;
-    let tty = std::io::stdin().is_terminal();
-    let yes = args.yes;
+    let ask = update::needs_prompt(args.yes, std::io::stdin().is_terminal())?;
     let mut confirm = |plan: &update::Plan| {
-        if yes || !tty {
+        if let Some(warning) = update::downgrade_warning(plan) {
+            eprintln!("{warning}");
+        }
+        if !ask {
             return true;
         }
         eprint!(
@@ -932,7 +938,14 @@ fn update(home: &std::path::Path, args: &UpdateArgs) -> Result<()> {
         std::io::stdin().read_line(&mut answer).is_ok()
             && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     };
-    match update::install(home, &sources, &exe, args.version.as_deref(), &mut confirm)? {
+    match update::install(
+        home,
+        &sources,
+        &exe,
+        args.version.as_deref(),
+        args.allow_downgrade,
+        &mut confirm,
+    )? {
         Outcome::UpToDate(tag) => {
             println!("hashi v{current} is already the latest release ({tag})");
         }
@@ -1204,5 +1217,23 @@ mod tests {
         assert_eq!((port, from), (8000, hashi::settings::Source::Saved));
         let (port, from) = hashi::settings::resolve(serve(&["-p", "9001"]).0, saved.port, 7878);
         assert_eq!((port, from), (9001, hashi::settings::Source::Override));
+    }
+
+    #[test]
+    fn allow_downgrade_needs_a_version() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["hashi", "update"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).map(|c| match c.command {
+                Some(Command::Update(u)) => (u.version, u.allow_downgrade),
+                other => panic!("unexpected parse: {other:?}"),
+            })
+        };
+        assert!(parse(&["--allow-downgrade"]).is_err());
+        assert_eq!(
+            parse(&["--version", "v0.1.0", "--allow-downgrade"]).unwrap(),
+            (Some("v0.1.0".to_owned()), true)
+        );
+        assert_eq!(parse(&[]).unwrap(), (None, false));
     }
 }

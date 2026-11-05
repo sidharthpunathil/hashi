@@ -150,9 +150,16 @@ fn user_agent() -> String {
 }
 
 fn agent(timeout: Duration) -> ureq::Agent {
+    agent_with(timeout, false)
+}
+
+/// An agent that, with `https_only`, refuses any `http://` URL, also one a
+/// redirect points at.
+fn agent_with(timeout: Duration, https_only: bool) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent(user_agent())
+        .https_only(https_only)
         .build()
         .into()
 }
@@ -448,8 +455,8 @@ pub fn verify_sha256(bytes: &[u8], sha_file: &str) -> Result<()> {
 
 // ── download, extract, verify ──────────────────────────────────────────────
 
-fn download(url: &str) -> Result<Vec<u8>> {
-    let mut resp = agent(DOWNLOAD_TIMEOUT)
+fn download(url: &str, https_only: bool) -> Result<Vec<u8>> {
+    let mut resp = agent_with(DOWNLOAD_TIMEOUT, https_only)
         .get(url)
         .call()
         .with_context(|| format!("downloading {url}"))?;
@@ -473,12 +480,14 @@ fn tar_program() -> PathBuf {
     }
 }
 
-/// Extracts `archive` into `dest` with the system `tar` and returns the
-/// path of the Hashi binary inside it.
+/// Extracts `archive` into `dest` with the system `tar` and returns a
+/// private copy of the Hashi binary in it, ready to run. The archive's entry
+/// must be a regular file in a real directory: a symlink or hard link is
+/// refused, so nothing outside `dest` is ever made executable or run.
 ///
 /// # Errors
 ///
-/// Fails when `tar` fails or the binary is missing.
+/// Fails when `tar` fails, or the binary is missing or not a regular file.
 pub fn extract(archive: &Path, dest: &Path, target: &str) -> Result<PathBuf> {
     let flags = if archive.extension().is_some_and(|e| e == "zip") {
         "-xf"
@@ -502,13 +511,50 @@ pub fn extract(archive: &Path, dest: &Path, target: &str) -> Result<PathBuf> {
     // Unix archives hold `hashi-<target>/hashi`; the Windows zip holds the
     // files at its root.
     let bin = binary_name(target);
-    [
+    let entry = [
         dest.join(format!("hashi-{target}")).join(bin),
         dest.join(bin),
     ]
     .into_iter()
-    .find(|p| p.is_file())
-    .ok_or_else(|| anyhow!("the archive has no {bin}"))
+    .find(|p| std::fs::symlink_metadata(p).is_ok())
+    .ok_or_else(|| anyhow!("the archive has no {bin}"))?;
+    let meta = std::fs::symlink_metadata(&entry)?;
+    let in_real_dir = entry
+        .parent()
+        .and_then(|d| std::fs::symlink_metadata(d).ok())
+        .is_some_and(|m| m.file_type().is_dir());
+    if !meta.file_type().is_file() || !in_real_dir {
+        bail!(
+            "the archive's {bin} is not a regular file (a link or a directory); refusing to install"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            bail!("the archive's {bin} is a hard link; refusing to install");
+        }
+    }
+    stage(&entry, dest, bin)
+}
+
+/// Copies `entry` to a new file in `dest` and makes that copy executable.
+/// `create_new` refuses a name that already exists, a link included.
+fn stage(entry: &Path, dest: &Path, bin: &str) -> Result<PathBuf> {
+    let staged = dest.join(format!(".staged-{bin}"));
+    let mut from = std::fs::File::open(entry).context("opening the extracted binary")?;
+    let mut to = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .with_context(|| format!("creating {}", staged.display()))?;
+    std::io::copy(&mut from, &mut to).context("copying the extracted binary")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        to.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(staged)
 }
 
 /// Runs `bin --version` and checks that it reports `expected` (a tag such
@@ -516,8 +562,15 @@ pub fn extract(archive: &Path, dest: &Path, target: &str) -> Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// Fails when the binary does not run, hangs, or reports another version.
+/// Fails when the binary is not a regular file, does not run, hangs, or
+/// reports another version.
 pub fn verify_binary(bin: &Path, expected: &str) -> Result<()> {
+    if !std::fs::symlink_metadata(bin)?.file_type().is_file() {
+        bail!(
+            "{} is not a regular file; refusing to run it",
+            bin.display()
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -650,6 +703,9 @@ pub struct Sources {
     pub api: String,
     /// Download base: `<base>/<tag>/<asset>`.
     pub downloads: String,
+    /// Refuse plain `http://` downloads, redirects included. Only tests
+    /// against a local server turn this off.
+    pub https_only: bool,
 }
 
 impl Default for Sources {
@@ -657,6 +713,7 @@ impl Default for Sources {
         Self {
             api: LATEST_URL.to_owned(),
             downloads: DOWNLOAD_BASE.to_owned(),
+            https_only: true,
         }
     }
 }
@@ -670,6 +727,39 @@ pub struct Plan {
     pub asset: String,
     /// Binary to replace.
     pub exe: PathBuf,
+    /// The tag is older than this build (allowed by `--allow-downgrade`).
+    pub downgrade: bool,
+}
+
+/// Whether `hashi update` should ask before installing: not with `--yes`,
+/// and never silently without a terminal.
+///
+/// # Errors
+///
+/// Fails without a terminal and without `--yes`.
+pub fn needs_prompt(yes: bool, tty: bool) -> Result<bool> {
+    if yes {
+        Ok(false)
+    } else if tty {
+        Ok(true)
+    } else {
+        bail!("not updating without a terminal to confirm on; pass --yes")
+    }
+}
+
+/// The warning shown before installing `plan` when it is a downgrade.
+#[must_use]
+pub fn downgrade_warning(plan: &Plan) -> Option<String> {
+    plan.downgrade.then(|| {
+        format!(
+            "warning: {} is older than this hashi (v{}). This build keeps its database at \
+             schema version {}, which an older release may not support: it may refuse to \
+             start, or misread the database. Back up the Hashi home first.",
+            plan.tag,
+            env!("CARGO_PKG_VERSION"),
+            crate::store::SCHEMA_VERSION
+        )
+    })
 }
 
 /// How `hashi update` ended.
@@ -709,19 +799,22 @@ impl Drop for TempDir {
     }
 }
 
-/// Updates `exe` to `version` (a tag), or to the latest release. `confirm`
-/// is asked once everything is known and before anything is downloaded.
+/// Updates `exe` to `version` (a tag), or to the latest release. A version
+/// older than this build needs `allow_downgrade`. `confirm` is asked once
+/// everything is known and before anything is downloaded.
 ///
 /// # Errors
 ///
 /// Fails when the binary was installed by Cargo, its directory is not
-/// writable, the platform has no build, or a download, checksum, extraction
-/// or replace step fails. The binary is untouched on failure.
+/// writable, the platform has no build, `version` is older than this build
+/// without `allow_downgrade`, or a download, checksum, extraction or replace
+/// step fails. The binary is untouched on failure.
 pub fn install(
     home: &Path,
     sources: &Sources,
     exe: &Path,
     version: Option<&str>,
+    allow_downgrade: bool,
     confirm: &mut dyn FnMut(&Plan) -> bool,
 ) -> Result<Outcome> {
     let target = current_target()?;
@@ -741,11 +834,20 @@ pub fn install(
             latest.tag
         }
     };
+    let current = current_version();
+    let downgrade = Version::parse(&tag).is_some_and(|v| v < current);
+    if downgrade && !allow_downgrade {
+        bail!(
+            "{tag} is older than this hashi (v{}); pass --allow-downgrade to install it anyway",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     let asset = asset_name(target);
     let plan = Plan {
         tag: tag.clone(),
         asset: asset.clone(),
         exe: exe.to_path_buf(),
+        downgrade,
     };
     if !confirm(&plan) {
         return Ok(Outcome::Declined);
@@ -753,8 +855,8 @@ pub fn install(
 
     let base = sources.downloads.trim_end_matches('/');
     let url = format!("{base}/{tag}/{asset}");
-    let archive = download(&url)?;
-    let sums = download(&format!("{url}.sha256"))
+    let archive = download(&url, sources.https_only)?;
+    let sums = download(&format!("{url}.sha256"), sources.https_only)
         .context("could not download the checksum; refusing to install")?;
     verify_sha256(&archive, &String::from_utf8_lossy(&sums))?;
 
@@ -886,6 +988,42 @@ mod tests {
         );
         assert!(verify_sha256(data, "not a hash").is_err());
         assert!(verify_sha256(data, "").is_err());
+    }
+
+    #[test]
+    fn without_a_terminal_only_yes_updates() {
+        assert!(needs_prompt(false, false).is_err());
+        assert!(!needs_prompt(true, false).unwrap());
+        assert!(needs_prompt(false, true).unwrap());
+        assert!(!needs_prompt(true, true).unwrap());
+    }
+
+    #[test]
+    fn the_download_agent_refuses_plain_http() {
+        let e = download("http://127.0.0.1:9/hashi.tar.gz", true).unwrap_err();
+        assert!(format!("{e:#}").to_lowercase().contains("https"), "{e:#}");
+    }
+
+    #[test]
+    fn a_downgrade_warns_about_the_schema() {
+        let plan = Plan {
+            tag: "v0.0.1".into(),
+            asset: "a".into(),
+            exe: PathBuf::from("hashi"),
+            downgrade: true,
+        };
+        let w = downgrade_warning(&plan).unwrap();
+        assert!(
+            w.contains(&format!("schema version {}", crate::store::SCHEMA_VERSION)),
+            "{w}"
+        );
+        assert!(
+            downgrade_warning(&Plan {
+                downgrade: false,
+                ..plan
+            })
+            .is_none()
+        );
     }
 
     #[test]
