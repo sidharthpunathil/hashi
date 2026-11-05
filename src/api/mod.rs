@@ -584,7 +584,7 @@ async fn root(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "name": "hashi",
         "version": env!("CARGO_PKG_VERSION"),
-        "description": "A bridge to Claude Code and Codex",
+        "description": "A bridge to the coding agents on this machine",
         "baseUrl": state.runtime.base_url(),
         "docs": "POST /v1/ask with Authorization: Bearer <token>",
     }))

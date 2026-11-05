@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-/// Hashi: a bridge that turns your local Claude Code and Codex CLIs into an HTTP API.
+/// Hashi: a bridge that turns your local coding-agent CLIs into an HTTP API.
 #[derive(Debug, Parser)]
 #[command(name = "hashi", version, about, long_about = None)]
 struct Cli {

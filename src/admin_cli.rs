@@ -18,7 +18,7 @@ pub struct LimitArgs {
     /// Prompts per UTC month.
     #[arg(long)]
     pub monthly_requests: Option<u32>,
-    /// Estimated spend per UTC day in USD (Claude reports cost; Codex does not).
+    /// Estimated spend per UTC day in USD (only Claude Code and opencode report cost).
     #[arg(long, value_parser = parse_budget)]
     pub daily_budget: Option<f64>,
     /// Estimated spend per UTC month in USD.

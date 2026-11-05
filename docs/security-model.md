@@ -1,0 +1,59 @@
+# Security model
+
+Anyone holding a token can make your agent run on your computer with your account, so Hashi starts locked down. To report a vulnerability, see [SECURITY.md](../SECURITY.md).
+
+## What a token can and cannot do
+
+- **Tokens.** Each token is 256 bits from the OS random generator, prefixed `hashi_` so secret scanners recognise it. The database stores only its SHA-256 hash.
+- **Least privilege.** Tokens default to the `user` role. Only admins manage tokens, and the last admin cannot be revoked. Requests are visible only to the token that made them, and to admins.
+- **No shell.** Agents are started directly with an argument vector. The prompt always follows `--`, so it can never be read as a flag. Model names and session ids are checked against a strict alphabet and may not start with `-`. Prompts starting with `/` get a leading space, so a shared user cannot reach commands like `/config` in Claude Code, Gemini CLI or Qwen Code.
+- **Sandboxed by default.** Each agent runs headless with its safest unattended setting (see the [agent table](../README.md#supported-agents)). Loosen Claude Code and Codex deliberately with `--claude-permission-mode` and `--codex-sandbox`. The other defaults cannot be changed from Hashi in this release.
+- **Agents run as you.** An agent run uses your account and can read whatever your account can, unless the agent's own sandbox stops it. That includes `~/.hashi/hashi.db` (every token's prompts and answers) and other tokens' workspaces; only opencode is confined to its workspace. Share agents that can read files only with people you would trust with them. Hashi removes its own settings (`HASHI_*` variables and `TUNNEL_TOKEN`) from every agent's environment, so a run never sees your tunnel token.
+- **Isolated workspaces.** Every token gets its own working directory for each agent, under `~/.hashi/workspaces/<token>/<agent>/`. One agent with write access can never plant project config (such as hook definitions in `.claude/settings.json` or `.gemini/settings.json`) that a different agent would load.
+
+## Protecting your machine
+
+People you share with decide when agents start, so Hashi keeps your computer usable whatever a token does.
+
+- Runs across all agents are capped (`--max-running`, from your memory and CPU count).
+- Before a run starts, Hashi checks that it would still leave your memory reserve free and that the disk under `~/.hashi` is above its floor. If not, the request waits in the queue, keeping its place, and the dashboard shows "held: low memory" or "held: disk".
+- While a run is active, its whole process tree (the agent plus every shell or server it spawns) is measured every 2 seconds and stopped above `--run-memory-limit`, failing that request with the measured and allowed sizes.
+- Each run gets its own process group on Unix and a Job Object on Windows, so a timeout, memory stop, output overflow or shutdown kills everything it started. Agents run at a lower priority (`--nice 10`).
+- Processes that detach into their own session are tracked too: their memory counts against the run, and they are killed when it ends. On Linux Hashi adopts orphaned descendants so none can slip away; on macOS one that detaches and loses its parent between two samples can still escape.
+- Memory and disk figures appear only in the dashboard and the admin `GET /v1/stats`, never on `/v1/status`, `/v1/me` or MCP.
+
+## Fair sharing and limits
+
+- Bodies over 64 KB and prompts over 32 KB are refused, and a request body must arrive within 10 seconds. One client address may hold at most an eighth of the connection slots (at least 4; loopback, where tunnels and proxies connect from, is exempt).
+- Each run is killed after its timeout (default 5 minutes) or once it prints more than 10 MB. There is a per-token rate limit (default 60 requests per minute) and a global queue cap.
+- A `user` token created without limits may have 3 prompts in flight; invite tokens get the same default and admins stay unlimited. In-flight, queue, request and spend caps are checked in the same database transaction as the insert, so a burst of parallel requests cannot slip past them.
+- The last 10% of the queue (at least 5 slots, at most half) is kept for admin tokens, so a flood from people you share with never locks you out.
+- Each token may hold at most 4 long polls open at once; a further wait answers at once with the current state (202).
+- Invalid tokens and invite codes are rate limited per client address, but a valid token or code always works, so someone guessing from your address cannot lock you out.
+
+## Withdrawing access
+
+Pause holds queued prompts, expiry fails them, and revoke stops running ones at once (within about 2 seconds when you revoke from another terminal with `hashi token revoke`). Revoking deletes the token's workspace, removing symlinks without following them. Every token and invite change is audited. Hashi shuts down cleanly on Ctrl-C, `SIGTERM`, `SIGHUP` and Windows console close, and a second signal exits at once.
+
+## Network edge
+
+- Hashi binds to `127.0.0.1` by default. Binding elsewhere without TLS prints a warning. Tunnels and HTTPS are opt-in.
+- Cross-origin browser access is off unless you list an origin with `--cors-origin`. Over plain HTTP, Hashi answers only requests whose `Host` is an IP address, `localhost`, the `--public-url` host or a name you list with `--allowed-host`, which stops DNS rebinding.
+- The claim and My access pages load nothing from other sites, run no inline script, and are served with a strict Content Security Policy, `no-referrer` and `no-store`, so an invite code never leaks through a Referer header or a cache.
+- Invite links are single-use, hashed, short-lived and create `user` tokens only.
+
+## Data on disk
+
+- On macOS and Linux, `~/.hashi` is created `0700`, and the database with its WAL and SHM files, logs, crash files, the tunnel config and `hashi report` output are `0600`. On Windows, Hashi limits the home to you, SYSTEM and Administrators; a `HASHI_HOME` outside your profile prints a warning, and Hashi refuses to start there if it cannot set that.
+- Errors returned to token holders have your home directory replaced by `~` and secrets masked. Headless output strips control and text-direction characters, so agent output cannot rewrite your terminal.
+- Every hour Hashi deletes finished requests older than `--retention-days` (never the current month, which monthly caps count from), plus audit records and claimed or expired invites older than the retention period or 90 days, whichever is longer, and returns the freed pages to the disk.
+
+## Supply chain
+
+`unsafe` is forbidden in the crate. CI runs `cargo deny` for advisories, licences and sources. Release builds grant write access only to the publish job and pin every action to a commit. The installers verify each archive's SHA-256 checksum and refuse to install when it does not match.
+
+## Known limits
+
+- Spend caps count only finished runs, so prompts already running can take a token past its budget by up to `maxPending` runs.
+- Codex still loads your global MCP servers; turn one off with `enabled = false` under its `[mcp_servers.<name>]` table in `~/.codex/config.toml`.
+- On Windows, npm installs agents such as Codex as `.cmd` shims. Rust refuses to pass arguments it cannot quote safely for a batch file, so a prompt with a line break fails with a clear error, and very long prompts can exceed the 8191-character command line. Hashi stops such shims from picking up a `node` program planted in the workspace.

@@ -431,7 +431,7 @@ Not recommended for now: **Crush** (no JSON, auto-approves everything, loads wor
 
 ## Flags Hashi pins for shared tokens
 
-Added after the security audit. Each is overridden when the owner passes the same flag through the agent's extra arguments.
+Added after the security audit. The runner skips each one when the agent's extra arguments already set the same flag; those arguments are not yet exposed as a Hashi setting.
 
 - **Claude Code**: `--setting-sources user` (project and local settings in a token's workspace never load), `--strict-mcp-config` (no MCP servers unless `--mcp-config <file>` lists them), and `--disallowedTools WebFetch` when no `--permission-mode` is set. A leading `/` in the prompt gets a space, as for Gemini and Qwen.
 - **Gemini CLI and Qwen Code**: `--allowed-mcp-server-names ""`, which their own source treats as "allow no MCP servers". Qwen also gets `QWEN_CODE_MEMORY_BASE_DIR` inside the workspace. Neither CLI has a flag to skip project-level settings, and `web_fetch` stays denied only while the owner has no user-level allow rule for it.
