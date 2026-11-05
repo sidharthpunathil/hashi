@@ -75,7 +75,7 @@ pub struct Running {
 
 impl Running {
     /// Stops all tasks and the tunnel, waits for them to finish and removes
-    /// `<home>/public-url`.
+    /// `<home>/public-url` and `<home>/server.pid`.
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         while self.tasks.join_next().await.is_some() {}
@@ -83,6 +83,44 @@ impl Running {
         if let Err(e) = remove_public_url(&self.home) {
             tracing::warn!(error = %e, "could not remove {PUBLIC_URL_FILE}");
         }
+        if let Err(e) = remove_server_pid(&self.home) {
+            tracing::warn!(error = %e, "could not remove {PID_FILE}");
+        }
+    }
+}
+
+/// File in the data directory holding the running server's process id, so
+/// `hashi uninstall` can refuse while a server is up.
+pub const PID_FILE: &str = "server.pid";
+
+/// Records this process as the running server, readable only by its owner.
+///
+/// # Errors
+///
+/// Fails if the file cannot be written.
+pub fn write_server_pid(home: &Path) -> std::io::Result<()> {
+    crate::diagnostics::write_private(&home.join(PID_FILE), &format!("{}\n", std::process::id()))
+}
+
+/// The process id a server recorded, if the file holds one.
+#[must_use]
+pub fn read_server_pid(home: &Path) -> Option<u32> {
+    std::fs::read_to_string(home.join(PID_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Removes the recorded process id. A missing file is not an error.
+///
+/// # Errors
+///
+/// Fails if the file exists but cannot be removed.
+pub fn remove_server_pid(home: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(home.join(PID_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -614,6 +652,9 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
     };
     if let Err(e) = recorded {
         bus.log(format!("could not record the public URL: {e}"));
+    }
+    if let Err(e) = write_server_pid(&cfg.home) {
+        bus.log(format!("could not record the server pid: {e}"));
     }
     let dispatcher = Dispatcher::new();
     let guard = Arc::new(ResourceGuard::new(

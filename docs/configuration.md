@@ -57,6 +57,7 @@ hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
 hashi update                               # install the latest release (--check, --version v0.3.0, --yes)
+hashi uninstall                            # remove the binary and ~/.hashi (--dry-run, --keep-data, --yes)
 ```
 
 The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (`hashi/0.2.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`.

@@ -63,7 +63,7 @@ irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | 
 
 The script downloads the build for your platform, checks its SHA-256 checksum and installs it without admin rights: to `~/.local/bin` on macOS and Linux, or `%LOCALAPPDATA%\Programs\hashi\bin` on Windows (added to your PATH). It ends by running `hashi doctor` to show which agents it found.
 
-Other options: download an archive from the [releases page](https://github.com/sidharthpunathil/hashi/releases) (Linux x64 and ARM64, macOS Intel and Apple Silicon, Windows x64), run `cargo install --locked --git https://github.com/sidharthpunathil/hashi` (Rust 1.89 or later), or pin a version with `HASHI_VERSION` ([installer options](docs/configuration.md#installer-options)). To uninstall, delete the `hashi` binary, and `~/.hashi` if you also want to remove tokens and history.
+Other options: download an archive from the [releases page](https://github.com/sidharthpunathil/hashi/releases) (Linux x64 and ARM64, macOS Intel and Apple Silicon, Windows x64), run `cargo install --locked --git https://github.com/sidharthpunathil/hashi` (Rust 1.89 or later), or pin a version with `HASHI_VERSION` ([installer options](docs/configuration.md#installer-options)). To uninstall, run `hashi uninstall`.
 
 **Updating:** run `hashi update` (the dashboard shows when a new release is out); a Cargo install updates with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`.
 

@@ -46,6 +46,7 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls", "jso
 nix = { version = "0.31.3", default-features = false, features = ["signal", "process", "resource"] }
 
 [target.'cfg(windows)'.dependencies]
+self-replace = "1.5.1"
 win32job = "2.0.3"
 
 [dev-dependencies]

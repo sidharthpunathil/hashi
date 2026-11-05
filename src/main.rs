@@ -63,6 +63,21 @@ enum Command {
     Report(ReportArgs),
     /// Download the latest release and replace this binary.
     Update(UpdateArgs),
+    /// Remove the binary and everything Hashi stored on this machine.
+    Uninstall(UninstallArgs),
+}
+
+#[derive(Debug, Args)]
+struct UninstallArgs {
+    /// Keep the data directory; remove only the binary and the PATH entry.
+    #[arg(long)]
+    keep_data: bool,
+    /// Do not ask for confirmation.
+    #[arg(long, short = 'y')]
+    yes: bool,
+    /// List what would be removed and stop.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -355,6 +370,14 @@ async fn main() -> Result<()> {
         Some(Command::Update(args)) => {
             tokio::task::spawn_blocking(move || update(&home, &args)).await?
         }
+        Some(Command::Uninstall(args)) => hashi::uninstall::run(
+            &home,
+            hashi::uninstall::Options {
+                keep_data: args.keep_data,
+                yes: args.yes,
+                dry_run: args.dry_run,
+            },
+        ),
     }
 }
 
