@@ -960,13 +960,7 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|tk| {
             let role = match tk.role {
-                Role::Admin => Span::styled(
-                    " admin ",
-                    Style::new()
-                        .fg(t::INK.into())
-                        .bg(t::ORCHID.into())
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Role::Admin => Span::styled("★ admin", t::bold(t::ORCHID)),
                 Role::User => Span::styled(" user ", plain()),
             };
             let mode = match tk.session_mode {
