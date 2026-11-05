@@ -6,6 +6,12 @@ use serde::Deserialize;
 
 use super::{AgentConfig, AgentError, AgentOutput, Invocation, Usage};
 
+/// Extra environment for the child. None needed.
+#[must_use]
+pub fn env(_workdir: &std::path::Path) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Builds the argument vector for a Claude Code print-mode run.
 #[must_use]
 pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {

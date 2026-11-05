@@ -6,6 +6,12 @@ use serde_json::Value;
 
 use super::{AgentConfig, AgentError, AgentOutput, Invocation, Usage};
 
+/// Extra environment for the child. None needed.
+#[must_use]
+pub fn env(_workdir: &std::path::Path) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Builds the argument vector for a Codex `exec` run.
 ///
 /// The sandbox is passed as a `-c` override because `codex exec resume` does

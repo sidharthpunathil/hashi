@@ -33,9 +33,10 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
-const INSTRUCTIONS: &str = "Hashi relays prompts to Claude Code and Codex running on its \
-owner's machine. Use ask_claude or ask_codex to send a prompt and get the answer. Long runs \
-return a request id: pass it to get_result. my_usage shows this token's limits and usage.";
+const INSTRUCTIONS: &str = "Hashi relays prompts to coding agents (such as Claude Code and \
+Codex) running on its owner's machine. Use an ask_<agent> tool to send a prompt and get the \
+answer. Long runs return a request id: pass it to get_result. my_usage shows this token's \
+limits and usage.";
 
 /// A JSON-RPC error: code and message.
 struct RpcError(i64, String);
@@ -149,11 +150,15 @@ fn initialize(params: &Value) -> Value {
 
 // ── tools ──────────────────────────────────────────────────────────────────
 
-fn ask_tool_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "ask_claude",
-        AgentKind::Codex => "ask_codex",
-    }
+fn ask_tool_name(agent: AgentKind) -> String {
+    format!("ask_{}", agent.as_str())
+}
+
+/// The agent behind an `ask_<agent>` tool name.
+fn ask_tool_agent(name: &str) -> Option<AgentKind> {
+    let agent: AgentKind = name.strip_prefix("ask_")?.parse().ok()?;
+    // Only canonical names, so `ask_claude-code` is not a second spelling.
+    (ask_tool_name(agent) == name).then_some(agent)
 }
 
 fn tools(token: &Token) -> Vec<Value> {
@@ -227,8 +232,11 @@ fn args<T: serde::de::DeserializeOwned>(raw: Option<Value>) -> Result<T, RpcErro
 
 async fn call_tool(state: &AppState, token: &Token, call: CallParams) -> Result<Value, RpcError> {
     let outcome = match call.name.as_str() {
-        "ask_claude" => ask(state, token, AgentKind::Claude, args(call.arguments)?).await,
-        "ask_codex" => ask(state, token, AgentKind::Codex, args(call.arguments)?).await,
+        name if ask_tool_agent(name).is_some() => {
+            let agent =
+                ask_tool_agent(name).ok_or_else(|| RpcError::invalid_params("unknown tool"))?;
+            ask(state, token, agent, args(call.arguments)?).await
+        }
         "get_result" => get_result(state, token, args(call.arguments)?).await,
         "my_usage" => api::me_json(state, token).await.map(|v| {
             (

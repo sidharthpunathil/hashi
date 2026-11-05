@@ -80,6 +80,18 @@ struct AgentArgs {
     /// Path to the Codex executable.
     #[arg(long, env = "HASHI_CODEX_BIN")]
     codex_bin: Option<PathBuf>,
+    /// Path to the Gemini CLI executable.
+    #[arg(long, env = "HASHI_GEMINI_BIN")]
+    gemini_bin: Option<PathBuf>,
+    /// Path to the opencode executable.
+    #[arg(long, env = "HASHI_OPENCODE_BIN")]
+    opencode_bin: Option<PathBuf>,
+    /// Path to the Qwen Code executable.
+    #[arg(long, env = "HASHI_QWEN_BIN")]
+    qwen_bin: Option<PathBuf>,
+    /// Path to the Cursor CLI executable (`cursor-agent` or `agent`).
+    #[arg(long, env = "HASHI_CURSOR_BIN")]
+    cursor_bin: Option<PathBuf>,
     /// Maximum agentic turns per Claude request.
     #[arg(long, default_value_t = 10, env = "HASHI_MAX_TURNS")]
     max_turns: u32,
@@ -101,6 +113,10 @@ impl AgentArgs {
                 let custom = match kind {
                     AgentKind::Claude => self.claude_bin.clone(),
                     AgentKind::Codex => self.codex_bin.clone(),
+                    AgentKind::Gemini => self.gemini_bin.clone(),
+                    AgentKind::Opencode => self.opencode_bin.clone(),
+                    AgentKind::Qwen => self.qwen_bin.clone(),
+                    AgentKind::Cursor => self.cursor_bin.clone(),
                 };
                 if let Some(bin) = custom {
                     cfg.bin = bin;
@@ -483,18 +499,17 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
 
 async fn doctor(args: &AgentArgs) -> Result<()> {
     println!("\n  ✦ hashi doctor\n");
-    let mut ok = true;
+    let mut found = 0;
     for info in server::discover_agents(&args.configs()).await {
         match &info.version {
-            Some(v) => println!("  ✓ {:<12} {v}  ({})", info.agent.display_name(), info.path),
-            None => {
-                ok = false;
-                println!(
-                    "  ✗ {:<12} not found at {}",
-                    info.agent.display_name(),
-                    info.path
-                );
+            Some(v) => {
+                found += 1;
+                println!("  ✓ {:<12} {v}  ({})", info.agent.display_name(), info.path);
             }
+            None => println!(
+                "  · {:<12} not installed (optional)",
+                info.agent.display_name()
+            ),
         }
     }
     match hashi::tunnel::locate() {
@@ -505,8 +520,14 @@ async fn doctor(args: &AgentArgs) -> Result<()> {
         ),
     }
     println!();
-    if !ok {
-        println!("  At least one agent is missing. Hashi still runs; requests to it return 503.\n");
+    if found == 0 {
+        println!(
+            "  No coding agent found. Install one (for example Claude Code or Codex) and sign in.\n"
+        );
+    } else {
+        println!(
+            "  Agents that are not installed answer 503; install one any time and restart Hashi.\n"
+        );
     }
     Ok(())
 }

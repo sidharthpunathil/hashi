@@ -204,7 +204,10 @@ fn overview_shows_brand_agents_and_stats() {
     assert!(out.contains("trycloudflare.com"));
     assert!(out.contains("the bridge"));
     assert!(out.contains("Claude Code"));
-    assert!(out.contains("not installed"));
+    assert!(
+        !out.contains("not installed"),
+        "only installed agents get cards"
+    );
     assert!(out.contains("in flight"));
     assert!(out.contains("http://127.0.0.1:7878"));
 }
@@ -546,4 +549,52 @@ fn tokens_table_shows_status_and_usage() {
     // The fixture's admin sent three prompts today and has no daily cap.
     let admin_row = out.lines().find(|l| l.contains(" admin ")).unwrap();
     assert!(admin_row.contains(" 3 "));
+}
+
+fn with_agents(installed: &[AgentKind]) -> AppState {
+    let mut st = state();
+    let agents = AgentKind::ALL
+        .into_iter()
+        .map(|agent| AgentInfo {
+            agent,
+            available: installed.contains(&agent),
+            version: installed.contains(&agent).then(|| "1.0.0".to_owned()),
+            path: agent.binary_name().to_owned(),
+        })
+        .collect();
+    st.runtime = Arc::new(Runtime {
+        started: Instant::now(),
+        local_url: "http://127.0.0.1:7878".into(),
+        public_url: RwLock::new(None),
+        agents,
+        name: "Hashi".into(),
+    });
+    st
+}
+
+#[test]
+fn overview_falls_back_to_claude_and_codex_when_nothing_is_installed() {
+    let mut app = App::new(with_agents(&[]), None, false);
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("Claude Code") && out.contains("Codex"));
+    assert_eq!(out.matches("not installed").count(), 2);
+}
+
+#[test]
+fn overview_shows_a_card_per_installed_agent() {
+    let installed = [
+        AgentKind::Claude,
+        AgentKind::Gemini,
+        AgentKind::Opencode,
+        AgentKind::Qwen,
+    ];
+    let mut app = App::new(with_agents(&installed), None, false);
+    let out = draw(&mut app, 160, 44);
+    for agent in installed {
+        assert!(
+            out.contains(agent.display_name()),
+            "missing card for {agent}"
+        );
+    }
+    assert!(!out.contains("Cursor CLI"));
 }

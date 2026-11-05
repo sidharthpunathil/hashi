@@ -1,11 +1,19 @@
 //! Coding agent backends.
 //!
-//! Each backend is split into two pure halves, argument construction and output
-//! parsing, plus the shared [`runner`] that owns the child process. Keeping the
-//! halves pure makes them trivial to test against recorded fixtures.
+//! Each backend is split into pure halves, argument construction, extra
+//! environment and output parsing, plus the shared [`runner`] that owns the
+//! child process. Keeping them pure makes them easy to test against fixtures.
+//!
+//! Adding a backend: add a variant to [`AgentKind`] (and its entries in the
+//! `impl` below), create `src/agent/<name>.rs` with `build_args`, `env` and
+//! `parse_output`, and wire it into [`execute`].
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
+pub mod gemini;
+pub mod opencode;
+pub mod qwen;
 pub mod runner;
 
 use std::ffi::OsString;
@@ -26,11 +34,26 @@ pub enum AgentKind {
     Claude,
     /// OpenAI's Codex CLI (`codex`).
     Codex,
+    /// Google's Gemini CLI (`gemini`).
+    Gemini,
+    /// opencode (`opencode`).
+    Opencode,
+    /// Alibaba's Qwen Code (`qwen`).
+    Qwen,
+    /// Cursor's CLI agent (`cursor-agent`, also shipped as `agent`).
+    Cursor,
 }
 
 impl AgentKind {
     /// Every supported agent, in display order.
-    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+    pub const ALL: [Self; 6] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Gemini,
+        Self::Opencode,
+        Self::Qwen,
+        Self::Cursor,
+    ];
 
     /// Stable lowercase identifier used in the API and database.
     #[must_use]
@@ -38,6 +61,10 @@ impl AgentKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Opencode => "opencode",
+            Self::Qwen => "qwen",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -47,13 +74,32 @@ impl AgentKind {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Gemini => "Gemini CLI",
+            Self::Opencode => "opencode",
+            Self::Qwen => "Qwen Code",
+            Self::Cursor => "Cursor CLI",
         }
     }
 
-    /// Executable name looked up on `PATH`.
+    /// Executable names looked up on `PATH`, most specific first.
+    #[must_use]
+    pub const fn binary_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["claude"],
+            Self::Codex => &["codex"],
+            Self::Gemini => &["gemini"],
+            Self::Opencode => &["opencode"],
+            Self::Qwen => &["qwen"],
+            // `agent` is Cursor's newer name, but it is generic enough that the
+            // specific legacy name is tried first.
+            Self::Cursor => &["cursor-agent", "agent"],
+        }
+    }
+
+    /// The primary executable name.
     #[must_use]
     pub const fn binary_name(self) -> &'static str {
-        self.as_str()
+        self.binary_names()[0]
     }
 }
 
@@ -65,7 +111,7 @@ impl fmt::Display for AgentKind {
 
 /// Error returned when parsing an unknown agent name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown agent `{0}` (expected `claude` or `codex`)")]
+#[error("unknown agent `{0}` (expected claude, codex, gemini, opencode, qwen or cursor)")]
 pub struct UnknownAgent(pub String);
 
 impl FromStr for AgentKind {
@@ -75,6 +121,10 @@ impl FromStr for AgentKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" | "claude_code" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
+            "gemini" | "gemini-cli" | "gemini_cli" => Ok(Self::Gemini),
+            "opencode" | "open-code" => Ok(Self::Opencode),
+            "qwen" | "qwen-code" | "qwen_code" => Ok(Self::Qwen),
+            "cursor" | "cursor-agent" | "cursor_agent" | "cursor-cli" => Ok(Self::Cursor),
             other => Err(UnknownAgent(other.to_owned())),
         }
     }
@@ -100,7 +150,11 @@ impl AgentConfig {
     #[must_use]
     pub fn default_for(kind: AgentKind) -> Self {
         Self {
-            bin: locate(kind.binary_name()).unwrap_or_else(|| PathBuf::from(kind.binary_name())),
+            bin: kind
+                .binary_names()
+                .iter()
+                .find_map(|name| locate(name))
+                .unwrap_or_else(|| PathBuf::from(kind.binary_name())),
             max_turns: 10,
             permission_mode: None,
             sandbox: "read-only".to_owned(),
@@ -193,14 +247,22 @@ pub async fn execute(
     workdir: &Path,
     limits: Limits,
 ) -> Result<AgentOutput, AgentError> {
-    let args: Vec<OsString> = match kind {
-        AgentKind::Claude => claude::build_args(cfg, inv),
-        AgentKind::Codex => codex::build_args(cfg, inv),
+    let (args, env): (Vec<OsString>, Vec<(String, String)>) = match kind {
+        AgentKind::Claude => (claude::build_args(cfg, inv), claude::env(workdir)),
+        AgentKind::Codex => (codex::build_args(cfg, inv), codex::env(workdir)),
+        AgentKind::Gemini => (gemini::build_args(cfg, inv), gemini::env(workdir)),
+        AgentKind::Opencode => (opencode::build_args(cfg, inv), opencode::env(workdir)),
+        AgentKind::Qwen => (qwen::build_args(cfg, inv), qwen::env(workdir)),
+        AgentKind::Cursor => (cursor::build_args(cfg, inv), cursor::env(workdir)),
     };
-    let raw = runner::run(&cfg.bin, &args, workdir, limits).await?;
+    let raw = runner::run(&cfg.bin, &args, &env, workdir, limits).await?;
     let parsed = match kind {
         AgentKind::Claude => claude::parse_output(&raw.stdout),
         AgentKind::Codex => codex::parse_output(&raw.stdout),
+        AgentKind::Gemini => gemini::parse_output(&raw.stdout),
+        AgentKind::Opencode => opencode::parse_output(&raw.stdout),
+        AgentKind::Qwen => qwen::parse_output(&raw.stdout),
+        AgentKind::Cursor => cursor::parse_output(&raw.stdout),
     };
     match parsed {
         Ok(out) => Ok(out),
@@ -317,8 +379,22 @@ mod tests {
     }
 
     #[test]
+    fn every_agent_round_trips_through_its_name() {
+        for kind in AgentKind::ALL {
+            assert_eq!(kind.as_str().parse::<AgentKind>(), Ok(kind));
+            assert!(!kind.binary_names().is_empty());
+        }
+    }
+
+    #[test]
+    fn cursor_prefers_its_specific_binary_name() {
+        assert_eq!(AgentKind::Cursor.binary_names(), ["cursor-agent", "agent"]);
+        assert_eq!("cursor-agent".parse::<AgentKind>(), Ok(AgentKind::Cursor));
+    }
+
+    #[test]
     fn agent_kind_rejects_unknown() {
-        assert!("gemini".parse::<AgentKind>().is_err());
+        assert!("copilot".parse::<AgentKind>().is_err());
     }
 
     #[test]

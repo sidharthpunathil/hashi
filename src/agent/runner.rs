@@ -52,6 +52,7 @@ pub struct RawOutput {
 pub async fn run(
     bin: &Path,
     args: &[OsString],
+    env: &[(String, String)],
     workdir: &Path,
     limits: Limits,
 ) -> Result<RawOutput, AgentError> {
@@ -60,6 +61,7 @@ pub async fn run(
         .current_dir(workdir)
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -143,6 +145,7 @@ mod tests {
         let out = run(
             Path::new("/bin/sh"),
             &sh("echo hi; echo oops >&2"),
+            &[],
             Path::new("."),
             Limits::default(),
         )
@@ -154,14 +157,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_passes_extra_environment() {
+        let env = [("HASHI_TEST_VAR".to_owned(), "bridged".to_owned())];
+        let out = run(
+            Path::new("/bin/sh"),
+            &sh("printf %s \"$HASHI_TEST_VAR\""),
+            &env,
+            Path::new("."),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.stdout, "bridged");
+    }
+
+    #[tokio::test]
     async fn run_kills_child_after_timeout() {
         let limits = Limits {
             timeout: Duration::from_millis(100),
             ..Limits::default()
         };
-        let err = run(Path::new("/bin/sh"), &sh("sleep 5"), Path::new("."), limits)
-            .await
-            .unwrap_err();
+        let err = run(
+            Path::new("/bin/sh"),
+            &sh("sleep 5"),
+            &[],
+            Path::new("."),
+            limits,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, AgentError::Timeout(_)));
     }
 
@@ -174,6 +198,7 @@ mod tests {
         let err = run(
             Path::new("/bin/sh"),
             &sh("printf '%064d' 0"),
+            &[],
             Path::new("."),
             limits,
         )
@@ -186,6 +211,7 @@ mod tests {
     async fn run_reports_missing_binary() {
         let err = run(
             Path::new("/nonexistent/agent"),
+            &[],
             &[],
             Path::new("."),
             Limits::default(),

@@ -53,44 +53,43 @@ impl Tab {
     }
 }
 
-/// Which agents a new token may use.
+/// Which agents a new token may use: every agent, or exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentChoice {
-    /// Claude Code and Codex.
-    Both,
-    /// Claude Code only.
-    Claude,
-    /// Codex only.
-    Codex,
-}
+pub struct AgentChoice(pub Option<AgentKind>);
 
 impl AgentChoice {
-    const ALL: [Self; 3] = [Self::Both, Self::Claude, Self::Codex];
+    /// Every agent Hashi supports.
+    pub const EVERY: Self = Self(None);
+
+    fn options() -> Vec<Self> {
+        std::iter::once(Self::EVERY)
+            .chain(AgentKind::ALL.into_iter().map(|a| Self(Some(a))))
+            .collect()
+    }
 
     fn next(self) -> Self {
         self.shift(1)
     }
 
     fn shift(self, by: isize) -> Self {
-        let i = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);
-        Self::ALL[cycle(i, Self::ALL.len(), by)]
+        let options = Self::options();
+        let i = options.iter().position(|a| *a == self).unwrap_or(0);
+        options[cycle(i, options.len(), by)]
     }
 
     /// Label for the form.
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Both => "claude + codex",
-            Self::Claude => "claude only",
-            Self::Codex => "codex only",
+    pub fn label(self) -> String {
+        match self.0 {
+            None => "all agents".to_owned(),
+            Some(agent) => format!("{} only", agent.as_str()),
         }
     }
 
     fn agents(self) -> Vec<AgentKind> {
-        match self {
-            Self::Both => AgentKind::ALL.to_vec(),
-            Self::Claude => vec![AgentKind::Claude],
-            Self::Codex => vec![AgentKind::Codex],
+        match self.0 {
+            None => AgentKind::ALL.to_vec(),
+            Some(agent) => vec![agent],
         }
     }
 }
@@ -122,7 +121,7 @@ impl TokenForm {
             field: 0,
             role: Role::User,
             mode: SessionMode::Stateless,
-            agents: AgentChoice::Both,
+            agents: AgentChoice::EVERY,
             error: None,
         }
     }
@@ -186,7 +185,7 @@ impl ShareForm {
         Self {
             label: String::new(),
             field: 0,
-            agents: AgentChoice::Both,
+            agents: AgentChoice::EVERY,
             mode: SessionMode::Stateless,
             daily: 0,
             budget: 0,
@@ -1003,6 +1002,27 @@ impl App {
             .filter_map(|r| r.started_at)
             .min()
             .and_then(|s| u64::try_from(now - s).ok())
+    }
+
+    /// Agents to show on the overview: the installed ones, or Claude Code and
+    /// Codex when none are, so a fresh install still shows what to expect.
+    #[must_use]
+    pub fn shown_agents(&self) -> Vec<AgentKind> {
+        let installed: Vec<AgentKind> = AgentKind::ALL
+            .into_iter()
+            .filter(|a| {
+                self.state
+                    .runtime
+                    .agents
+                    .iter()
+                    .any(|i| i.agent == *a && i.available)
+            })
+            .collect();
+        if installed.is_empty() {
+            vec![AgentKind::Claude, AgentKind::Codex]
+        } else {
+            installed
+        }
     }
 
     /// Recent completed durations for `agent`, oldest first, for sparklines.

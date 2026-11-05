@@ -314,7 +314,7 @@ async fn ask_rejects_bad_input() {
     let token = h.user_token(json!({})).await;
     let cases = [
         json!({"message": ""}),
-        json!({"message": "hi", "agent": "gemini"}),
+        json!({"message": "hi", "agent": "copilot"}),
         json!({"message": "hi", "model": "--dangerously-skip-permissions"}),
         json!({"message": "hi", "surprise": true}),
         json!({"message": "x".repeat(33 * 1024)}),

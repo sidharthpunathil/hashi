@@ -96,20 +96,29 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled("  to your coding agents", t::muted()),
     ]));
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{} ", t::agent_glyph(AgentKind::Claude)),
-            t::fg(t::agent_color(AgentKind::Claude)),
-        ),
-        Span::styled("Claude Code", plain()),
-        Span::styled("  ⇄  ", t::fg(t::DUSK)),
-        Span::styled(
-            format!("{} ", t::agent_glyph(AgentKind::Codex)),
-            t::fg(t::agent_color(AgentKind::Codex)),
-        ),
-        Span::styled("Codex", plain()),
-        Span::styled(format!("   v{}", env!("CARGO_PKG_VERSION")), t::muted()),
-    ]));
+    let shown = app.shown_agents();
+    let mut brand_line = Vec::new();
+    for (i, agent) in shown.iter().take(3).enumerate() {
+        if i > 0 {
+            brand_line.push(Span::styled("  ⇄  ", t::fg(t::DUSK)));
+        }
+        brand_line.push(Span::styled(
+            format!("{} ", t::agent_glyph(*agent)),
+            t::fg(t::agent_color(*agent)),
+        ));
+        brand_line.push(Span::styled(agent.display_name(), plain()));
+    }
+    if shown.len() > 3 {
+        brand_line.push(Span::styled(
+            format!("  +{} more", shown.len() - 3),
+            t::muted(),
+        ));
+    }
+    brand_line.push(Span::styled(
+        format!("   v{}", env!("CARGO_PKG_VERSION")),
+        t::muted(),
+    ));
+    lines.push(Line::from(brand_line));
     frame.render_widget(Paragraph::new(lines), brand);
 
     frame.render_widget(Paragraph::new(status_lines(app)), status);
@@ -136,7 +145,10 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
         TunnelState::Down(why) => Span::styled(truncate(why, 40), t::fg(t::ROSE)),
     };
     let mut agents = vec![Span::styled("agents  ", t::muted())];
-    for info in &rt.agents {
+    let shown = app.shown_agents();
+    // Names for up to three agents; beyond that, glyphs keep the line short.
+    let compact = shown.len() > 3;
+    for info in rt.agents.iter().filter(|i| shown.contains(&i.agent)) {
         let (mark, style) = if info.available {
             ("✓", t::fg(t::MINT))
         } else {
@@ -146,7 +158,9 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
             format!("{} ", t::agent_glyph(info.agent)),
             t::fg(t::agent_color(info.agent)),
         ));
-        agents.push(Span::styled(format!("{} ", info.agent), plain()));
+        if !compact {
+            agents.push(Span::styled(format!("{} ", info.agent), plain()));
+        }
         agents.push(Span::styled(format!("{mark}   "), style));
     }
     vec![
@@ -312,20 +326,33 @@ fn panel<'a>(title: &'a str, accent: Rgb) -> Block<'a> {
 // ── overview ───────────────────────────────────────────────────────────────
 
 fn render_overview(app: &App, frame: &mut Frame, area: Rect) {
+    let shown = app.shown_agents();
+    // Up to three cards per row; a second row when more agents are installed.
+    let rows = shown.len().div_ceil(3).max(1);
+    let card_h: u16 = if rows == 1 { 9 } else { 7 };
+    let rows_u16 = u16::try_from(rows).unwrap_or(1);
     let [tiles, agents, bottom] = Layout::vertical([
         Constraint::Length(4),
-        Constraint::Length(9),
+        Constraint::Length(card_h * rows_u16),
         Constraint::Fill(1),
     ])
     .areas(area);
 
     render_tiles(app, frame, tiles);
 
-    let [claude, codex] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
-        .spacing(1)
-        .areas(agents);
-    render_agent(app, frame, claude, AgentKind::Claude);
-    render_agent(app, frame, codex, AgentKind::Codex);
+    let per_row = shown.len().div_ceil(rows).max(1);
+    let row_areas = Layout::vertical(vec![Constraint::Length(card_h); rows]).split(agents);
+    for (row, chunk) in shown.chunks(per_row).enumerate() {
+        let Some(row_area) = row_areas.get(row) else {
+            break;
+        };
+        let cells = Layout::horizontal(vec![Constraint::Fill(1); chunk.len()])
+            .spacing(1)
+            .split(*row_area);
+        for (agent, cell) in chunk.iter().zip(cells.iter()) {
+            render_agent(app, frame, *cell, *agent);
+        }
+    }
 
     let [throughput, activity] =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Fill(1)])
@@ -1402,7 +1429,7 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
             form_text(&form.label, f(0), "alice", tick),
         ),
         form_error(form.error.as_ref(), W + 2),
-        form_field(f(1), "agents", W, form_toggle(form.agents.label(), f(1))),
+        form_field(f(1), "agents", W, form_toggle(&form.agents.label(), f(1))),
         form_field(f(2), "session", W, form_toggle(form.mode.as_str(), f(2))),
         form_field(
             f(3),
@@ -1458,7 +1485,7 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
         form_error(form.error.as_ref(), W + 2),
         form_field(f(1), "role", W, form_toggle(form.role.as_str(), f(1))),
         form_field(f(2), "session", W, form_toggle(form.mode.as_str(), f(2))),
-        form_field(f(3), "agents", W, form_toggle(form.agents.label(), f(3))),
+        form_field(f(3), "agents", W, form_toggle(&form.agents.label(), f(3))),
         Line::raw(""),
         Line::from(Span::styled(
             match form.mode {

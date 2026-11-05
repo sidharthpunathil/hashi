@@ -79,6 +79,10 @@ pub const fn agent_color(agent: AgentKind) -> Rgb {
     match agent {
         AgentKind::Claude => PINK,
         AgentKind::Codex => Rgb(140, 170, 255),
+        AgentKind::Gemini => Rgb(110, 200, 255),
+        AgentKind::Opencode => Rgb(255, 196, 120),
+        AgentKind::Qwen => Rgb(180, 150, 255),
+        AgentKind::Cursor => Rgb(200, 204, 214),
     }
 }
 
@@ -88,6 +92,10 @@ pub const fn agent_glyph(agent: AgentKind) -> &'static str {
     match agent {
         AgentKind::Claude => "✻",
         AgentKind::Codex => "◈",
+        AgentKind::Gemini => "✧",
+        AgentKind::Opencode => "▣",
+        AgentKind::Qwen => "◉",
+        AgentKind::Cursor => "▲",
     }
 }
 

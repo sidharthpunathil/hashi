@@ -311,7 +311,7 @@ mod tests {
         let t = validate_new_token(body(" bot ")).unwrap();
         assert_eq!(
             (t.name.as_str(), t.role, t.agents.len()),
-            ("bot", Role::User, 2)
+            ("bot", Role::User, AgentKind::ALL.len())
         );
     }
 
