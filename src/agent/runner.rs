@@ -419,9 +419,16 @@ pub async fn run_with(
     Ok(RawOutput {
         success: status.success(),
         status: status.to_string(),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: into_text(stdout),
+        stderr: into_text(stderr),
     })
+}
+
+/// Decodes captured output like [`String::from_utf8_lossy`], but reuses the
+/// buffer when it is valid UTF-8 (the usual case), so a large output is not
+/// held twice.
+fn into_text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 async fn read_capped<R: AsyncRead + Unpin>(reader: R, max: usize) -> Result<Vec<u8>, AgentError> {
@@ -481,6 +488,27 @@ mod env_tests {
         ] {
             assert!(!is_hashi_secret(OsStr::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn output_is_decoded_like_from_utf8_lossy() {
+        for bytes in [
+            b"plain ascii".to_vec(),
+            "caf\u{e9} \u{1f980}".as_bytes().to_vec(),
+            b"bad \xff byte \xc3".to_vec(),
+            Vec::new(),
+        ] {
+            let expected = String::from_utf8_lossy(&bytes).into_owned();
+            assert_eq!(into_text(bytes), expected);
+        }
+    }
+
+    #[test]
+    fn valid_output_keeps_its_buffer() {
+        let bytes = b"{\"type\":\"result\"}".to_vec();
+        let ptr = bytes.as_ptr();
+        let text = into_text(bytes);
+        assert_eq!(text.as_ptr(), ptr);
     }
 
     #[test]
