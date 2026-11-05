@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a1aafc-c38b-7d83-ad09-745cc785e5de"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.4` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"Your access token could not be refreshed. Please log out and sign in again."}
+{"type":"turn.failed","error":{"message":"Your access token could not be refreshed. Please log out and sign in again."}}

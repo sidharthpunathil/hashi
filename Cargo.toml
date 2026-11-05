@@ -1,0 +1,60 @@
+[package]
+name = "hashi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "A bridge that turns your local Claude Code and Codex CLIs into an authenticated HTTP API, with a live terminal dashboard."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/sidharthpunathil/hashi"
+homepage = "https://github.com/sidharthpunathil/hashi"
+keywords = ["claude", "codex", "ai", "api", "tui"]
+categories = ["command-line-utilities", "web-programming::http-server"]
+exclude = [".github/", ".claude/", ".agents/", "skills-lock.json"]
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crossterm = { version = "0.29.0", features = ["event-stream", "osc52"] }
+dirs = "7.0.0"
+futures = "0.3.34"
+hex = "0.4.3"
+rand = "0.10.3"
+ratatui = "0.30.2"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "macros"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-util = "0.7.20"
+tower-http = { version = "0.7.1", features = ["limit", "cors", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+redundant_clone = "warn"
+needless_collect = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

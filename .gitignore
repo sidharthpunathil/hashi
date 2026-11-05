@@ -1,0 +1,42 @@
+# Build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local Hashi data (database, workspaces, logs) when HASHI_HOME points inside the repo
+/.hashi/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Profiling and coverage
+*.profraw
+*.profdata
+/coverage/
+lcov.info
+tarpaulin-report.html
+
+# Fuzzing artifacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local agent tooling (skills and lockfiles installed per developer)
+.claude/
+.agents/
+skills-lock.json

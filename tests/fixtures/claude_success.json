@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1645,"num_turns":1,"result":"pong","stop_reason":"end_turn","session_id":"7a9ad98b-c4ef-44fe-ad92-7fb361223d15","total_cost_usd":0.1711266,"usage":{"input_tokens":2,"cache_creation_input_tokens":21083,"cache_read_input_tokens":11873,"output_tokens":4}}
