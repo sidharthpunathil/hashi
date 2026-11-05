@@ -546,6 +546,11 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
         block = block.title(
             Line::from(Span::styled(format!(" {} ", truncate(&v, 28)), t::muted())).right_aligned(),
         );
+        if crate::verified::newer_than_verified(agent, &v).is_some() {
+            block = block.title_bottom(
+                Line::from(Span::styled(" newer than verified ", t::fg(t::AMBER))).right_aligned(),
+            );
+        }
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);

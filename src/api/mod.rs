@@ -634,6 +634,13 @@ async fn stats(
     Ok(Json(json!({
         "stats": state.store.stats()?,
         "resources": state.guard.snapshot(),
+        "agents": state.runtime.agents.iter().map(|a| json!({
+            "agent": a.agent,
+            "version": a.version,
+            "verified": crate::verified::entry(a.agent).map(|e| &e.version),
+            "newerThanVerified": a.version.as_deref()
+                .is_some_and(|v| crate::verified::newer_than_verified(a.agent, v).is_some()),
+        })).collect::<Vec<_>>(),
     })))
 }
 

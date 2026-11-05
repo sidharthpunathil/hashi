@@ -1141,6 +1141,23 @@ async fn machine_figures_are_for_admins_only() {
         assert!(r.get(key).is_some(), "resources.{key} missing: {v}");
     }
     assert_eq!(r["memoryTotal"], 64 * GIB);
+    // The fake Claude reports 9.9.9, newer than any verified release; the
+    // fake Codex reports 0.0.0, which is older and says nothing.
+    let agent = |name: &str| {
+        v["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["agent"] == name)
+            .cloned()
+            .unwrap()
+    };
+    let claude = agent("claude");
+    assert_eq!(claude["verified"], "2.1.318");
+    if claude["version"].is_string() {
+        assert_eq!(claude["newerThanVerified"], true, "{claude}");
+    }
+    assert_eq!(agent("codex")["newerThanVerified"], false);
 
     let token = h.user_token(json!({})).await;
     assert_eq!(

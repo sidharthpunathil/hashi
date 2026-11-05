@@ -134,14 +134,16 @@ Each login account lives in `~/.hashi/accounts/<agent>/<name>/`, and the agent C
 
 Hashi drives whichever of these you have installed and signed in to. Each runs headless with its safest unattended setting, so a prompt cannot make it approve its own tool use.
 
-| Agent | `agent` value | Headless defaults Hashi uses | Reports |
-|---|---|---|---|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | print mode, 10-turn limit, user settings only, no MCP servers, `WebFetch` denied unless you set a permission mode | tokens and cost |
-| [Codex](https://github.com/openai/codex) | `codex` | `exec` with a read-only sandbox (your global MCP servers still load) | tokens |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini` | `--approval-mode default`, so tools that need approval are denied; no MCP servers | tokens |
-| [opencode](https://opencode.ai) 2.2+ | `opencode` | every tool denied except read, glob, grep, list and lsp; `.env` files unreadable; project config ignored | tokens and cost |
-| [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen` | `--approval-mode default`, so shell and edits are denied; no MCP servers | tokens |
-| [Cursor CLI](https://docs.cursor.com/en/cli/overview) | `cursor` | print mode with the sandbox on, never `--force`, so changes are proposed and not applied | text only |
+| Agent | `agent` value | Headless defaults Hashi uses | Reports | Verified with |
+|---|---|---|---|---|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | print mode, 10-turn limit, user settings only, no MCP servers, `WebFetch` denied unless you set a permission mode | tokens and cost | 2.1.318 (2026-11-06) |
+| [Codex](https://github.com/openai/codex) | `codex` | `exec` with a read-only sandbox (your global MCP servers still load) | tokens | 0.166.0 (2026-11-06) |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini` | `--approval-mode default`, so tools that need approval are denied; no MCP servers | tokens | 0.67.0 (2026-11-06) |
+| [opencode](https://opencode.ai) 2.2+ | `opencode` | every tool denied except read, glob, grep, list and lsp; `.env` files unreadable; project config ignored | tokens and cost | 2.2.5 (2026-11-06) |
+| [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen` | `--approval-mode default`, so shell and edits are denied; no MCP servers | tokens | 0.26.8 (2026-11-06) |
+| [Cursor CLI](https://docs.cursor.com/en/cli/overview) | `cursor` | print mode with the sandbox on, never `--force`, so changes are proposed and not applied | text only | 2026.11.05-86047df (2026-11-06) |
+
+"Verified with" is the upstream release whose headless flags, environment variables, account isolation and limit messages were last checked against the [research notes](docs/research/agent-clis.md), recorded in [`verified-versions.json`](docs/research/verified-versions.json). A newer release usually works; `hashi doctor` says when yours is newer, and a weekly check opens an `upstream` issue for each new release.
 
 Every agent works in its own directory per token. To loosen Claude Code or Codex, use `--claude-permission-mode` or `--codex-sandbox`; other defaults are fixed in this release. Adding an agent takes one file in `src/agent/`; see [CONTRIBUTING.md](CONTRIBUTING.md) and the [research notes](docs/research/agent-clis.md).
 

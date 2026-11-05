@@ -600,6 +600,17 @@ fn with_agents(installed: &[AgentKind]) -> AppState {
 }
 
 #[test]
+fn agent_card_tags_a_version_newer_than_verified() {
+    let mut app = App::new(with_agents(&[AgentKind::Claude]), None, false);
+    assert!(!draw(&mut app, 140, 40).contains("newer than verified"));
+
+    let mut st = with_agents(&[AgentKind::Claude]);
+    Arc::get_mut(&mut st.runtime).unwrap().agents[0].version = Some("9.9.0 (Claude Code)".into());
+    let mut app = App::new(st, None, false);
+    assert!(draw(&mut app, 140, 40).contains("newer than verified"));
+}
+
+#[test]
 fn overview_falls_back_to_claude_and_codex_when_nothing_is_installed() {
     let mut app = App::new(with_agents(&[]), None, false);
     let out = draw(&mut app, 140, 40);

@@ -966,6 +966,9 @@ async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
             Some(v) => {
                 found += 1;
                 println!("  ✓ {:<12} {v}  ({})", info.agent.display_name(), info.path);
+                if let Some(note) = hashi::verified::newer_note(info.agent, v) {
+                    println!("  ! {:<12} {}", "", diagnostics::terminal_safe(&note));
+                }
             }
             None => println!(
                 "  · {:<12} not installed (optional)",
