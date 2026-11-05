@@ -19,10 +19,13 @@ use tracing_subscriber::fmt::MakeWriter;
 
 /// File name of the active log inside the logs directory.
 pub const LOG_FILE: &str = "hashi.log";
-/// The log is rotated at startup once it grows past this many bytes.
+/// The log is rotated, at startup and while running, once it grows past
+/// this many bytes.
 pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 /// How many rotated logs (`hashi.log.1` and up) are kept.
 pub const KEEP_LOGS: usize = 3;
+/// How many crash files are kept; older ones are removed.
+pub const KEEP_CRASHES: usize = 10;
 
 const MASK: &str = "[redacted]";
 
@@ -328,6 +331,82 @@ pub fn open_log_file(dir: &Path) -> io::Result<File> {
     opts.open(dir.join(LOG_FILE))
 }
 
+/// `dir/hashi.log`, opened for appending, that rotates itself once it grows
+/// past a size limit.
+///
+/// The check runs on [`flush`](Write::flush). [`RedactingWriter`] writes a
+/// whole event and then flushes while it holds the writer lock, so a
+/// rotation always falls between two events and never splits one.
+#[derive(Debug)]
+pub struct RotatingLog {
+    dir: PathBuf,
+    max_bytes: u64,
+    keep: usize,
+    file: Option<File>,
+    size: u64,
+}
+
+impl RotatingLog {
+    /// Opens `dir/hashi.log`, rotating at `max_bytes` and keeping `keep` old
+    /// files.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file cannot be opened.
+    pub fn open(dir: &Path, max_bytes: u64, keep: usize) -> io::Result<Self> {
+        let file = open_log_file(dir)?;
+        let size = file.metadata().map_or(0, |m| m.len());
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            max_bytes,
+            keep,
+            file: Some(file),
+            size,
+        })
+    }
+
+    fn file(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            let file = open_log_file(&self.dir)?;
+            self.size = file.metadata().map_or(0, |m| m.len());
+            self.file = Some(file);
+        }
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log file unavailable"))
+    }
+
+    fn rotate_if_needed(&mut self) {
+        if self.size <= self.max_bytes {
+            return;
+        }
+        // Close first: Windows will not always rename an open file.
+        self.file = None;
+        if rotate_logs(&self.dir, self.max_bytes, self.keep).is_err() {
+            // Keep appending to the old file and try again after another
+            // `max_bytes`, rather than on every line.
+            self.size = 0;
+        }
+        // Reopened (and its size read) on the next write.
+    }
+}
+
+impl Write for RotatingLog {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let n = self.file()?.write(data)?;
+        self.size = self.size.saturating_add(n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+        }
+        self.rotate_if_needed();
+        Ok(())
+    }
+}
+
 /// A tracing writer factory that redacts every log line before writing it.
 #[derive(Debug)]
 pub struct RedactingMakeWriter<W> {
@@ -491,6 +570,9 @@ pub fn write_crash(logs_dir: &Path, text: &str, now: OffsetDateTime) -> io::Resu
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 file.write_all(text.as_bytes())?;
+                drop(file);
+                // Best effort: a crash note matters more than tidying up.
+                let _ = prune_crashes(logs_dir, KEEP_CRASHES);
                 return Ok(path);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -498,6 +580,45 @@ pub fn write_crash(logs_dir: &Path, text: &str, now: OffsetDateTime) -> io::Resu
         }
     }
     Err(io::Error::other("too many crash files for one second"))
+}
+
+/// Sort key for a crash file name: its timestamp, then its same-second
+/// counter. `None` for files that are not crash files.
+fn crash_order(name: &str) -> Option<(String, u32)> {
+    let stem = name.strip_prefix("crash-")?.strip_suffix(".txt")?;
+    match stem.split_once('-') {
+        Some((stamp, n)) => Some((stamp.to_owned(), n.parse().ok()?)),
+        None => Some((stem.to_owned(), 0)),
+    }
+}
+
+/// Removes all but the newest `keep` crash files in `logs_dir`. Returns how
+/// many were removed.
+///
+/// # Errors
+///
+/// Fails if the directory cannot be read. Files that cannot be removed are
+/// skipped.
+pub fn prune_crashes(logs_dir: &Path, keep: usize) -> io::Result<usize> {
+    let mut crashes: Vec<((String, u32), PathBuf)> = std::fs::read_dir(logs_dir)?
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let order = crash_order(name.to_str()?)?;
+            Some((order, e.path()))
+        })
+        .collect();
+    if crashes.len() <= keep {
+        return Ok(0);
+    }
+    crashes.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = 0;
+    for (_, path) in crashes.into_iter().skip(keep) {
+        if std::fs::remove_file(path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -694,6 +815,105 @@ mod tests {
         }
         let text = std::fs::read_to_string(dir.path().join(LOG_FILE)).unwrap();
         assert_eq!(text, "created hashi_1a2b…[redacted]\n");
+    }
+
+    #[test]
+    fn writer_rotates_while_running_and_keeps_redacting() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        let make = RedactingMakeWriter::new(RotatingLog::open(dir.path(), 200, 3).unwrap());
+        for n in 0..40 {
+            let mut w = make.make_writer();
+            writeln!(w, "line {n:02} created {} {}", token(), "x".repeat(40)).unwrap();
+        }
+        assert!(p(&format!("{LOG_FILE}.1")).exists());
+        assert!(p(&format!("{LOG_FILE}.3")).exists());
+        assert!(!p(&format!("{LOG_FILE}.4")).exists());
+        // Still writing to a fresh active file after rotating.
+        {
+            let mut w = make.make_writer();
+            writeln!(w, "after rotation").unwrap();
+        }
+        let active = std::fs::read_to_string(p(LOG_FILE)).unwrap();
+        assert!(active.ends_with("after rotation\n"));
+        for name in [
+            LOG_FILE.to_owned(),
+            format!("{LOG_FILE}.1"),
+            format!("{LOG_FILE}.2"),
+            format!("{LOG_FILE}.3"),
+        ] {
+            let text = std::fs::read_to_string(p(&name)).unwrap();
+            assert!(!text.contains("1a2b3c4d1a2b"), "{name} leaked a token");
+            for line in text.lines().filter(|l| l.starts_with("line")) {
+                assert!(line.contains("hashi_1a2b…[redacted]"), "{name}: {line}");
+            }
+            // Each rotated file passed the limit by at most one line.
+            if name != LOG_FILE {
+                assert!(
+                    text.len() > 200 && text.len() < 400,
+                    "{name}: {}",
+                    text.len()
+                );
+            }
+        }
+        let newest = std::fs::read_to_string(p(&format!("{LOG_FILE}.1"))).unwrap();
+        assert!(newest.contains("line 39") || active.contains("line 39"));
+    }
+
+    #[test]
+    fn concurrent_writes_rotate_without_splitting_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = RedactingMakeWriter::new(RotatingLog::open(dir.path(), 4096, 100).unwrap());
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let make = make.clone();
+                std::thread::spawn(move || {
+                    for n in 0..200 {
+                        let mut w = make.make_writer();
+                        // Several writes per event, as tracing does.
+                        write!(w, "t{t} ").unwrap();
+                        write!(w, "n{n:03} ").unwrap();
+                        writeln!(w, "{}", "y".repeat(50)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for th in threads {
+            th.join().unwrap();
+        }
+        let mut lines = 0;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split(' ').collect();
+                assert_eq!(parts.len(), 3, "split line: {line:?}");
+                assert_eq!(parts[2].len(), 50, "split line: {line:?}");
+                lines += 1;
+            }
+        }
+        assert_eq!(lines, 8 * 200);
+    }
+
+    #[test]
+    fn crash_files_are_capped_at_ten() {
+        let dir = tempfile::tempdir().unwrap();
+        // Unrelated files are left alone.
+        std::fs::write(dir.path().join(LOG_FILE), "log").unwrap();
+        let base = OffsetDateTime::UNIX_EPOCH;
+        let mut paths = Vec::new();
+        for n in 0..12 {
+            let at = base + time::Duration::seconds(n / 2);
+            paths.push(write_crash(dir.path(), &format!("crash {n}"), at).unwrap());
+        }
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("crash-"))
+            .collect();
+        assert_eq!(left.len(), KEEP_CRASHES);
+        assert!(!paths[0].exists() && !paths[1].exists());
+        assert!(paths[2..].iter().all(|p| p.exists()));
+        assert!(dir.path().join(LOG_FILE).exists());
     }
 
     #[test]

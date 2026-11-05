@@ -279,8 +279,9 @@ fn init_logging(home: &std::path::Path, tui: bool) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let rotated =
         diagnostics::rotate_logs(&dir, diagnostics::MAX_LOG_BYTES, diagnostics::KEEP_LOGS);
-    let file = diagnostics::open_log_file(&dir)
-        .with_context(|| format!("opening {}", dir.join(diagnostics::LOG_FILE).display()))?;
+    let file =
+        diagnostics::RotatingLog::open(&dir, diagnostics::MAX_LOG_BYTES, diagnostics::KEEP_LOGS)
+            .with_context(|| format!("opening {}", dir.join(diagnostics::LOG_FILE).display()))?;
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_writer(RedactingMakeWriter::new(file));
