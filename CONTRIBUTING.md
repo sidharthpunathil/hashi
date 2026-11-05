@@ -43,6 +43,18 @@ cargo deny check          # cargo install --locked cargo-deny
 
 `docs/research/agent-clis.md` has notes on CLIs that are not supported yet.
 
+## Re-verifying an agent
+
+`docs/research/verified-versions.json` records the release each agent was last checked against, and the README's "Verified with" column must match it (a test fails otherwise). A weekly workflow (`.github/workflows/upstream.yml`) opens an `upstream` issue when an agent releases a newer version. To clear one:
+
+1. Fetch the new source with opensrc. For a closed-source CLI such as Cursor, read the release notes and docs instead.
+2. Re-check that agent's research notes in `docs/research/agent-clis.md`: headless flags, environment variables, account isolation and limit messages. The issue lists the Hashi files that depend on them.
+3. Run the tests: `cargo test --locked`, and `sh scripts/test-upstream-check.sh` if you touched the check script.
+4. Bump the agent's entry in `verified-versions.json` (`version`, `tag` and `verified`) and its README "Verified with" cell.
+5. Close the upstream issue.
+
+Never bump a version without doing steps 1 to 3.
+
 ## Commit messages
 
 Use the imperative mood and keep the subject under about 72 characters, for example `Add per-token workspace cleanup`.
