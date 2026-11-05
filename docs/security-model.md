@@ -97,13 +97,27 @@ Pause holds queued prompts, expiry fails them, and revoke stops running ones at 
 
 ## Data on disk
 
+- **One server per home.** A server holds an exclusive OS lock on `~/.hashi/server.lock` while it runs, taken before it touches the database. A second `hashi serve` on the same home refuses to start, so it cannot requeue the first server's running prompts. Only the lock holder writes `server.pid`, a server removes that file only while it holds its own pid, and `hashi uninstall` treats a held lock as a running server.
+- **Schema versions.** A database written by a newer Hashi (its schema version is above what this build knows) is refused with both versions named, never opened and misread. Migrations run in one transaction that takes the write lock first, so two processes opening an old database at once both succeed.
+
 - On macOS and Linux, `~/.hashi` is created `0700`, and the database with its WAL and SHM files, logs, crash files, the tunnel config and `hashi report` output are `0600`. On Windows, Hashi limits the home to you, SYSTEM and Administrators; a `HASHI_HOME` outside your profile prints a warning, and Hashi refuses to start there if it cannot set that.
 - Errors returned to token holders have your home directory replaced by `~` and secrets masked. Headless output strips control and text-direction characters, so agent output cannot rewrite your terminal.
 - Every hour Hashi deletes finished requests older than `--retention-days` (never the current month, which monthly caps count from), plus audit records and claimed or expired invites older than the retention period or 90 days, whichever is longer, and access requests decided or expired more than 30 days ago, and returns the freed pages to the disk.
 
 ## Supply chain
 
-`unsafe` is forbidden in the crate. CI runs `cargo deny` for advisories, licences and sources. Release builds grant write access only to the publish job and pin every action to a commit. The installers verify each archive's SHA-256 checksum and refuse to install when it does not match.
+`unsafe` is forbidden in the crate. CI runs `cargo deny` for advisories, licences and sources. Release builds pin every action to a commit and grant write access only where it is needed: the build job may sign attestations (`id-token` and `attestations`), and only the publish job may write the release.
+
+- **Checksums prove integrity, not origin.** The installers and `hashi update` verify each archive's SHA-256 checksum and refuse to install when it does not match. The checksum file comes from the same release as the archive, so it catches a corrupted or truncated download; it does not prove who built the archive, since anyone able to change a release could change both.
+- **Attestations prove where it was built.** Each archive gets a GitHub artifact attestation (`actions/attest-build-provenance`): a Sigstore-signed statement that this repository's release workflow built it from a given commit. Verify a downloaded archive with:
+
+  ```bash
+  gh attestation verify <archive> --repo sidharthpunathil/hashi
+  ```
+
+- **Future work.** `hashi update` and the installers do not check attestations or signatures themselves yet; they rely on HTTPS and the checksum. Until they do, verify with `gh attestation verify` when that matters to you.
+- **Updates.** `hashi update` downloads over HTTPS only (redirects included) and installs only a regular file from the archive: a symlink or hard link in it is refused, and the binary is copied to a staging file that is made executable and run. `--version` refuses a release older than the running one unless you pass `--allow-downgrade`, which warns that the older release may not support the database schema. Without a terminal it needs `--yes`.
+- **Installers.** `HASHI_CONNECT` is used only when it is exactly an invite link of the shape the claim page builds (the same pattern as `SAFE_ORIGIN` and `SAFE_CODE` in the page), and is passed to `hashi connect` after `--`.
 
 ## Known limits
 

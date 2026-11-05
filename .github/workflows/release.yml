@@ -16,6 +16,12 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Only this job signs: id-token for the Sigstore certificate, and
+    # attestations to store the build provenance on GitHub.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +64,13 @@ jobs:
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii -NoNewline "dist/$name.zip.sha256"
+
+      # Records which workflow, commit and runner built the archive. Check
+      # it with: gh attestation verify <archive> --repo sidharthpunathil/hashi
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.os == 'Windows' && format('dist/hashi-{0}.zip', matrix.target) || format('dist/hashi-{0}.tar.gz', matrix.target) }}
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

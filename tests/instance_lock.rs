@@ -67,7 +67,10 @@ async fn a_second_server_on_the_same_home_refuses_and_leaves_the_first_alone() {
     assert!(server::home_locked(&home));
 
     let second = server::start_with(config(&home), NetLimits::default(), Bus::default()).await;
-    let e = format!("{:#}", second.err().expect("the second server started"));
+    let Err(e) = second else {
+        panic!("the second server started")
+    };
+    let e = format!("{e:#}");
     assert!(e.contains("already running"), "{e}");
     // The first server's run is still running, not requeued.
     let r = store.get_request(id).unwrap().unwrap();

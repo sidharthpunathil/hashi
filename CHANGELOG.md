@@ -59,6 +59,22 @@ All notable changes to this project are documented here. The format follows [Kee
 - The Bridges I use popup lists the requests for access this machine sent, and `r` checks them as `hashi request status` does.
 - The dashboard's project form sets the account strategy (server default, in-order, most-left or soonest-reset) and rotate at % (50 to 99, empty for the server default), with errors next to the field.
 
+### Security
+
+- A second `hashi serve` on a home already in use refuses to start, before it touches the database. Before, it requeued the running server's prompts and bumped their interruption counts even when it then failed to bind, and the two servers overwrote and deleted each other's `server.pid`. A server now holds an OS lock on `~/.hashi/server.lock`, writes `server.pid` only while holding it and removes the file only when it holds its own pid; `hashi uninstall` treats a held lock as a running server.
+- A database with a newer schema than this build supports is refused, naming both versions, instead of being opened. Migrations run in one `BEGIN IMMEDIATE` transaction that reads the version again, so two processes opening an old database at once no longer fail.
+- `hashi update --version` refuses a release older than the running one without the new `--allow-downgrade`, which warns about the database schema. Without a terminal, `hashi update` needs `--yes`. Downloads are HTTPS only, and the archive's binary must be a regular file: a symlink or hard link is refused, and a staged copy is made executable and run.
+- `hashi remote remove` switches off the accounts that used the remote, with a reason. A remote account records the bridge's instance id when it is added, and each forward checks it, so a remote name reused for another bridge no longer redirects the account's prompts.
+- The token, pending invite and project caps are enforced inside the database transaction that inserts the record, so the CLI and the dashboard get them too and concurrent creates cannot pass them.
+- Removing a project with `--unbind` fails prompts still queued under it with `project removed` instead of running them in the token's workspace, and sessions of removed projects are deleted.
+- Shutdown runs `tailscale ... off` only while the port still points at this server.
+- Tailscale approval links are shown only for `https://login.tailscale.com/...`, or the host in the new `HASHI_TAILSCALE_CONTROL_HOST`, end at whitespace and control characters, and are made terminal safe.
+- A Cloudflare quick tunnel URL must be exactly `https://<label>.trycloudflare.com`, with no path, query or userinfo.
+- On Windows, `hashi uninstall` compares canonical paths to find the running binary, so it schedules that one's deletion for after exit.
+- The installers accept `HASHI_CONNECT` only in the shape the claim page builds and pass it after `--`; the PowerShell installer splats its arguments so Windows PowerShell 5.1 cannot split them.
+- `settings.json` refuses port `0`, and the dashboard header warns while the server listens outside loopback.
+- Release archives get GitHub build provenance attestations; check one with `gh attestation verify <archive> --repo sidharthpunathil/hashi`. The docs now say what the checksum proves (an intact download) and what the attestation proves (where it was built).
+
 ### Fixed
 
 - The dashboard picked up finished background work only while nothing animated, so a bridge's answer or a connect result waited until its own spinner stopped, which it never did.

@@ -1895,7 +1895,9 @@ mod tests {
             .unwrap()
             .pragma_update(None, "user_version", SCHEMA_VERSION + 90)
             .unwrap();
-        let e = Store::open(&path).err().expect("a newer schema opened");
+        let Err(e) = Store::open(&path) else {
+            panic!("a newer schema opened")
+        };
         assert!(
             matches!(e, StoreError::NewerSchema { found, supported }
                 if found == SCHEMA_VERSION + 90 && supported == SCHEMA_VERSION),

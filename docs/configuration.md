@@ -11,6 +11,7 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--tailscale serve\|funnel` | `HASHI_TAILSCALE` | off. Go public through Tailscale Serve (your tailnet) or Funnel (the internet); see [remote access](remote-access.md#tailscale-serve-and-funnel). Not with `--tunnel` |
 | `--tailscale-port` | `HASHI_TAILSCALE_PORT` | `443`. HTTPS port for `--tailscale` (Funnel: 443, 8443 or 10000) |
 | `--tailscale-bin` | `HASHI_TAILSCALE_BIN` | found on `PATH`. Also read by `hashi doctor` |
+| | `HASHI_TAILSCALE_CONTROL_HOST` | none. A self-hosted control server's host (such as `headscale.example.com`): its approval links are shown as well as `https://login.tailscale.com/...` ones. Any other link the CLI prints is not shown |
 | `--cloudflared-bin` | `HASHI_CLOUDFLARED_BIN` | found on `PATH`. Also read by `hashi doctor` |
 | `--tunnel-token` | `HASHI_TUNNEL_TOKEN` | none. Runs a named tunnel; needs `--public-url`. Prefer the variable: the flag shows in the process list, and Hashi warns |
 | `--trust-proxy` | `HASHI_TRUST_PROXY` | off. Read client addresses from `X-Forwarded-For` on loopback connections |
@@ -77,13 +78,16 @@ hashi request '<ask-access link>' --name Sam      # on a friend's machine: ask s
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
-hashi update                               # install the latest release (--check, --version v0.3.0, --yes)
+hashi update                               # install the latest release (--check, --version v0.3.0, --allow-downgrade, --yes)
 hashi uninstall                            # remove the binary and ~/.hashi (--dry-run, --keep-data, --yes)
 ```
 
 `hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
-The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (`hashi/0.2.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`.
+The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (`hashi/0.2.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
+
+- `--version v0.3.0` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
+- Downloads are HTTPS only, and only a regular file in the archive is installed (see [supply chain](security-model.md#supply-chain)).
 
 ### Accounts
 
@@ -187,7 +191,7 @@ A project is a folder on this machine with its own agents, accounts and defaults
 | `hashi project update <name> [--path ..] [--agents ..] [--account ..]... [--clear-accounts] [--default-agent ..] [--clear-default-agent] [--model ..]... [--clear-models] [--note ..] [--account-strategy ..] [--clear-account-strategy] [--rotate-at ..] [--clear-rotate-at]` | Change a project. Refused if a bound token or pending invite would be left with accounts outside it |
 | `--account-strategy in-order\|most-left\|soonest-reset`, `--rotate-at <50-99>` | On `project add` and `project update`: how the project's runs choose accounts and when they move off one. Default: the server's. See [usage and strategies](#usage-and-strategies) |
 | `hashi project list` | Projects with their bound tokens, prompts today and this month, spend this month, agents, accounts, models, strategy and folder |
-| `hashi project remove <name> [--unbind]` | Remove a project. Refused while tokens or pending invites are bound, unless `--unbind` puts them back on their own workspace. The folder is never touched |
+| `hashi project remove <name> [--unbind]` | Remove a project. Refused while tokens or pending invites are bound, unless `--unbind` puts them back on their own workspace; prompts still queued under the project then fail with `project removed`. The folder is never touched |
 | `hashi token create <name> --project <name>` | Bind a new token. Also on `hashi share` |
 | `hashi token update <id> --project <name>` or `--clear-project` | Bind a token, or put it back on its own workspace |
 
@@ -253,7 +257,7 @@ hashi account list                                                   # KIND show
 hashi account usage                                                  # "via bob" or "via bob, shared", with source remote
 ```
 
-- `--remote` names a remote from `hashi remote list`. Adding the account checks the bridge's `/v1/status`: one that reports this Hashi's own instance id is refused, and an unreachable one is added with a warning (runs check again, see below). It prints a reminder that the friend running that bridge sees every prompt sent through the account and every answer, as their claim page told you. The remote's token stays in `~/.hashi/remotes.json`; the database keeps only the remote's name. `hashi remote remove` leaves the account, which is switched off on its next run.
+- `--remote` names a remote from `hashi remote list`. Adding the account checks the bridge's `/v1/status`: one that reports this Hashi's own instance id is refused, and an unreachable one is added with a warning (runs check again, see below). It prints a reminder that the friend running that bridge sees every prompt sent through the account and every answer, as their claim page told you. The remote's token stays in `~/.hashi/remotes.json`; the database keeps only the remote's name and the instance id the bridge reported. `hashi remote remove` (and removing a remote in the dashboard) switches off every account that used it, with the reason in `hashi account list`, so a new remote saved later under the same name never receives their prompts. Each forward first checks that the bridge still reports the instance id recorded when the account was added; a different one switches the account off, and the prompt runs on the next account. To point an account at a new bridge, remove it and add it again.
 - A run sends the prompt to the remote's `POST /v1/ask` with the remote's token and long-polls it, at most 30 seconds at a time, until it finishes. The run timeout (`--timeout`) applies, and a timeout or a cancel (`DELETE /v1/ask/{id}`, revoking the token) cancels the request on the remote bridge too, best effort. The answer, its tokens and its cost come from the remote, and the cost counts against your token's budget like a local run's.
 - What the remote says decides what happens to the account:
 
@@ -359,7 +363,7 @@ With "keep for next start" on (the default), the move is saved in `~/.hashi/sett
 }
 ```
 
-At startup each value comes from, in order: its flag (`--port`, `--bind`), its environment variable (`HASHI_PORT`, `HASHI_BIND`), `settings.json`, then the default (`7878`, `127.0.0.1`). When a flag or variable is set, the form says it wins over the saved value at the next start. A file that cannot be read is ignored with a warning in the log. `hashi uninstall` counts `settings.json` and `reports/` as Hashi's own.
+At startup each value comes from, in order: its flag (`--port`, `--bind`), its environment variable (`HASHI_PORT`, `HASHI_BIND`), `settings.json`, then the default (`7878`, `127.0.0.1`). When a flag or variable is set, the form says it wins over the saved value at the next start. A file that cannot be read, or that saves port `0`, is ignored with a warning in the log. While the server listens outside loopback, however that was chosen, the dashboard header shows `! exposed, no TLS` (or `! exposed, HTTPS`) next to the local URL. `hashi uninstall` counts `settings.json` and `reports/` as Hashi's own.
 
 Running requests count up their elapsed time, and every status pairs a symbol with its colour (`✓` done, `✗` failed, `◌` queued, a spinner for running). Body text uses your terminal's own foreground colour, so light and dark themes both stay readable, and `HASHI_REDUCED_MOTION=1` freezes the animation.
 
@@ -370,7 +374,7 @@ Running requests count up their elapsed time, and every status pairs a symbol wi
 | `HASHI_VERSION=v0.2.0` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
-| `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect` with this link instead of `hashi doctor`. The installer fails with a clear message if the link is used up or expired |
+| `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect -- <link>` instead of `hashi doctor`. Only a link of the shape the claim page builds (`https://<host>[:port]/claim/hashi_inv_<hex>`, or `http://` on loopback) is accepted; anything else stops the installer before it downloads. It fails with a clear message if the link is used up or expired |
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.2.0 sh
