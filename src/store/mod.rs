@@ -584,8 +584,18 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 ";
 
-const MIGRATIONS: [&str; 8] = [
+/// Version 9: a project's use (`/v1/projects`, the dashboard) read from an
+/// index alone. `idx_requests_project_usage` adds `cost_usd` to the columns
+/// of `idx_requests_project`, which it replaces: the old index's every use
+/// is a prefix of the new one. Every statement is idempotent.
+const SCHEMA_V9: &str = r"
+CREATE INDEX IF NOT EXISTS idx_requests_project_usage ON requests(project, created_at, cost_usd);
+DROP INDEX IF EXISTS idx_requests_project;
+";
+
+const MIGRATIONS: [&str; 9] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
+    SCHEMA_V9,
 ];
 
 /// The schema version a fully migrated database reports.
@@ -1780,6 +1790,44 @@ mod tests {
             p.contains("USING COVERING INDEX idx_requests_usage"),
             "unexpected plan: {p}"
         );
+    }
+
+    #[test]
+    fn project_usage_reads_only_the_covering_index() {
+        let s = store();
+        let p = plan(&s, projects::PROJECT_USAGE_SQL);
+        assert!(
+            p.contains("USING COVERING INDEX idx_requests_project_usage"),
+            "unexpected plan: {p}"
+        );
+    }
+
+    #[test]
+    fn migrates_v8_database_to_v9_replacing_the_project_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v8.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..8] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 8).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        let names: Vec<String> = {
+            let conn = s.conn().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_requests_project%'")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(names, ["idx_requests_project_usage"]);
+        // Running the migration again changes nothing.
+        s.conn().unwrap().execute_batch(SCHEMA_V9).unwrap();
     }
 
     #[test]
