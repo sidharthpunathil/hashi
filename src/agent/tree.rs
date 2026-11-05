@@ -11,10 +11,13 @@
 //! id cannot later point at an unrelated process.
 //!
 //! On Linux Hashi is also a child subreaper, so a descendant whose parent
-//! exits is reparented to Hashi instead of to init. A reparented process in a
-//! session of its own (anything that called `setsid`) is counted as part of
-//! every run that is active when it is seen, even if the watchdog never saw
-//! the process that created it. Hashi then reaps those processes itself.
+//! exits is reparented to Hashi instead of to init. While only one run is in
+//! progress, a reparented process in a session of its own (anything that
+//! called `setsid`) is counted as part of that run, even if the watchdog
+//! never saw the process that created it. With several runs at once such an
+//! orphan cannot be traced to one of them, so it is left alone until the last
+//! of them ends and its sweep, then the only run, kills it. Hashi reaps those
+//! processes itself.
 //!
 //! Residual limit: on other Unix systems, a process that leaves its session
 //! and whose parent exits between two samples cannot be traced back to the
@@ -82,6 +85,7 @@ pub fn members(
     {
         let own = unix::Ids::own();
         let leaders = unix::leaders();
+        let sole_run = leaders.iter().all(|l| *l == root);
         let ids: HashMap<Pid, unix::Ids> = procs
             .keys()
             .filter(|p| p.as_u32() > 1)
@@ -94,8 +98,13 @@ pub fn members(
                 }
                 let in_scope = id.pgid.is_some_and(|g| scope.groups.contains(&g))
                     || id.sid.is_some_and(|s| scope.sessions.contains(&s));
-                // Only a subreaper inherits other processes' orphans.
+                // Only a subreaper inherits other processes' orphans. An
+                // orphan no run recorded cannot be traced to one, so it is
+                // claimed only while this is the sole run in progress: with
+                // several runs, one run must never be charged for, or kill,
+                // another's processes. The last run to end sweeps it up.
                 let adopted = cfg!(target_os = "linux")
+                    && sole_run
                     && procs.get(p).and_then(Process::parent) == Some(Pid::from_u32(own.pid))
                     && !leaders.contains(&p.as_u32())
                     && id.sid.is_some_and(|s| Some(s) != own.sid);

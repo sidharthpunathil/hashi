@@ -655,7 +655,40 @@ exit 0;
         .unwrap();
         assert!(out.success, "{out:?}");
         let pid = daemon.pid().await;
-        assert!(wait_gone(&pid).await, "detached daemon {pid} survived");
+        // Other tests' runs may still be in progress, and an orphan nobody
+        // recorded is only claimed once a run is alone, so allow for them.
+        assert!(
+            wait_gone_within(&pid, Duration::from_secs(60)).await,
+            "detached daemon {pid} survived"
+        );
+    }
+
+    /// An orphan that no run recorded must not be charged to, or killed by,
+    /// a different run that happens to be in progress at the same time.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn concurrent_runs_are_not_charged_for_each_others_orphans() {
+        let Some(perl) = perl() else { return };
+        let daemon = Daemon::new();
+        let hog_args = daemon.args(0.0, 3.0, 0.2, 300);
+        let quiet_args: [OsString; 2] = ["-c".into(), "sleep 2".into()];
+        let hog = run(&perl, &hog_args, &[], Path::new("."), Limits::default());
+        let quiet = run(
+            Path::new("/bin/sh"),
+            &quiet_args,
+            &[],
+            Path::new("."),
+            sampled(50, 100 * crate::guard::MIB),
+        );
+        let (hog, quiet) = tokio::join!(hog, quiet);
+        assert!(hog.is_ok(), "{hog:?}");
+        let quiet = quiet.unwrap();
+        assert!(quiet.success, "{quiet:?}");
+        let pid = daemon.pid().await;
+        assert!(
+            wait_gone_within(&pid, Duration::from_secs(60)).await,
+            "detached daemon {pid} survived"
+        );
     }
 
     /// Runs itself again with secrets in the environment and checks what an
@@ -874,7 +907,12 @@ exit 0;
 
     /// Polls `kill -0 <pid>` until the process is gone, up to five seconds.
     pub(crate) async fn wait_gone(pid: &str) -> bool {
-        for _ in 0..50 {
+        wait_gone_within(pid, Duration::from_secs(5)).await
+    }
+
+    pub(crate) async fn wait_gone_within(pid: &str, limit: Duration) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < limit {
             let alive = std::process::Command::new("kill")
                 .args(["-0", pid])
                 .stderr(Stdio::null())
