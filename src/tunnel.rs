@@ -6,17 +6,37 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::net::TunnelTrust;
+
+/// Cloudflare's download page for `cloudflared`.
+pub const DOWNLOADS_URL: &str =
+    "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/";
+
+/// How to install `cloudflared` on this platform.
+#[must_use]
+pub fn install_hint() -> String {
+    if cfg!(target_os = "macos") {
+        "brew install cloudflared".to_owned()
+    } else {
+        format!("download it from {DOWNLOADS_URL}")
+    }
+}
 
 /// Tunnel failures.
 #[derive(Debug, thiserror::Error)]
 pub enum TunnelError {
     /// `cloudflared` is not installed.
     #[error(
-        "cloudflared not found; install it (e.g. `brew install cloudflared`) or run without --tunnel"
+        "cloudflared not found; install it ({}) or run without --tunnel",
+        install_hint()
     )]
     NotInstalled,
     /// It could not be started.
@@ -112,6 +132,175 @@ pub async fn start_named(
         url: public_url.to_owned(),
         child,
     })
+}
+
+/// Where the public tunnel is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Status {
+    /// None was asked for, or it has not been started yet.
+    #[default]
+    Off,
+    /// Waiting for cloudflared.
+    Starting,
+    /// Serving at this URL.
+    Up(String),
+    /// Failed or closed, for this reason.
+    Down(String),
+}
+
+/// Why a tunnel could not be started on request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StartError {
+    /// One is already on its way up.
+    #[error("the tunnel is already starting")]
+    Starting,
+    /// One is already serving.
+    #[error("the tunnel is already live at {0}")]
+    Running(String),
+    /// `--public-url` is set, so invite links already use it.
+    #[error("a public URL is configured ({0}); invite links already use it")]
+    Configured(String),
+    /// `cloudflared` is not installed.
+    #[error("cloudflared is not installed; {}", install_hint())]
+    NotInstalled,
+    /// This server has nothing a tunnel could point at.
+    #[error("this server cannot start a tunnel")]
+    Unavailable,
+}
+
+/// What a tunnel started by [`Control`] points at.
+#[derive(Debug, Clone)]
+pub struct Settings {
+    /// Local listen port.
+    pub port: u16,
+    /// Whether Hashi serves HTTPS itself.
+    pub local_tls: bool,
+    /// Data directory, for cloudflared's isolated config.
+    pub home: PathBuf,
+    /// The `--public-url`, when set. It wins over any tunnel URL.
+    pub configured_url: Option<String>,
+    /// Named tunnel token (`--tunnel-token`), used only for the tunnel
+    /// configured at startup.
+    pub named_token: Option<String>,
+    /// A tunnel was configured at startup (`--tunnel` or `--tunnel-token`):
+    /// `CF-Connecting-IP` stays trusted for the server's whole life, as it
+    /// always has.
+    pub configured: bool,
+    /// Stops the tunnel on shutdown.
+    pub cancel: CancellationToken,
+}
+
+#[derive(Debug, Default)]
+struct Slot {
+    status: Status,
+    task: Option<JoinHandle<()>>,
+}
+
+/// One server's tunnel: its status, the `CF-Connecting-IP` trust switch and
+/// the task running cloudflared. At most one tunnel runs at a time.
+///
+/// The default control has no [`Settings`] and never starts anything.
+#[derive(Debug, Default)]
+pub struct Control {
+    settings: Option<Settings>,
+    trust: TunnelTrust,
+    slot: Mutex<Slot>,
+}
+
+impl Control {
+    /// A control for a server. When a tunnel is configured, trust is turned
+    /// on right away.
+    #[must_use]
+    pub fn new(settings: Settings, trust: TunnelTrust) -> Self {
+        if settings.configured {
+            trust.set(true);
+        }
+        Self {
+            settings: Some(settings),
+            trust,
+            slot: Mutex::default(),
+        }
+    }
+
+    fn slot(&self) -> MutexGuard<'_, Slot> {
+        self.slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Current status.
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.slot().status.clone()
+    }
+
+    /// The `CF-Connecting-IP` trust switch the server reads per request.
+    #[must_use]
+    pub fn trust(&self) -> &TunnelTrust {
+        &self.trust
+    }
+
+    /// The settings, when this control can start a tunnel.
+    #[must_use]
+    pub fn settings(&self) -> Option<&Settings> {
+        self.settings.as_ref()
+    }
+
+    /// Claims the right to start a tunnel: fails when one is starting or
+    /// up, then marks it starting and trusts `CF-Connecting-IP`.
+    ///
+    /// `on_demand` is set for a tunnel the owner asks for on a running
+    /// server. It is refused when a public URL is configured or
+    /// `cloudflared` is missing; the startup tunnel reports those as
+    /// [`crate::events::Event::TunnelDown`] instead, as before.
+    ///
+    /// # Errors
+    ///
+    /// See [`StartError`].
+    pub fn begin(&self, on_demand: bool) -> Result<&Settings, StartError> {
+        let settings = self.settings.as_ref().ok_or(StartError::Unavailable)?;
+        let mut slot = self.slot();
+        match &slot.status {
+            Status::Starting => return Err(StartError::Starting),
+            Status::Up(url) => return Err(StartError::Running(url.clone())),
+            Status::Off | Status::Down(_) => {}
+        }
+        if on_demand {
+            if let Some(url) = &settings.configured_url {
+                return Err(StartError::Configured(url.clone()));
+            }
+            if locate().is_none() {
+                return Err(StartError::NotInstalled);
+            }
+        }
+        slot.status = Status::Starting;
+        self.trust.set(true);
+        Ok(settings)
+    }
+
+    /// Records the tunnel's new status. Once it is down, trust goes back
+    /// off unless a tunnel was configured at startup.
+    pub fn set_status(&self, status: Status) {
+        let down = matches!(status, Status::Down(_) | Status::Off);
+        self.slot().status = status;
+        if down && !self.settings.as_ref().is_some_and(|s| s.configured) {
+            self.trust.set(false);
+        }
+    }
+
+    /// Keeps the task running the tunnel, so shutdown can wait for it.
+    pub fn set_task(&self, task: JoinHandle<()>) {
+        // An earlier attempt has already reported itself down; let it finish.
+        drop(self.slot().task.replace(task));
+    }
+
+    /// Waits for the tunnel task to stop. Call after cancelling.
+    pub async fn join(&self) {
+        let task = self.slot().task.take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
 }
 
 /// The warning printed when [`token_in_argv`] is true.
@@ -251,6 +440,83 @@ mod tests {
         let path = isolated_config(dir.path()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    fn settings(configured: bool, configured_url: Option<&str>) -> Settings {
+        Settings {
+            port: 7878,
+            local_tls: false,
+            home: std::env::temp_dir(),
+            configured_url: configured_url.map(str::to_owned),
+            named_token: None,
+            configured,
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    #[test]
+    fn trust_turns_on_only_once_a_tunnel_is_configured_or_started() {
+        // No tunnel configured: as strict as ever.
+        let control = Control::new(settings(false, None), TunnelTrust::default());
+        assert!(!control.trust().get());
+        assert_eq!(control.status(), Status::Off);
+        // Starting one (the startup path, which never looks for cloudflared).
+        control.begin(false).unwrap();
+        assert!(control.trust().get());
+        assert_eq!(control.status(), Status::Starting);
+        // Once it is down, trust goes back off.
+        control.set_status(Status::Down("cloudflared exited".into()));
+        assert!(!control.trust().get());
+
+        // Configured at startup: trusted from the start and for good.
+        let control = Control::new(settings(true, None), TunnelTrust::default());
+        assert!(control.trust().get());
+        control.set_status(Status::Down("cloudflared exited".into()));
+        assert!(control.trust().get());
+    }
+
+    #[test]
+    fn a_second_tunnel_is_refused_while_one_is_starting_or_up() {
+        let control = Control::new(settings(false, None), TunnelTrust::default());
+        control.begin(false).unwrap();
+        assert_eq!(control.begin(false).unwrap_err(), StartError::Starting);
+        assert_eq!(control.begin(true).unwrap_err(), StartError::Starting);
+        let url = "https://calm-river-bridge.trycloudflare.com".to_owned();
+        control.set_status(Status::Up(url.clone()));
+        assert_eq!(control.begin(false).unwrap_err(), StartError::Running(url));
+        // After it goes down it may be started again.
+        control.set_status(Status::Down("gone".into()));
+        assert!(control.begin(false).is_ok());
+    }
+
+    #[test]
+    fn on_demand_defers_to_a_configured_public_url() {
+        let url = "https://hashi.example.com";
+        let control = Control::new(settings(false, Some(url)), TunnelTrust::default());
+        assert_eq!(
+            control.begin(true).unwrap_err(),
+            StartError::Configured(url.to_owned())
+        );
+        assert!(!control.trust().get());
+        assert_eq!(control.status(), Status::Off);
+    }
+
+    #[test]
+    fn a_default_control_never_starts_anything() {
+        let control = Control::default();
+        assert_eq!(control.begin(true).unwrap_err(), StartError::Unavailable);
+        assert!(!control.trust().get());
+    }
+
+    #[test]
+    fn install_hint_names_a_command_or_the_download_page() {
+        let hint = install_hint();
+        if cfg!(target_os = "macos") {
+            assert_eq!(hint, "brew install cloudflared");
+        } else {
+            assert!(hint.contains(DOWNLOADS_URL));
+        }
+        assert!(TunnelError::NotInstalled.to_string().contains(&hint));
     }
 
     #[test]

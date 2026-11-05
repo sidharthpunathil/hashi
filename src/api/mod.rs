@@ -94,6 +94,8 @@ pub struct Runtime {
     pub agents: Vec<AgentInfo>,
     /// Name shown to people you share with.
     pub name: String,
+    /// The public tunnel, which the dashboard can start on a running server.
+    pub tunnel: crate::tunnel::Control,
 }
 
 impl Runtime {

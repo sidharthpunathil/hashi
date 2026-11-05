@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Go public without a restart: press `t` in the dashboard to start a Cloudflare quick tunnel on a running server. It behaves like `--tunnel`, the header shows its progress and URL, and a missing `cloudflared` gets an install hint. `CF-Connecting-IP` is trusted from loopback only while a tunnel is configured or running.
+- The invite popup keeps the invite code and builds the link from the current base URL, so it turns public when a tunnel comes up. A local-only link says "press t to make this link public".
+- A running server writes its public base URL to `~/.hashi/public-url` (owner only) and removes it on shutdown. `hashi share` without `--public-url` uses it.
+
 ## [0.2.0] - 2026-11-05
 
 ### Added

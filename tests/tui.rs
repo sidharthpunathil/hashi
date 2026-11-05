@@ -73,6 +73,7 @@ fn state() -> AppState {
             local_url: "http://127.0.0.1:7878".into(),
             public_url: RwLock::new(None),
             name: "Hashi".into(),
+            tunnel: Default::default(),
             agents: vec![
                 AgentInfo {
                     agent: AgentKind::Claude,
@@ -445,14 +446,11 @@ fn share_form_creates_invite_and_shows_link() {
     }
     app.on_key(key(KeyCode::Right));
     app.on_key(key(KeyCode::Enter));
-    let Some(Popup::InviteReveal {
-        url, local_only, ..
-    }) = &app.popup
-    else {
+    let Some(Popup::InviteReveal { code, .. }) = &app.popup else {
         panic!("expected invite reveal popup")
     };
-    assert!(url.contains("/claim/hashi_inv_"));
-    assert!(*local_only);
+    assert!(app.invite_url(code).contains("/claim/hashi_inv_"));
+    assert!(app.local_only());
     let out = draw(&mut app, 140, 40);
     assert!(out.contains("Invite for alice"));
     assert!(out.contains("/claim/hashi_inv_"));
@@ -578,6 +576,7 @@ fn with_agents(installed: &[AgentKind]) -> AppState {
         public_url: RwLock::new(None),
         agents,
         name: "Hashi".into(),
+        tunnel: Default::default(),
     });
     st
 }
@@ -769,4 +768,72 @@ fn dashboard_user_tokens_get_the_default_pending_cap() {
     app.on_key(key(KeyCode::Enter));
     let t = app.tokens.iter().find(|t| t.name == "friend").unwrap();
     assert_eq!((t.role, t.limits.max_pending), (Role::User, Some(3)));
+}
+
+#[test]
+fn invite_popup_turns_public_when_the_tunnel_comes_up() {
+    let mut app = App::new(state(), None, false);
+    share_invite(&mut app, "carol");
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("http://127.0.0.1:7878/claim/hashi_inv_"));
+    assert!(out.contains("press t to make this link public"));
+
+    let public = "https://calm-river-bridge.trycloudflare.com";
+    *app.state.runtime.public_url.write().unwrap() = Some(public.to_owned());
+    app.on_event(Event::TunnelReady(public.to_owned()));
+    let Some(Popup::InviteReveal { code, .. }) = &app.popup else {
+        panic!("expected invite reveal popup")
+    };
+    assert_eq!(app.invite_url(code), format!("{public}/claim/{code}"));
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains(&format!("{public}/claim/hashi_inv_")));
+    assert!(!out.contains("press t"));
+    assert!(!out.contains("only works on this machine"));
+}
+
+#[test]
+fn go_public_key_reports_why_it_cannot_start() {
+    // The test runtime has no listener, so nothing is ever spawned.
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('t')));
+    assert!(toast(&app).contains("cannot start a tunnel"));
+    assert!(draw(&mut app, 140, 40).contains("press t to go public"));
+}
+
+#[test]
+fn go_public_key_defers_to_a_configured_public_url() {
+    let mut st = state();
+    let url = "https://hashi.example.com";
+    st.runtime = Arc::new(Runtime {
+        started: Instant::now(),
+        local_url: "http://127.0.0.1:7878".into(),
+        public_url: RwLock::new(Some(url.into())),
+        agents: Vec::new(),
+        name: "Hashi".into(),
+        tunnel: hashi::tunnel::Control::new(
+            hashi::tunnel::Settings {
+                port: 7878,
+                local_tls: false,
+                home: std::env::temp_dir(),
+                configured_url: Some(url.into()),
+                named_token: None,
+                configured: false,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+            hashi::net::TunnelTrust::default(),
+        ),
+    });
+    let mut app = App::new(st, None, false);
+    app.on_key(key(KeyCode::Char('t')));
+    assert!(
+        toast(&app).contains("public URL is configured"),
+        "{}",
+        toast(&app)
+    );
+    assert!(!app.state.runtime.tunnel.trust().get());
+    assert_eq!(
+        app.state.runtime.tunnel.status(),
+        hashi::tunnel::Status::Off
+    );
+    assert!(draw(&mut app, 140, 40).contains(url));
 }

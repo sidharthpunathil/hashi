@@ -229,6 +229,28 @@ async fn the_forwarded_header_is_ignored_without_a_tunnel() {
 }
 
 #[tokio::test]
+async fn the_forwarded_header_is_trusted_once_a_tunnel_is_started() {
+    let t = start(2, NetLimits::default()).await;
+    let trust = t.running.state.runtime.tunnel.trust();
+    assert!(!trust.get());
+    for ip in ["203.0.113.1", "203.0.113.2"] {
+        let (status, _) = claim(&t, "preview", "hashi_inv_bogus", Some(ip)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    let (status, _) = claim(&t, "preview", "hashi_inv_bogus", Some("203.0.113.3")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // What starting a tunnel at runtime does, without running cloudflared.
+    trust.set(true);
+    let (status, _) = claim(&t, "preview", "hashi_inv_bogus", Some("203.0.113.4")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a new client gets its own budget"
+    );
+    t.running.shutdown().await;
+}
+
+#[tokio::test]
 async fn unknown_tokens_are_throttled_per_client() {
     let t = start(
         3,

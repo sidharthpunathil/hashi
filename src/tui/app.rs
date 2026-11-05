@@ -13,6 +13,7 @@ use crate::events::Event;
 use crate::guard::ResourceSnapshot;
 use crate::store::{Invite, NewInvite, NewToken, Request, Revoke, Stats, TokenUsage};
 use crate::token::{Limits, Role, SessionMode, Token, TokenStatus};
+use crate::tunnel::StartError;
 use crate::util::{now_ms, one_line, truncate};
 
 /// Top-level views.
@@ -326,16 +327,15 @@ pub enum Popup {
     },
     /// Invite creation form.
     Share(ShareForm),
-    /// A freshly created invite link.
+    /// A freshly created invite link. The URL is built from the current base
+    /// URL each time, so it turns public when a tunnel comes up.
     InviteReveal {
         /// Who the invite is for.
         label: String,
-        /// The full claim URL.
-        url: String,
+        /// The invite code.
+        code: String,
         /// How long the link stays valid.
         link_hours: u32,
-        /// Set when there is no public URL, so the link only works locally.
-        local_only: bool,
     },
     /// Invite cancellation confirmation.
     ConfirmCancelInvite {
@@ -700,6 +700,7 @@ impl App {
                 self.refresh();
                 self.notify("refreshed");
             }
+            KeyCode::Char('t') => self.go_public(),
             KeyCode::Char('n') if self.tab == Tab::Tokens => {
                 self.popup = Some(Popup::NewToken(TokenForm::new()))
             }
@@ -782,20 +783,22 @@ impl App {
             },
             Popup::InviteReveal {
                 label,
-                url,
+                code,
                 link_hours,
-                local_only,
             } => {
                 match key.code {
-                    KeyCode::Char('c') => self.copy(&url, "invite link copied to clipboard"),
+                    KeyCode::Char('c') => {
+                        let url = self.invite_url(&code);
+                        self.copy(&url, "invite link copied to clipboard");
+                    }
+                    KeyCode::Char('t') => self.go_public(),
                     KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => return None,
                     _ => {}
                 }
                 Some(Popup::InviteReveal {
                     label,
-                    url,
+                    code,
                     link_hours,
-                    local_only,
                 })
             }
             Popup::Share(mut form) => {
@@ -902,10 +905,9 @@ impl App {
                     .log(format!("invite created: {}", invite.label));
                 self.refresh();
                 Some(Popup::InviteReveal {
-                    url: format!("{}/claim/{code}", self.state.runtime.base_url()),
                     label: invite.label,
+                    code,
                     link_hours: new.link_hours,
-                    local_only: self.state.runtime.public_url().is_none(),
                 })
             }
             Err(e) => {
@@ -1051,6 +1053,33 @@ impl App {
             .and_then(|i| self.recent.get(i))
             .map(|r| r.id.clone());
         self.detail = id.and_then(|id| self.state.store.get_request(&id).ok().flatten());
+    }
+
+    /// The claim link for an invite code, against the current base URL.
+    #[must_use]
+    pub fn invite_url(&self, code: &str) -> String {
+        format!("{}/claim/{code}", self.state.runtime.base_url())
+    }
+
+    /// Whether links made now only work on this machine.
+    #[must_use]
+    pub fn local_only(&self) -> bool {
+        self.state.runtime.public_url().is_none()
+    }
+
+    /// Starts a quick tunnel on the running server (key `t`).
+    pub fn go_public(&mut self) {
+        match crate::server::go_public(&self.state.runtime, &self.state.bus) {
+            Ok(()) => {
+                self.tunnel = TunnelState::Starting;
+                self.notify("starting a public tunnel");
+            }
+            Err(StartError::NotInstalled) => self.notify(format!(
+                "cloudflared is not installed: {}",
+                crate::tunnel::install_hint()
+            )),
+            Err(e) => self.notify(e.to_string()),
+        }
     }
 
     /// Shows a transient message in the footer.
