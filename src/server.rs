@@ -18,8 +18,51 @@ use crate::guard::{ResourceGuard, ResourceSettings};
 use crate::net::{LimitedListener, NetLimits};
 use crate::queue::{self, Dispatcher, QueueConfig};
 use crate::store::{NewToken, Store};
+use crate::tailscale::{Mode as TailscaleMode, TsError};
 use crate::token::{Role, SessionMode};
 use crate::tunnel::{StartError, Status as TunnelStatus};
+
+/// Where the helper programs are and how Tailscale listens.
+#[derive(Debug, Clone)]
+pub struct Helpers {
+    /// The HTTPS port Tailscale Serve or Funnel listens on
+    /// (`--tailscale-port`).
+    pub tailscale_port: u16,
+    /// The `tailscale` executable (`--tailscale-bin`). Default: looked up.
+    pub tailscale_bin: Option<PathBuf>,
+    /// The `cloudflared` executable (`--cloudflared-bin`). Default: looked up.
+    pub cloudflared_bin: Option<PathBuf>,
+}
+
+impl Default for Helpers {
+    fn default() -> Self {
+        Self {
+            tailscale_port: crate::tailscale::DEFAULT_PORT,
+            tailscale_bin: None,
+            cloudflared_bin: None,
+        }
+    }
+}
+
+/// A way of going public. Only one is active at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicRoute {
+    /// A Cloudflare quick tunnel.
+    Cloudflare,
+    /// Tailscale Serve or Funnel.
+    Tailscale(TailscaleMode),
+}
+
+impl PublicRoute {
+    /// How the dashboard and messages name it.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Cloudflare => "the Cloudflare tunnel".to_owned(),
+            Self::Tailscale(mode) => format!("Tailscale {mode}"),
+        }
+    }
+}
 
 /// Everything needed to start a server.
 #[derive(Debug, Clone)]
@@ -58,6 +101,10 @@ pub struct ServerConfig {
     pub tunnel_token: Option<String>,
     /// Check GitHub for a newer release in the background (once a day).
     pub update_check: bool,
+    /// Start a Tailscale Serve or Funnel route with the server.
+    pub tailscale: Option<TailscaleMode>,
+    /// Helper executables and the Tailscale port.
+    pub helpers: Helpers,
 }
 
 /// A running server.
@@ -80,6 +127,8 @@ impl Running {
         self.cancel.cancel();
         while self.tasks.join_next().await.is_some() {}
         self.state.runtime.tunnel.join().await;
+        // Its task runs the matching `tailscale ... off` before it ends.
+        self.state.runtime.tailscale.join().await;
         if let Err(e) = remove_public_url(&self.home) {
             tracing::warn!(error = %e, "could not remove {PUBLIC_URL_FILE}");
         }
@@ -131,17 +180,131 @@ pub fn remove_public_url(home: &Path) -> std::io::Result<()> {
 /// # Errors
 ///
 /// Fails at once, without starting anything, when a tunnel is already
-/// starting or up, a public URL is configured, `cloudflared` is missing or
-/// there is no Tokio runtime.
+/// starting or up, a Tailscale route is active
+/// ([`StartError::OtherRoute`]), a public URL is configured, `cloudflared`
+/// is missing or there is no Tokio runtime.
 pub fn go_public(runtime: &Arc<Runtime>, bus: &Bus) -> Result<(), StartError> {
+    if let Some(other) = active_route(runtime).filter(|r| *r != PublicRoute::Cloudflare) {
+        return Err(StartError::OtherRoute(other.label()));
+    }
     launch_tunnel(runtime, bus, true)
 }
 
+/// Starts a Tailscale Serve or Funnel route on a running server, as
+/// `--tailscale` does at startup. Progress arrives on the bus as
+/// [`Event::ApprovalNeeded`], then [`Event::TunnelReady`] or
+/// [`Event::TunnelDown`].
+///
+/// # Errors
+///
+/// Fails at once when a route is already starting or up (this one, or the
+/// Cloudflare tunnel as [`StartError::OtherRoute`]), `tailscale` is missing,
+/// Tailscale cannot reach this server or there is no Tokio runtime. Sign-in
+/// and port checks run in the background and report on the bus.
+pub fn go_tailscale(
+    runtime: &Arc<Runtime>,
+    bus: &Bus,
+    mode: TailscaleMode,
+) -> Result<(), StartError> {
+    if runtime.tunnel.active() {
+        return Err(StartError::OtherRoute(PublicRoute::Cloudflare.label()));
+    }
+    launch_tailscale(runtime, bus, mode)
+}
+
+/// The route starting or up, if any.
+#[must_use]
+pub fn active_route(runtime: &Runtime) -> Option<PublicRoute> {
+    if runtime.tunnel.active() {
+        Some(PublicRoute::Cloudflare)
+    } else if runtime.tailscale.active() {
+        runtime.tailscale.mode().map(PublicRoute::Tailscale)
+    } else {
+        None
+    }
+}
+
+/// Stops whichever route is starting or up. Tailscale's listener is turned
+/// off with its matching `off` command in the background; the bus reports
+/// [`Event::TunnelDown`] when it is done. Returns what was stopped.
+pub fn stop_public(runtime: &Runtime) -> Option<PublicRoute> {
+    let route = active_route(runtime)?;
+    match route {
+        PublicRoute::Cloudflare => runtime.tunnel.stop(),
+        PublicRoute::Tailscale(_) => runtime.tailscale.stop(),
+    };
+    Some(route)
+}
+
+/// Stops the active route, waits until it is fully off, then starts `to`.
+/// Failures arrive on the bus as [`Event::TunnelDown`].
+///
+/// # Errors
+///
+/// Fails when there is no Tokio runtime.
+pub fn switch_public(runtime: &Arc<Runtime>, bus: &Bus, to: PublicRoute) -> Result<(), StartError> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| StartError::Unavailable)?;
+    let runtime = Arc::clone(runtime);
+    let bus = bus.clone();
+    handle.spawn(async move {
+        runtime.tunnel.stop();
+        runtime.tailscale.stop();
+        runtime.tunnel.join().await;
+        runtime.tailscale.join().await;
+        let started = match to {
+            PublicRoute::Cloudflare => go_public(&runtime, &bus),
+            PublicRoute::Tailscale(mode) => go_tailscale(&runtime, &bus, mode),
+        };
+        if let Err(e) = started {
+            bus.emit(Event::TunnelDown(e.to_string()));
+        }
+    });
+    Ok(())
+}
+
+/// Makes `url` the public base unless one is set (a configured
+/// `--public-url` wins: invite links must not change) and records it in
+/// `<home>/public-url`. Returns whether it did.
+fn claim_public_url(runtime: &Runtime, home: &Path, url: &str, bus: &Bus) -> bool {
+    let ours = match runtime.public_url.write() {
+        Ok(mut current) if current.is_none() => {
+            *current = Some(url.to_owned());
+            true
+        }
+        _ => false,
+    };
+    if ours && let Err(e) = write_public_url(home, url) {
+        bus.log(format!("could not record the public URL: {e}"));
+    }
+    ours
+}
+
+/// Undoes [`claim_public_url`]: links go back to local until the next route.
+fn release_public_url(runtime: &Runtime, home: &Path, url: &str, ours: bool) {
+    if !ours {
+        return;
+    }
+    if let Ok(mut current) = runtime.public_url.write()
+        && current.as_deref() == Some(url)
+    {
+        *current = None;
+    }
+    let _ = remove_public_url(home);
+}
+
+/// Whether the whole server is stopping, as opposed to one route.
+fn shutting_down(runtime: &Runtime) -> bool {
+    runtime
+        .tunnel
+        .settings()
+        .is_some_and(|s| s.cancel.is_cancelled())
+}
+
 /// The one path every tunnel takes: claims the [`crate::tunnel::Control`],
-/// runs cloudflared until shutdown, publishes the URL unless one is
-/// configured, and reports on the bus.
+/// runs cloudflared until it is stopped or the server shuts down, publishes
+/// the URL unless one is configured, and reports on the bus.
 fn launch_tunnel(runtime: &Arc<Runtime>, bus: &Bus, on_demand: bool) -> Result<(), StartError> {
-    let settings = runtime.tunnel.begin(on_demand)?.clone();
+    let settings = runtime.tunnel.begin(on_demand)?;
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         runtime.tunnel.set_status(TunnelStatus::Off);
         return Err(StartError::Unavailable);
@@ -151,19 +314,31 @@ fn launch_tunnel(runtime: &Arc<Runtime>, bus: &Bus, on_demand: bool) -> Result<(
     let task = handle.spawn(async move {
         let runtime = runtime_task;
         let s = settings;
+        let stopped = |runtime: &Runtime| {
+            runtime.tunnel.set_status(TunnelStatus::Off);
+            if !shutting_down(runtime) {
+                bus.emit(Event::TunnelDown(
+                    "the Cloudflare tunnel is stopped".to_owned(),
+                ));
+            }
+        };
         let named = s
             .named_token
             .as_ref()
             .zip(s.configured_url.as_ref())
             .filter(|_| !on_demand);
+        let bin = s.bin.as_deref();
         let starting = async {
             match named {
-                Some((token, url)) => crate::tunnel::start_named(token, url, &s.home).await,
-                None => crate::tunnel::start(s.port, s.local_tls, &s.home).await,
+                Some((token, url)) => crate::tunnel::start_named(bin, token, url, &s.home).await,
+                None => crate::tunnel::start(bin, s.port, s.local_tls, &s.home).await,
             }
         };
         let started = tokio::select! {
-            () = s.cancel.cancelled() => return,
+            () = s.cancel.cancelled() => {
+                stopped(&runtime);
+                return;
+            }
             started = starting => started,
         };
         let mut tunnel = match started {
@@ -174,33 +349,19 @@ fn launch_tunnel(runtime: &Arc<Runtime>, bus: &Bus, on_demand: bool) -> Result<(
                 return;
             }
         };
-        // A configured public URL wins: invite links must not change.
-        let ours = match runtime.public_url.write() {
-            Ok(mut url) if url.is_none() => {
-                *url = Some(tunnel.url.clone());
-                true
-            }
-            _ => false,
-        };
-        if ours && let Err(e) = write_public_url(&s.home, &tunnel.url) {
-            bus.log(format!("could not record the public URL: {e}"));
-        }
+        let ours = claim_public_url(&runtime, &s.home, &tunnel.url, &bus);
         runtime
             .tunnel
             .set_status(TunnelStatus::Up(tunnel.url.clone()));
         bus.emit(Event::TunnelReady(tunnel.url.clone()));
         tokio::select! {
-            () = s.cancel.cancelled() => {}
+            () = s.cancel.cancelled() => {
+                let _ = tunnel.child.kill().await;
+                release_public_url(&runtime, &s.home, &tunnel.url, ours);
+                stopped(&runtime);
+            }
             status = tunnel.child.wait() => {
-                // The URL is dead now: links go back to local until the next tunnel.
-                if ours {
-                    if let Ok(mut url) = runtime.public_url.write()
-                        && url.as_deref() == Some(tunnel.url.as_str())
-                    {
-                        *url = None;
-                    }
-                    let _ = remove_public_url(&s.home);
-                }
+                release_public_url(&runtime, &s.home, &tunnel.url, ours);
                 let why = format!("cloudflared exited: {status:?}");
                 runtime.tunnel.set_status(TunnelStatus::Down(why.clone()));
                 bus.emit(Event::TunnelDown(why));
@@ -209,6 +370,112 @@ fn launch_tunnel(runtime: &Arc<Runtime>, bus: &Bus, on_demand: bool) -> Result<(
     });
     runtime.tunnel.set_task(task);
     Ok(())
+}
+
+/// The one path every Tailscale route takes: claims the
+/// [`crate::tailscale::Control`], turns the listener on, publishes the URL
+/// unless one is configured, checks every
+/// [`crate::tailscale::RECHECK_EVERY`] that the listener is still there,
+/// and on stop or shutdown runs only the matching `off` command.
+fn launch_tailscale(
+    runtime: &Arc<Runtime>,
+    bus: &Bus,
+    mode: TailscaleMode,
+) -> Result<(), StartError> {
+    let (s, bin, stop) = runtime.tailscale.begin(mode)?;
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        runtime.tailscale.set_down(TunnelStatus::Off);
+        return Err(StartError::Unavailable);
+    };
+    let owner = Arc::clone(runtime);
+    let runtime = Arc::clone(runtime);
+    let bus = bus.clone();
+    let task = handle.spawn(async move {
+        let port = s.https_port;
+        let approval = {
+            let runtime = Arc::clone(&runtime);
+            let bus = bus.clone();
+            move |url: String| {
+                runtime.tailscale.set_approval(url.clone());
+                bus.emit(Event::ApprovalNeeded(url));
+            }
+        };
+        let started =
+            crate::tailscale::start(&bin, mode, port, s.local_port, &stop, approval).await;
+        let route = match started {
+            Ok(route) => route,
+            Err(TsError::Cancelled) => {
+                runtime.tailscale.set_down(TunnelStatus::Off);
+                if !s.cancel.is_cancelled() {
+                    bus.emit(Event::TunnelDown(format!("Tailscale {mode} is stopped")));
+                }
+                return;
+            }
+            Err(e) => {
+                let why = e.to_string();
+                runtime.tailscale.set_down(TunnelStatus::Down(why.clone()));
+                bus.emit(Event::TunnelDown(why));
+                return;
+            }
+        };
+        let ours = claim_public_url(&runtime, &s.home, &route.url, &bus);
+        runtime
+            .tailscale
+            .set_up(route.url.clone(), route.host.clone());
+        bus.emit(Event::TunnelReady(route.url.clone()));
+        let removed = loop {
+            tokio::select! {
+                () = stop.cancelled() => break false,
+                () = tokio::time::sleep(crate::tailscale::RECHECK_EVERY) => {
+                    if crate::tailscale::still_up(&bin, &route, s.local_port).await == Some(false) {
+                        break true;
+                    }
+                }
+            }
+        };
+        release_public_url(&runtime, &s.home, &route.url, ours);
+        if removed {
+            // Whatever is on the port now is not Hashi's to turn off.
+            let why = format!("the Tailscale {mode} listener was removed outside Hashi");
+            runtime.tailscale.set_down(TunnelStatus::Down(why.clone()));
+            bus.emit(Event::TunnelDown(why));
+            return;
+        }
+        let off = crate::tailscale::stop(&bin, mode, port).await;
+        runtime.tailscale.set_down(TunnelStatus::Off);
+        match off {
+            Ok(()) if s.cancel.is_cancelled() => {}
+            Ok(()) => bus.emit(Event::TunnelDown(format!("Tailscale {mode} is turned off"))),
+            Err(e) => bus.log(format!(
+                "could not turn Tailscale {mode} off ({e}); run: {}",
+                crate::tailscale::off_command(mode, port)
+            )),
+        }
+    });
+    owner.tailscale.set_task(task);
+    Ok(())
+}
+
+/// Why Tailscale cannot proxy to this server, if it cannot: it proxies
+/// only to `http://127.0.0.1`.
+#[must_use]
+pub fn tailscale_unreachable(bind: SocketAddr, local_tls: bool) -> Option<String> {
+    let ip = bind.ip();
+    if local_tls {
+        Some(
+            "Tailscale proxies only to http://127.0.0.1, and this server serves HTTPS itself; \
+             run without --tls-cert to use Tailscale"
+                .to_owned(),
+        )
+    } else if ip == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        || ip == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    {
+        None
+    } else {
+        Some(format!(
+            "Tailscale proxies to 127.0.0.1, which does not reach --bind {ip}; use 127.0.0.1"
+        ))
+    }
 }
 
 async fn hsts(mut res: axum::response::Response) -> axum::response::Response {
@@ -548,6 +815,14 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
 /// Fails if the database cannot be opened or the port cannot be bound.
 pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<Running> {
     let tunnel_configured = cfg.tunnel || cfg.tunnel_token.is_some();
+    if tunnel_configured && cfg.tailscale.is_some() {
+        anyhow::bail!("choose one public route: --tunnel or --tailscale, not both");
+    }
+    if cfg.tailscale == Some(TailscaleMode::Funnel)
+        && !crate::tailscale::FUNNEL_PORTS.contains(&cfg.helpers.tailscale_port)
+    {
+        anyhow::bail!("{}", TsError::FunnelPort(cfg.helpers.tailscale_port));
+    }
     let store = Arc::new(open_store(&cfg.home)?);
     let recovered = store.recover_interrupted()?;
     if recovered > 0 {
@@ -586,9 +861,28 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         "http"
     };
 
+    let unreachable = tailscale_unreachable(local, tls_config.is_some());
+    if cfg.tailscale.is_some()
+        && let Some(why) = &unreachable
+    {
+        anyhow::bail!("{why}");
+    }
+
     let cancel = CancellationToken::new();
+    let tailscale = crate::tailscale::Control::new(
+        crate::tailscale::Settings {
+            bin: cfg.helpers.tailscale_bin.clone(),
+            local_port: local.port(),
+            https_port: cfg.helpers.tailscale_port,
+            unreachable,
+            home: cfg.home.clone(),
+            cancel: cancel.clone(),
+        },
+        net.proxy_trust.clone(),
+    );
     let tunnel = crate::tunnel::Control::new(
         crate::tunnel::Settings {
+            bin: cfg.helpers.cloudflared_bin.clone(),
             port: local.port(),
             local_tls: tls_config.is_some(),
             home: cfg.home.clone(),
@@ -606,6 +900,7 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         agents,
         name: cfg.name.clone(),
         tunnel,
+        tailscale,
     });
     // A file left by a run that did not shut down cleanly is stale.
     let recorded = match &cfg.public_url {
@@ -676,6 +971,13 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
 
     if tunnel_configured {
         launch_tunnel(&runtime, &bus, false)?;
+    }
+    if let Some(mode) = cfg.tailscale {
+        // Missing or signed-out Tailscale is reported on the bus, like a
+        // tunnel that fails to start, so the server still comes up.
+        if let Err(e) = launch_tailscale(&runtime, &bus, mode) {
+            bus.emit(Event::TunnelDown(e.to_string()));
+        }
     }
 
     if cfg.update_check {

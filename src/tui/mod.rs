@@ -5,6 +5,7 @@ mod clipboard;
 pub mod theme;
 pub mod ui;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{Event as TermEvent, EventStream};
@@ -16,6 +17,18 @@ pub use app::App;
 
 use crate::api::AppState;
 use crate::events::Event;
+
+/// Set while a command runs with the terminal attached (an install from the
+/// Commands view). Ctrl-C then belongs to that command, so the caller's stop
+/// signal should be ignored: see [`command_running`].
+static COMMAND_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the dashboard has stepped aside for a command right now. A
+/// Ctrl-C that arrives meanwhile is meant for the command, not for Hashi.
+#[must_use]
+pub fn command_running() -> bool {
+    COMMAND_RUNNING.load(Ordering::Acquire)
+}
 
 /// Runs the dashboard until the user quits.
 ///
@@ -79,6 +92,15 @@ async fn event_loop(
             maybe = input.next() => match maybe {
                 Some(Ok(TermEvent::Key(key))) => {
                     app.on_key(key);
+                    if let Some(plan) = app.take_pending_command() {
+                        // The stream's reader thread must stop before the
+                        // command reads the terminal, or it eats keystrokes.
+                        drop(input);
+                        let helper = plan.helper();
+                        let result = run_attached(terminal, plan).await;
+                        input = EventStream::new();
+                        app.command_finished(helper, result);
+                    }
                     dirty = true;
                 }
                 // Resize, focus and paste: redraw to be safe.
@@ -102,6 +124,46 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+/// Leaves the dashboard, runs `plan` with the terminal attached (so `sudo`
+/// can prompt), waits for Enter, then takes the terminal back. The server
+/// keeps running throughout; bus events wait in the subscription.
+async fn run_attached(
+    terminal: &mut DefaultTerminal,
+    plan: crate::install::Plan,
+) -> Result<(), String> {
+    ratatui::restore();
+    COMMAND_RUNNING.store(true, Ordering::Release);
+    let helper = plan.helper();
+    println!("\n  ✦ hashi install {helper}\n");
+    println!("  {}\n", plan.text().replace('\n', "\n  "));
+    let result = tokio::task::spawn_blocking(move || crate::install::run(&plan))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| format!("{e:#}")));
+    match &result {
+        Ok(()) => println!("\n  done."),
+        Err(e) => println!("\n  {e}"),
+    }
+    println!("  Press Enter to go back to the dashboard.");
+    let _ = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)
+    })
+    .await;
+    COMMAND_RUNNING.store(false, Ordering::Release);
+    if let Err(e) = reenter(terminal) {
+        return Err(format!("could not restore the dashboard: {e}"));
+    }
+    result
+}
+
+/// Takes the terminal back after [`ratatui::restore`].
+fn reenter(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+    terminal.clear()
 }
 
 /// Applies events that are already waiting, up to a bound so input stays

@@ -16,7 +16,7 @@ use hashi::guard::{GIB, HoldReason, ManualProbe, ResourceGuard, ResourceSettings
 use hashi::queue::Dispatcher;
 use hashi::store::{NewRequest, NewToken, Store};
 use hashi::token::{Role, SessionMode};
-use hashi::tui::app::{App, Popup, Tab};
+use hashi::tui::app::{Action, App, Popup, Tab};
 use hashi::tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -74,6 +74,7 @@ fn state() -> AppState {
             public_url: RwLock::new(None),
             name: "Hashi".into(),
             tunnel: Default::default(),
+            tailscale: Default::default(),
             agents: vec![
                 AgentInfo {
                     agent: AgentKind::Claude,
@@ -301,7 +302,7 @@ fn last_admin_cannot_be_revoked_from_the_ui() {
 #[test]
 fn every_view_renders() {
     let mut app = App::new(state(), None, false);
-    for tab in ['1', '2', '3', '4', '?'] {
+    for tab in ['1', '2', '3', '4', '5', '?'] {
         app.on_key(key(KeyCode::Char(tab)));
         draw(&mut app, 120, 34);
     }
@@ -590,6 +591,7 @@ fn with_agents(installed: &[AgentKind]) -> AppState {
         agents,
         name: "Hashi".into(),
         tunnel: Default::default(),
+        tailscale: Default::default(),
     });
     st
 }
@@ -823,8 +825,10 @@ fn go_public_key_defers_to_a_configured_public_url() {
         public_url: RwLock::new(Some(url.into())),
         agents: Vec::new(),
         name: "Hashi".into(),
+        tailscale: Default::default(),
         tunnel: hashi::tunnel::Control::new(
             hashi::tunnel::Settings {
+                bin: None,
                 port: 7878,
                 local_tls: false,
                 home: std::env::temp_dir(),
@@ -849,4 +853,222 @@ fn go_public_key_defers_to_a_configured_public_url() {
         hashi::tunnel::Status::Off
     );
     assert!(draw(&mut app, 140, 40).contains(url));
+}
+
+/// A server whose helpers are at paths that do not exist, so the Commands
+/// view reads the same on every machine.
+fn without_helpers() -> AppState {
+    let mut st = state();
+    let missing = std::env::temp_dir().join("hashi-test-no-such-helper");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    st.runtime = Arc::new(Runtime {
+        started: Instant::now(),
+        local_url: "http://127.0.0.1:7878".into(),
+        public_url: RwLock::new(None),
+        agents: Vec::new(),
+        name: "Hashi".into(),
+        tunnel: hashi::tunnel::Control::new(
+            hashi::tunnel::Settings {
+                bin: Some(missing.clone()),
+                port: 7878,
+                local_tls: false,
+                home: std::env::temp_dir(),
+                configured_url: None,
+                named_token: None,
+                configured: false,
+                cancel: cancel.clone(),
+            },
+            hashi::net::TunnelTrust::default(),
+        ),
+        tailscale: hashi::tailscale::Control::new(
+            hashi::tailscale::Settings {
+                bin: Some(missing),
+                local_port: 7878,
+                https_port: 443,
+                unreachable: None,
+                home: std::env::temp_dir(),
+                cancel,
+            },
+            hashi::net::TunnelTrust::default(),
+        ),
+    });
+    st
+}
+
+fn select_action(app: &mut App, action: Action) {
+    app.on_key(key(KeyCode::Char('5')));
+    for _ in 0..Action::ALL.len() {
+        app.on_key(key(KeyCode::Up));
+    }
+    let i = Action::ALL.iter().position(|a| *a == action).unwrap();
+    for _ in 0..i {
+        app.on_key(key(KeyCode::Char('j')));
+    }
+    assert_eq!(app.selected_action(), action);
+}
+
+#[test]
+fn commands_tab_lists_every_group_with_state_and_cli() {
+    let mut app = App::new(without_helpers(), None, false);
+    app.on_key(key(KeyCode::Char('5')));
+    assert_eq!(app.tab, Tab::Commands);
+    let out = draw(&mut app, 170, 44);
+    for text in [
+        "5 Commands",
+        "Go public",
+        "Share",
+        "Install",
+        "Maintenance",
+        "Help",
+        "Cloudflare quick tunnel",
+        "Tailscale serve",
+        "Tailscale funnel",
+        "Stop going public",
+        "nothing is public",
+        "hashi serve --tunnel",
+        "hashi serve --tailscale serve",
+        "hashi serve --tailscale funnel",
+        "hashi share <label>",
+        "hashi token create <name>",
+        "hashi install cloudflared",
+        "hashi install tailscale",
+        "hashi update --check",
+        "hashi --help",
+        "not installed",
+        "same from a terminal",
+    ] {
+        assert!(out.contains(text), "missing {text:?}");
+    }
+}
+
+#[test]
+fn commands_tab_selects_with_arrows_and_jk_and_stays_in_bounds() {
+    let mut app = App::new(without_helpers(), None, false);
+    app.on_key(key(KeyCode::Char('5')));
+    assert_eq!(app.selected_action(), Action::Cloudflare);
+    app.on_key(key(KeyCode::Up));
+    assert_eq!(app.selected_action(), Action::Cloudflare);
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Char('j')));
+    assert_eq!(app.selected_action(), Action::TailscaleFunnel);
+    app.on_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected_action(), Action::TailscaleServe);
+    for _ in 0..20 {
+        app.on_key(key(KeyCode::Down));
+    }
+    assert_eq!(app.selected_action(), Action::Help);
+    let out = draw(&mut app, 170, 44);
+    assert!(out.contains("every key the dashboard knows"));
+}
+
+#[test]
+fn enter_runs_the_selected_command() {
+    let mut app = App::new(without_helpers(), None, false);
+    select_action(&mut app, Action::NewInvite);
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Share(_))));
+    app.on_key(key(KeyCode::Esc));
+
+    select_action(&mut app, Action::NewToken);
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::NewToken(_))));
+    app.on_key(key(KeyCode::Esc));
+
+    select_action(&mut app, Action::Help);
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Help)));
+    assert!(draw(&mut app, 140, 44).contains("Commands"));
+    app.on_key(key(KeyCode::Esc));
+
+    select_action(&mut app, Action::StopPublic);
+    app.on_key(key(KeyCode::Enter));
+    assert!(toast(&app).contains("nothing is public"));
+
+    // A missing helper opens the install popup with its command.
+    select_action(&mut app, Action::InstallTailscale);
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::Install(plan)) = &app.popup else {
+        panic!("expected the install popup")
+    };
+    assert_eq!(plan.helper(), hashi::install::Helper::Tailscale);
+    let shown = plan.text();
+    let out = draw(&mut app, 170, 44);
+    assert!(out.contains("install tailscale"));
+    assert!(out.contains(shown.lines().next().unwrap()));
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.popup.is_none());
+    assert!(app.take_pending_command().is_none(), "esc runs nothing");
+
+    // Starting Tailscale without it installed also offers the install.
+    select_action(&mut app, Action::TailscaleFunnel);
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(&app.popup, Some(Popup::Install(p)) if p.helper() == hashi::install::Helper::Tailscale)
+    );
+}
+
+#[test]
+fn go_public_without_cloudflared_offers_its_install() {
+    let mut app = App::new(without_helpers(), None, false);
+    app.on_key(key(KeyCode::Char('t')));
+    assert!(
+        matches!(&app.popup, Some(Popup::Install(p)) if p.helper() == hashi::install::Helper::Cloudflared)
+    );
+    assert!(!app.state.runtime.tunnel.trust().get());
+}
+
+#[test]
+fn enter_in_the_install_popup_hands_the_command_to_the_terminal() {
+    use hashi::install::{Helper, Platform, plan};
+    let mut app = App::new(without_helpers(), None, false);
+    let linux = plan(Helper::Tailscale, Platform::Linux, |_| true);
+    app.popup = Some(Popup::Install(linux.clone()));
+    let out = draw(&mut app, 170, 44);
+    assert!(out.contains("curl -fsSL https://tailscale.com/install.sh | sh"));
+    assert!(out.contains("run it"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.popup.is_none());
+    assert_eq!(app.take_pending_command(), Some(linux));
+    assert_eq!(app.take_pending_command(), None);
+
+    // A download page has nothing to run.
+    let page = plan(Helper::Tailscale, Platform::Windows, |_| true);
+    app.popup = Some(Popup::Install(page));
+    assert!(draw(&mut app, 170, 44).contains("https://tailscale.com/download/windows"));
+}
+
+#[test]
+fn s_and_n_still_open_their_forms() {
+    let mut app = App::new(without_helpers(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('s')));
+    assert!(matches!(app.popup, Some(Popup::Share(_))));
+    app.on_key(key(KeyCode::Esc));
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(matches!(app.popup, Some(Popup::NewToken(_))));
+    app.on_key(key(KeyCode::Esc));
+    // And from the Commands view, whose rows name them.
+    app.on_key(key(KeyCode::Char('5')));
+    app.on_key(key(KeyCode::Char('s')));
+    assert!(matches!(app.popup, Some(Popup::Share(_))));
+}
+
+#[test]
+fn an_approval_url_opens_a_popup() {
+    let mut app = App::new(without_helpers(), None, false);
+    let url = "https://login.tailscale.com/f/funnel?node=abc";
+    app.on_event(Event::ApprovalNeeded(url.into()));
+    assert!(matches!(&app.popup, Some(Popup::Approval { url: u }) if u == url));
+    assert!(draw(&mut app, 140, 40).contains(url));
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.popup.is_none());
+}
+
+#[test]
+fn a_deliberate_stop_reads_as_off_not_failed() {
+    let mut app = App::new(without_helpers(), None, false);
+    app.on_event(Event::TunnelReady("https://a.trycloudflare.com".into()));
+    app.on_event(Event::TunnelDown("the Cloudflare tunnel is stopped".into()));
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("press t to go public"), "{out}");
 }

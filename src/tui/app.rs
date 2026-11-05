@@ -11,7 +11,10 @@ use crate::agent::AgentKind;
 use crate::api::AppState;
 use crate::events::Event;
 use crate::guard::ResourceSnapshot;
+use crate::install::Helper;
+use crate::server::PublicRoute;
 use crate::store::{Invite, NewInvite, NewToken, Request, Revoke, Stats, TokenUsage};
+use crate::tailscale::Mode;
 use crate::token::{Limits, Role, SessionMode, Token, TokenStatus};
 use crate::tunnel::StartError;
 use crate::util::{now_ms, one_line, truncate};
@@ -27,11 +30,19 @@ pub enum Tab {
     Tokens,
     /// Event log.
     Logs,
+    /// Everything the owner can do, with its CLI equivalent.
+    Commands,
 }
 
 impl Tab {
     /// Display order.
-    pub const ALL: [Self; 4] = [Self::Overview, Self::Requests, Self::Tokens, Self::Logs];
+    pub const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Requests,
+        Self::Tokens,
+        Self::Logs,
+        Self::Commands,
+    ];
 
     /// Tab label.
     #[must_use]
@@ -41,6 +52,7 @@ impl Tab {
             Self::Requests => "Requests",
             Self::Tokens => "Tokens",
             Self::Logs => "Logs",
+            Self::Commands => "Commands",
         }
     }
 
@@ -54,6 +66,117 @@ impl Tab {
         Self::ALL[i.cast_unsigned()]
     }
 }
+
+/// A row of the Commands view: something the owner can do from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Start a Cloudflare quick tunnel.
+    Cloudflare,
+    /// Start Tailscale Serve.
+    TailscaleServe,
+    /// Start Tailscale Funnel.
+    TailscaleFunnel,
+    /// Stop whichever route is public.
+    StopPublic,
+    /// Create an invite link.
+    NewInvite,
+    /// Create a token.
+    NewToken,
+    /// Install cloudflared.
+    InstallCloudflared,
+    /// Install tailscale.
+    InstallTailscale,
+    /// Check for a newer release.
+    CheckUpdate,
+    /// Copy the API base URL.
+    CopyUrl,
+    /// Show every key binding.
+    Help,
+}
+
+impl Action {
+    /// Display order. [`Action::group`] starts a new heading where it changes.
+    pub const ALL: [Self; 11] = [
+        Self::Cloudflare,
+        Self::TailscaleServe,
+        Self::TailscaleFunnel,
+        Self::StopPublic,
+        Self::NewInvite,
+        Self::NewToken,
+        Self::InstallCloudflared,
+        Self::InstallTailscale,
+        Self::CheckUpdate,
+        Self::CopyUrl,
+        Self::Help,
+    ];
+
+    /// The heading the row sits under.
+    #[must_use]
+    pub const fn group(self) -> &'static str {
+        match self {
+            Self::Cloudflare | Self::TailscaleServe | Self::TailscaleFunnel | Self::StopPublic => {
+                "Go public"
+            }
+            Self::NewInvite | Self::NewToken => "Share",
+            Self::InstallCloudflared | Self::InstallTailscale => "Install",
+            Self::CheckUpdate | Self::CopyUrl => "Maintenance",
+            Self::Help => "Help",
+        }
+    }
+
+    /// The key that runs it from anywhere, or `enter` from this view.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "t",
+            Self::NewInvite => "s",
+            Self::NewToken => "n",
+            Self::CopyUrl => "c",
+            Self::Help => "?",
+            _ => "enter",
+        }
+    }
+
+    /// Short name.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "Cloudflare quick tunnel",
+            Self::TailscaleServe => "Tailscale serve",
+            Self::TailscaleFunnel => "Tailscale funnel",
+            Self::StopPublic => "Stop going public",
+            Self::NewInvite => "New invite",
+            Self::NewToken => "New token",
+            Self::InstallCloudflared => "Install cloudflared",
+            Self::InstallTailscale => "Install tailscale",
+            Self::CheckUpdate => "Check for updates",
+            Self::CopyUrl => "Copy the API URL",
+            Self::Help => "All key bindings",
+        }
+    }
+
+    /// One line on what it does.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "a random public HTTPS link, no account needed",
+            Self::TailscaleServe => "your tailnet only, at <machine>.<tailnet>.ts.net",
+            Self::TailscaleFunnel => "anyone on the internet, through Tailscale",
+            Self::StopPublic => "turn off the active route; links go back to local",
+            Self::NewInvite => "a one-time link that gives someone their own token",
+            Self::NewToken => "an API token for a script or app",
+            Self::InstallCloudflared => "Cloudflare's own install command for this machine",
+            Self::InstallTailscale => "Tailscale's own install command for this machine",
+            Self::CheckUpdate => "ask GitHub for the latest release",
+            Self::CopyUrl => "the base URL clients should use",
+            Self::Help => "every key the dashboard knows",
+        }
+    }
+}
+
+/// What `enter` in the Commands view asks the event loop to run with the
+/// terminal attached: an install plan.
+pub type PendingCommand = crate::install::Plan;
 
 /// Which agents a new token may use: every agent, or exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,6 +467,20 @@ pub enum Popup {
         /// Invite label.
         label: String,
     },
+    /// A helper is missing: its install command, to run, copy or cancel.
+    Install(crate::install::Plan),
+    /// Another route is public; switching stops it first.
+    ConfirmSwitch {
+        /// The route that is public now.
+        from: PublicRoute,
+        /// The route asked for.
+        to: PublicRoute,
+    },
+    /// Tailscale printed a URL the owner must open to approve something.
+    Approval {
+        /// The URL, as the CLI printed it.
+        url: String,
+    },
 }
 
 /// Public tunnel state.
@@ -425,6 +562,17 @@ pub struct App {
     last_refresh: Option<Instant>,
     /// The selected request in full, for the detail pane.
     pub(crate) detail: Option<Request>,
+    /// Selected row of the Commands view, an index into [`Action::ALL`].
+    pub commands_selected: usize,
+    /// An install `enter` asked for, run by the event loop with the
+    /// terminal attached.
+    pub pending_command: Option<PendingCommand>,
+    /// Where `cloudflared` is, if installed.
+    pub cloudflared: Option<std::path::PathBuf>,
+    /// Where `tailscale` is, if installed.
+    pub tailscale_bin: Option<std::path::PathBuf>,
+    /// Tailscale's `BackendState` from the last background probe.
+    tailscale_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 const FEED_CAP: usize = 500;
@@ -467,6 +615,11 @@ impl App {
             detail_cache: super::ui::DetailCache::default(),
             last_refresh: None,
             detail: None,
+            commands_selected: 0,
+            pending_command: None,
+            cloudflared: None,
+            tailscale_bin: None,
+            tailscale_state: std::sync::Arc::default(),
         };
         app.refresh();
         app
@@ -520,6 +673,7 @@ impl App {
             Err(e) => self.notify(format!("refresh failed: {e}")),
         }
         self.resources = self.state.guard.snapshot();
+        self.refresh_helpers();
         self.last_refresh = Some(Instant::now());
     }
 
@@ -634,12 +788,29 @@ impl App {
                 }
             }
             Event::TunnelDown(reason) => {
-                self.tunnel = TunnelState::Down(reason.clone());
+                // A deliberate stop, or a switch already under way, is not a
+                // failure: the runtime knows which it is.
+                self.tunnel = self
+                    .runtime_route_state()
+                    .unwrap_or_else(|| TunnelState::Down(reason.clone()));
                 FeedItem {
                     at: now_ms(),
                     glyph: "!",
                     color: theme::AMBER,
                     text: format!("tunnel: {reason}"),
+                }
+            }
+            Event::ApprovalNeeded(url) => {
+                if self.popup.is_none() {
+                    self.popup = Some(Popup::Approval { url: url.clone() });
+                } else {
+                    self.notify("Tailscale needs your approval: see Logs");
+                }
+                FeedItem {
+                    at: now_ms(),
+                    glyph: "!",
+                    color: theme::AMBER,
+                    text: format!("approve in your browser: {url}"),
                 }
             }
             Event::UpdateAvailable { version, .. } => {
@@ -693,7 +864,7 @@ impl App {
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
                 self.set_tab(self.tab.shift(-1))
             }
-            KeyCode::Char(c @ '1'..='4') => {
+            KeyCode::Char(c @ '1'..='5') => {
                 let i = usize::from(u8::try_from(c).unwrap_or(b'1') - b'1');
                 self.set_tab(Tab::ALL[i]);
             }
@@ -714,10 +885,11 @@ impl App {
                 self.notify("refreshed");
             }
             KeyCode::Char('t') => self.go_public(),
-            KeyCode::Char('n') if self.tab == Tab::Tokens => {
+            KeyCode::Enter if self.tab == Tab::Commands => self.run_action(self.selected_action()),
+            KeyCode::Char('n') if matches!(self.tab, Tab::Tokens | Tab::Commands) => {
                 self.popup = Some(Popup::NewToken(TokenForm::new()))
             }
-            KeyCode::Char('s') if self.tab == Tab::Tokens => {
+            KeyCode::Char('s') if matches!(self.tab, Tab::Tokens | Tab::Commands) => {
                 self.popup = Some(Popup::Share(ShareForm::new()));
             }
             KeyCode::Char('i') if self.tab == Tab::Tokens => {
@@ -804,7 +976,8 @@ impl App {
                         let url = self.invite_url(&code);
                         self.copy(&url, "invite link copied to clipboard");
                     }
-                    KeyCode::Char('t') => self.go_public(),
+                    // No popups from here: they would replace the link.
+                    KeyCode::Char('t') => self.start_route(PublicRoute::Cloudflare, false),
                     KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => return None,
                     _ => {}
                 }
@@ -814,6 +987,40 @@ impl App {
                     link_hours,
                 })
             }
+            Popup::Install(plan) => match key.code {
+                KeyCode::Enter if matches!(plan, crate::install::Plan::Run { .. }) => {
+                    self.pending_command = Some(plan);
+                    None
+                }
+                KeyCode::Enter | KeyCode::Char('c') => {
+                    self.copy(&plan.text(), "copied to clipboard");
+                    Some(Popup::Install(plan))
+                }
+                KeyCode::Esc | KeyCode::Char('q') => None,
+                _ => Some(Popup::Install(plan)),
+            },
+            Popup::ConfirmSwitch { from, to } => match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    match crate::server::switch_public(&self.state.runtime, &self.state.bus, to) {
+                        Ok(()) => {
+                            self.tunnel = TunnelState::Starting;
+                            self.notify(format!("switching to {}", to.label()));
+                        }
+                        Err(e) => self.notify(e.to_string()),
+                    }
+                    None
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
+                _ => Some(Popup::ConfirmSwitch { from, to }),
+            },
+            Popup::Approval { url } => match key.code {
+                KeyCode::Char('c') => {
+                    self.copy(&url, "approval link copied");
+                    Some(Popup::Approval { url })
+                }
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => None,
+                _ => Some(Popup::Approval { url }),
+            },
             Popup::Share(mut form) => {
                 match key.code {
                     KeyCode::Esc => return None,
@@ -1033,11 +1240,21 @@ impl App {
     }
 
     fn set_tab(&mut self, tab: Tab) {
+        if tab == Tab::Commands && self.tab != Tab::Commands {
+            self.probe_tailscale();
+        }
         self.tab = tab;
         self.detail_scroll = 0;
     }
 
     fn move_selection(&mut self, by: isize) {
+        if self.tab == Tab::Commands {
+            self.commands_selected = self
+                .commands_selected
+                .saturating_add_signed(by)
+                .min(Action::ALL.len() - 1);
+            return;
+        }
         let (table, len) = match self.tab {
             Tab::Requests => (&mut self.requests_table, self.recent.len()),
             Tab::Tokens => match self.tokens_focus {
@@ -1082,10 +1299,31 @@ impl App {
 
     /// Starts a quick tunnel on the running server (key `t`).
     pub fn go_public(&mut self) {
-        match crate::server::go_public(&self.state.runtime, &self.state.bus) {
+        self.start_route(PublicRoute::Cloudflare, true);
+    }
+
+    /// Starts `to`. With `popups`, a missing helper opens the install popup
+    /// and another active route asks to switch; without (from inside another
+    /// popup), both become a toast.
+    pub fn start_route(&mut self, to: PublicRoute, popups: bool) {
+        let rt = &self.state.runtime;
+        let started = match to {
+            PublicRoute::Cloudflare => crate::server::go_public(rt, &self.state.bus),
+            PublicRoute::Tailscale(mode) => crate::server::go_tailscale(rt, &self.state.bus, mode),
+        };
+        match started {
             Ok(()) => {
                 self.tunnel = TunnelState::Starting;
-                self.notify("starting a public tunnel");
+                self.notify(format!("starting {}", to.label()));
+            }
+            Err(StartError::OtherRoute(_)) if popups => {
+                if let Some(from) = crate::server::active_route(rt) {
+                    self.popup = Some(Popup::ConfirmSwitch { from, to });
+                }
+            }
+            Err(StartError::NotInstalled) if popups => self.open_install(Helper::Cloudflared),
+            Err(StartError::TailscaleNotInstalled) if popups => {
+                self.open_install(Helper::Tailscale);
             }
             Err(StartError::NotInstalled) => self.notify(format!(
                 "cloudflared is not installed: {}",
@@ -1093,6 +1331,211 @@ impl App {
             )),
             Err(e) => self.notify(e.to_string()),
         }
+    }
+
+    /// Stops whichever route is public.
+    pub fn stop_public(&mut self) {
+        match crate::server::stop_public(&self.state.runtime) {
+            Some(route) => self.notify(format!("stopping {}", route.label())),
+            None => self.notify("nothing is public"),
+        }
+    }
+
+    fn open_install(&mut self, helper: Helper) {
+        self.popup = Some(Popup::Install(crate::install::plan_here(helper)));
+    }
+
+    /// The executable for `helper`, as the server would find it. Refreshed
+    /// with the rest of the data.
+    #[must_use]
+    pub fn helper_path(&self, helper: Helper) -> Option<&std::path::Path> {
+        match helper {
+            Helper::Cloudflared => self.cloudflared.as_deref(),
+            Helper::Tailscale => self.tailscale_bin.as_deref(),
+        }
+    }
+
+    fn refresh_helpers(&mut self) {
+        let rt = &self.state.runtime;
+        let cf_custom = rt.tunnel.settings().and_then(|s| s.bin.clone());
+        let ts_custom = rt.tailscale.settings().and_then(|s| s.bin.clone());
+        self.cloudflared = crate::install::locate(Helper::Cloudflared, cf_custom.as_deref());
+        self.tailscale_bin = crate::install::locate(Helper::Tailscale, ts_custom.as_deref());
+    }
+
+    /// Asks `tailscale status --json` in the background whether this device
+    /// is signed in, for the Commands view. Needs a Tokio runtime and an
+    /// installed `tailscale`.
+    fn probe_tailscale(&mut self) {
+        let Some(bin) = self.tailscale_bin.clone() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let slot = std::sync::Arc::clone(&self.tailscale_state);
+        rt.spawn(async move {
+            let state = match crate::tailscale::self_status(&bin).await {
+                Ok(me) => me.backend_state,
+                Err(e) => format!("unknown ({e})"),
+            };
+            if let Ok(mut s) = slot.lock() {
+                *s = Some(state);
+            }
+        });
+    }
+
+    /// Tailscale's `BackendState` from the last probe, such as `Running`.
+    #[must_use]
+    pub fn tailscale_backend(&self) -> Option<String> {
+        self.tailscale_state.lock().ok().and_then(|s| s.clone())
+    }
+
+    /// Runs a Commands view row.
+    pub fn run_action(&mut self, action: Action) {
+        match action {
+            Action::Cloudflare => self.go_public(),
+            Action::TailscaleServe => self.start_route(PublicRoute::Tailscale(Mode::Serve), true),
+            Action::TailscaleFunnel => {
+                self.start_route(PublicRoute::Tailscale(Mode::Funnel), true);
+            }
+            Action::StopPublic => self.stop_public(),
+            Action::NewInvite => self.popup = Some(Popup::Share(ShareForm::new())),
+            Action::NewToken => self.popup = Some(Popup::NewToken(TokenForm::new())),
+            Action::InstallCloudflared | Action::InstallTailscale => {
+                let helper = if action == Action::InstallCloudflared {
+                    Helper::Cloudflared
+                } else {
+                    Helper::Tailscale
+                };
+                match self.helper_path(helper) {
+                    Some(path) => {
+                        let msg = format!("{helper} is already installed at {}", path.display());
+                        self.notify(msg);
+                    }
+                    None => self.open_install(helper),
+                }
+            }
+            Action::CheckUpdate => self.check_update(),
+            Action::CopyUrl => {
+                let url = self.state.runtime.base_url();
+                self.copy(&url, "URL copied");
+            }
+            Action::Help => self.popup = Some(Popup::Help),
+        }
+    }
+
+    fn check_update(&mut self) {
+        if let Some(v) = &self.update {
+            let msg = format!("v{v} is available: run hashi update in a terminal");
+            self.notify(msg);
+            return;
+        }
+        if crate::update::opted_out() {
+            self.notify(format!(
+                "the update check is off ({})",
+                crate::update::OPT_OUT_ENV
+            ));
+            return;
+        }
+        // Only a running server has a home and a network to ask; the test
+        // dashboard has neither.
+        let home = self.state.store.data_dir();
+        let (true, Some(home)) = (self.state.runtime.tunnel.settings().is_some(), home) else {
+            self.notify("run hashi update --check in a terminal");
+            return;
+        };
+        let bus = self.state.bus.clone();
+        // A plain thread, as for the startup check: the request must never
+        // hold up shutdown.
+        let spawned = std::thread::Builder::new()
+            .name("hashi-update-check".to_owned())
+            .spawn(move || {
+                let found = crate::update::check(
+                    &home,
+                    crate::update::LATEST_URL,
+                    crate::util::now_ms(),
+                    true,
+                );
+                match found {
+                    Ok(r)
+                        if crate::update::is_newer(
+                            &r.version,
+                            &crate::update::current_version(),
+                        ) =>
+                    {
+                        bus.emit(Event::UpdateAvailable {
+                            version: r.version.to_string(),
+                            url: r.url,
+                        });
+                    }
+                    Ok(r) => bus.log(format!("hashi is up to date (latest v{})", r.version)),
+                    Err(e) => bus.log(format!("could not check for updates: {e:#}")),
+                }
+            });
+        if spawned.is_err() {
+            self.notify("could not start the update check");
+            return;
+        }
+        self.notify("checking for updates");
+    }
+
+    /// The row selected in the Commands view.
+    #[must_use]
+    pub fn selected_action(&self) -> Action {
+        Action::ALL[self.commands_selected.min(Action::ALL.len() - 1)]
+    }
+
+    /// Takes the install plan `enter` asked to run, for the event loop to
+    /// run with the terminal attached.
+    pub fn take_pending_command(&mut self) -> Option<PendingCommand> {
+        self.pending_command.take()
+    }
+
+    /// Called by the event loop when a command run with the terminal
+    /// attached has finished.
+    pub fn command_finished(&mut self, helper: Helper, result: Result<(), String>) {
+        self.refresh_helpers();
+        match result {
+            Ok(()) if self.helper_path(helper).is_some() => {
+                self.notify(format!("{helper} is installed"));
+                self.state.bus.log(format!("{helper} installed"));
+            }
+            Ok(()) => self.notify(format!(
+                "{helper} is still not found; open a new terminal or restart hashi"
+            )),
+            Err(e) => self.notify(format!("install failed: {e}")),
+        }
+        if helper == Helper::Tailscale {
+            self.probe_tailscale();
+        }
+        self.last_refresh = None;
+    }
+
+    /// The tunnel state the runtime reports, when it settles the question:
+    /// a route starting or up, or (on a real server) both routes off.
+    fn runtime_route_state(&self) -> Option<TunnelState> {
+        use crate::tunnel::Status;
+        let rt = &self.state.runtime;
+        let statuses = [rt.tailscale.status(), rt.tunnel.status()];
+        for s in &statuses {
+            match s {
+                Status::Up(url) => return Some(TunnelState::Up(url.clone())),
+                Status::Starting => return Some(TunnelState::Starting),
+                _ => {}
+            }
+        }
+        let real = rt.tunnel.settings().is_some() || rt.tailscale.settings().is_some();
+        (real && statuses.iter().all(|s| *s == Status::Off)).then_some(TunnelState::Off)
+    }
+
+    /// Which route the header's public URL belongs to, when it is Tailscale.
+    #[must_use]
+    pub fn tailscale_mode_up(&self) -> Option<Mode> {
+        let ts = &self.state.runtime.tailscale;
+        matches!(ts.status(), crate::tunnel::Status::Up(_))
+            .then(|| ts.mode())
+            .flatten()
     }
 
     /// Shows a transient message in the footer.

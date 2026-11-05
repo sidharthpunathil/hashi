@@ -15,6 +15,7 @@ pub mod remote;
 pub mod server;
 pub mod shutdown;
 pub mod store;
+pub mod tailscale;
 pub mod tls;
 pub mod token;
 pub mod tui;

@@ -49,6 +49,9 @@ pub enum Event {
     TunnelReady(String),
     /// The public tunnel failed or closed.
     TunnelDown(String),
+    /// Tailscale asks the owner to approve something (such as turning on
+    /// Funnel for the tailnet) at this URL, exactly as its CLI printed it.
+    ApprovalNeeded(String),
     /// A newer Hashi release is published.
     UpdateAvailable {
         /// The new version, such as `0.3.0`.

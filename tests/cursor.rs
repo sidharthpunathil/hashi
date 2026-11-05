@@ -79,6 +79,8 @@ async fn harness() -> Harness {
         tls: None,
         tunnel_token: None,
         update_check: false,
+        tailscale: None,
+        helpers: Default::default(),
     };
 
     let running = server::start(cfg, Bus::default()).await.unwrap();

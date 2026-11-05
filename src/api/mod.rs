@@ -96,6 +96,9 @@ pub struct Runtime {
     pub name: String,
     /// The public tunnel, which the dashboard can start on a running server.
     pub tunnel: crate::tunnel::Control,
+    /// The Tailscale Serve or Funnel route, started with `--tailscale` or
+    /// from the dashboard. At most one of it and the tunnel is active.
+    pub tailscale: crate::tailscale::Control,
 }
 
 impl Runtime {
@@ -194,7 +197,12 @@ async fn host_check(
             .runtime
             .public_url()
             .and_then(|u| crate::net::url_host(&u));
-        if !crate::net::host_allowed(host, public.as_deref(), &policy.extra) {
+        // The Tailscale device name is known only once its route is up, and
+        // is accepted only while it is, even when --public-url is the base.
+        let route = policy.runtime.tailscale.host();
+        let allowed = crate::net::host_allowed(host, public.as_deref(), &policy.extra)
+            || route.is_some_and(|r| crate::net::host_allowed(host, Some(&r), &[]));
+        if !allowed {
             return ApiError::coded(
                 StatusCode::MISDIRECTED_REQUEST,
                 "unknown_host",
