@@ -186,6 +186,7 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
         text,
         session_id,
         usage,
+        rate_limits: Vec::new(),
     })
 }
 
