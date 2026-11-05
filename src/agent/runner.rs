@@ -628,8 +628,11 @@ exit 0;
     async fn detached_daemon_dies_when_the_run_times_out() {
         let Some(perl) = perl() else { return };
         let daemon = Daemon::new();
+        // Long enough that a slow CI machine has started the daemon (and it
+        // has written its pid) before the timeout kills the run; otherwise
+        // the test cannot tell "killed" from "never started".
         let limits = Limits {
-            timeout: Duration::from_millis(1_500),
+            timeout: Duration::from_millis(4_000),
             ..sampled(50, u64::MAX)
         };
         let err = run(
