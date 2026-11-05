@@ -1,5 +1,7 @@
 //! `hashi` command-line entry point.
 
+mod admin_cli;
+
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
@@ -11,9 +13,6 @@ use clap::{Args, Parser, Subcommand};
 use hashi::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
 use hashi::events::{Bus, Event};
 use hashi::server::{self, ServerConfig};
-use hashi::store::{NewToken, Revoke};
-use hashi::token::{Role, SessionMode};
-use hashi::util::human_age;
 use tracing_subscriber::EnvFilter;
 
 /// Hashi: a bridge that turns your local Claude Code and Codex CLIs into an HTTP API.
@@ -32,9 +31,20 @@ struct Cli {
 enum Command {
     /// Start the bridge (the default when no command is given).
     Serve(Box<ServeArgs>),
-    /// Create, list and revoke API tokens.
+    /// Create, list, update and revoke API tokens.
     #[command(subcommand)]
-    Token(TokenCommand),
+    Token(admin_cli::TokenCommand),
+    /// Create a one-time invite link for a person.
+    Share(admin_cli::ShareArgs),
+    /// List or cancel invite links.
+    #[command(subcommand)]
+    Invite(admin_cli::InviteCommand),
+    /// Show recent sharing and access changes.
+    Audit {
+        /// How many entries to show.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
     /// Send one prompt straight to an agent, without the server.
     Ask(AskArgs),
     /// Check that the agents and tunnel are installed.
@@ -126,34 +136,6 @@ struct ServeArgs {
     agents: AgentArgs,
 }
 
-#[derive(Debug, Subcommand)]
-enum TokenCommand {
-    /// Create a token and print it once.
-    Create {
-        /// Label for the token.
-        name: String,
-        /// Grant admin rights.
-        #[arg(long)]
-        admin: bool,
-        /// Keep a conversation per agent across prompts.
-        #[arg(long)]
-        stateful: bool,
-        /// Restrict to these agents (comma separated).
-        #[arg(long, value_delimiter = ',')]
-        agents: Option<Vec<AgentKind>>,
-        /// Expire after this many days.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3650))]
-        expires_in_days: Option<u32>,
-    },
-    /// List tokens.
-    List,
-    /// Revoke a token by id or prefix.
-    Revoke {
-        /// Token id or display prefix.
-        id: String,
-    },
-}
-
 #[derive(Debug, Args)]
 struct AskArgs {
     /// The prompt.
@@ -200,7 +182,10 @@ async fn main() -> Result<()> {
     match cli.command {
         None => serve(&home, ServeArgs::parse_from(["hashi"])).await,
         Some(Command::Serve(args)) => serve(&home, *args).await,
-        Some(Command::Token(cmd)) => token(&home, cmd),
+        Some(Command::Token(cmd)) => admin_cli::token(&server::open_store(&home)?, cmd),
+        Some(Command::Share(args)) => admin_cli::share(&server::open_store(&home)?, args),
+        Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
+        Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
         Some(Command::Ask(args)) => ask(&home, args).await,
         Some(Command::Doctor(args)) => doctor(&args).await,
     }
@@ -343,69 +328,6 @@ fn print_event(ev: &Event) {
 
 fn short(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
-}
-
-fn token(home: &std::path::Path, cmd: TokenCommand) -> Result<()> {
-    let store = server::open_store(home)?;
-    match cmd {
-        TokenCommand::Create {
-            name,
-            admin,
-            stateful,
-            agents,
-            expires_in_days,
-        } => {
-            let name = name.trim().to_owned();
-            if name.is_empty() || name.chars().count() > 100 {
-                bail!("name must be 1 to 100 characters");
-            }
-            let new = NewToken {
-                name,
-                role: if admin { Role::Admin } else { Role::User },
-                session_mode: if stateful {
-                    SessionMode::Stateful
-                } else {
-                    SessionMode::Stateless
-                },
-                agents: agents.unwrap_or_else(|| AgentKind::ALL.to_vec()),
-                expires_in_days,
-                note: None,
-                limits: hashi::token::Limits::default(),
-            };
-            let (t, secret) = store.create_token(&new)?;
-            eprintln!("created {} token `{}` ({})", t.role, t.name, t.id);
-            eprintln!("store it now, it will not be shown again:");
-            println!("{}", secret.raw);
-        }
-        TokenCommand::List => {
-            let tokens = store.list_tokens()?;
-            println!(
-                "{:<20} {:<16} {:<6} {:<10} {:<13} {:<10}",
-                "NAME", "PREFIX", "ROLE", "SESSION", "AGENTS", "LAST USED"
-            );
-            for t in tokens {
-                let agents = t
-                    .agents
-                    .iter()
-                    .map(|a| a.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let used = t
-                    .last_used_at
-                    .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u)));
-                println!(
-                    "{:<20} {:<16} {:<6} {:<10} {:<13} {:<10}",
-                    t.name, t.prefix, t.role, t.session_mode, agents, used
-                );
-            }
-        }
-        TokenCommand::Revoke { id } => match store.revoke_token(&id)? {
-            Revoke::Revoked => println!("revoked {id}"),
-            Revoke::NotFound => bail!("no token matches `{id}`"),
-            Revoke::LastAdmin => bail!("refusing to revoke the last admin token"),
-        },
-    }
-    Ok(())
 }
 
 async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
