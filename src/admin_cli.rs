@@ -188,9 +188,10 @@ pub struct ShareArgs {
     /// of the running server (from `<home>/public-url`), else this machine.
     #[arg(long, env = "HASHI_PUBLIC_URL")]
     pub public_url: Option<String>,
-    /// Port of the local server, used for a local-only link.
-    #[arg(long, default_value_t = 7878, env = "HASHI_PORT")]
-    pub port: u16,
+    /// Port of the local server, used for a local-only link. Default: the
+    /// one saved from the dashboard in `<home>/settings.json`, else 7878.
+    #[arg(long, env = "HASHI_PORT")]
+    pub port: Option<u16>,
     /// Accounts the token uses for an agent, in order, for example
     /// claude=work,personal (repeatable).
     #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
@@ -489,9 +490,15 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         },
         |u| Some(u.trim_end_matches('/').to_owned()),
     );
+    // The flag or variable, else the port saved from the dashboard.
+    let saved = store
+        .data_dir()
+        .and_then(|home| hashi::settings::load(&home).ok())
+        .and_then(|s| s.port);
+    let (port, _) = hashi::settings::resolve(args.port, saved, hashi::settings::DEFAULT_PORT);
     let base = public
         .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", args.port));
+        .unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
     eprintln!(
         "invite for {}{} (works once, expires {}):",
         invite.label,
