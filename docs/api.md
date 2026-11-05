@@ -29,8 +29,15 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 | `POST` | `/v1/accounts/{agent}/{name}/refresh` | admin | Read an account's quota now (at most once a minute) |
 | `GET` `POST` | `/v1/projects` | admin | List projects with their use, or add one |
 | `PATCH` `DELETE` | `/v1/projects/{name}` | admin | Change or remove a project (never its folder) |
+| `GET` `POST` `DELETE` | `/v1/request-link` | admin | The ask-access link: its state, open it, close it |
+| `GET` | `/v1/access-requests` | admin | Requests for access and for more |
+| `POST` | `/v1/access-requests/{id}/accept` | admin | Accept, with your values over the prefill |
+| `POST` | `/v1/access-requests/{id}/decline` | admin | Decline, with an optional reason |
+| `POST` | `/v1/ask-access/preview`, `/v1/ask-access` | link code | What the ask-access page shows; ask for access |
+| `POST` | `/v1/ask-access/status` | pickup secret | A request's state, and its claim link once accepted |
+| `GET` `POST` | `/v1/me/requests` | any token | The token's own requests for more; ask for more |
 | `POST` | `/mcp` | token | MCP server (JSON-RPC over streamable HTTP). `GET /mcp` answers 405 |
-| `GET` | `/claim/{code}`, `/me` | | Pages for the people you share with |
+| `GET` | `/claim/{code}`, `/ask-access/{code}`, `/me` | | Pages for the people you share with |
 
 ## `POST /v1/ask`
 
@@ -139,6 +146,34 @@ A token with a `project` runs in the project's folder. It may use the agents bot
 
 Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`), `accounts` and `project` (as for tokens). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once. `POST /v1/claim/preview` shows the project's name, never its folder or accounts.
 
+## Access requests
+
+Off by default. `POST /v1/request-link` (admin) opens the ask-access link and closes any open one. It accepts `project` (new requests are for it, and people pick from its agents), `note` (up to 200 characters, shown on the page) and `hours` (1 to 720, default 168, after which it closes by itself). It answers `201` with the `url`, `<base>/ask-access/hashi_ask_<32 hex>`, once: only a hash of the code is kept. `GET /v1/request-link` shows whether it is open, and `DELETE /v1/request-link` closes it.
+
+The page, and `hashi request`, use three public endpoints. Codes go in the body, never the path:
+
+```bash
+curl -X POST https://host/v1/ask-access/preview -d '{"code": "hashi_ask_…"}'
+# {"server": "Sid's Hashi", "note": "...", "project": null, "agents": ["claude", "codex"], "closesAt": "...", ...}
+curl -X POST https://host/v1/ask-access -d '{"code": "hashi_ask_…", "name": "Alice", "message": "for the docs", "agents": ["claude"]}'
+# 201 {"id": "...", "status": "pending", "pickup": "hashi_pick_<64 hex>", "expiresAt": "..."}
+curl -X POST https://host/v1/ask-access/status -d '{"pickup": "hashi_pick_…"}'
+# {"status": "accepted", "claimCode": "hashi_inv_…", "claimUrl": "https://host/claim/hashi_inv_…", ...}
+```
+
+`name` is 1 to 60 characters, `message` up to 500, and `agents` must be among the link's (left out, all of them). Control, bidi and zero-width characters are removed before the lengths are checked, and again whenever a request is shown. The pickup secret is shown once and stored as a hash. `status` is `pending`, `accepted` (with the claim code and URL), `claimed`, `declined` (with the owner's `reason`) or `expired`. A closed or expired link answers `410 link_closed`, an unknown one `404 link_not_found`, a full link `409 link_full` and a full server `409 requests_full`.
+
+A token asks for more with `POST /v1/me/requests` (any token, even paused or expired; not admin tokens): `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`, `agents` (on top of the current ones), `expiresInDays` and `message`, all optional but at least one. A token may hold 3 open requests (`409 too_many_open_requests`) and open one an hour (`429 request_too_soon`). `GET /v1/me/requests` lists its own requests and their state.
+
+`GET /v1/access-requests` (admin) lists every request, newest first, with `kind` (`new` or `more`), `status`, `name`, `message`, `agents`, `project`, `asked`, a one-line `summary` and, while pending, a `prefill`: the values accepting would use. For `more` the prefill has `current`, the token's limits, agents and expiry now, and `limits` with the asked values over them. Never a secret, an address or an account name of the requester.
+
+`POST /v1/access-requests/{id}/accept` takes an optional body. Every field left out takes the prefilled value:
+
+- For a new person: `label`, `sessionMode`, `agents`, `expiresInDays`, `limits`, `linkHours` (`1`, `24` or `168`, default `168`), `accounts` and `project`, as on `POST /v1/invites`. It creates a single-use invite and answers with it, but never with its link: the code is derived from the requester's pickup secret, so only they can collect it.
+- For more: `agents`, `limits` (each field given replaces the prefilled one) and `expiresInDays` (`0` removes the expiry). It saves the token as `PATCH /v1/tokens/{id}` would and answers with the `record` and `changes`. The new-person fields are refused.
+
+The token's project is checked the same way as everywhere else, so accepting never takes access outside a project. `POST /v1/access-requests/{id}/decline` takes an optional `reason` (up to 300 characters) that the requester sees. A request that is not pending answers `409 not_pending`. Decided and expired requests are deleted 30 days later. Every link change, request, acceptance and decline is in `GET /v1/audit` (`access.link.open`, `access.link.close`, `access.request`, `access.accept`, `access.decline`).
+
 ## Projects
 
 Admin only. A project is a folder with its own agents, accounts and defaults that tokens and invites can be bound to.
@@ -235,7 +270,7 @@ Admin only. Reads a Claude Code or Codex sign-in's quota now (the default accoun
 
 ## MCP
 
-`POST /mcp` is an MCP server. It offers one `ask_<agent>` tool for every agent the token may use (for example `ask_claude`, `ask_gemini`), `get_result` for long runs, `cancel` to stop a queued or running request by id (the token's own, or any for an admin), and `my_usage`. Limits and pause apply exactly as they do over HTTP. To add it to Claude Code:
+`POST /mcp` is an MCP server. It offers one `ask_<agent>` tool for every agent the token may use (for example `ask_claude`, `ask_gemini`), `get_result` for long runs, `cancel` to stop a queued or running request by id (the token's own, or any for an admin), `my_usage`, and `request_more`, which asks the owner for more with the fields of `POST /v1/me/requests`. Limits and pause apply exactly as they do over HTTP. To add it to Claude Code:
 
 ```bash
 claude mcp add --transport http hashi https://your-host/mcp --header "Authorization: Bearer hashi_…"

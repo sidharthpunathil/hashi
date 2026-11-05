@@ -1140,6 +1140,18 @@ impl App {
                 }
                 item
             }
+            Event::AccessRequest { kind, name, .. } => {
+                let text = match kind {
+                    crate::store::AccessKind::New => format!("{name} asks for access"),
+                    crate::store::AccessKind::More => format!("{name} asks for more"),
+                };
+                FeedItem {
+                    at: now_ms(),
+                    glyph: "?",
+                    color: theme::ORCHID,
+                    text: crate::diagnostics::neutralize_controls(&text, false),
+                }
+            }
             Event::Log(text) => FeedItem {
                 at: now_ms(),
                 glyph: "·",

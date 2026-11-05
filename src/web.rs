@@ -1,4 +1,5 @@
-//! Static pages for people you share with: the invite claim page and "My access".
+//! Static pages for people you share with: the invite claim page, the
+//! ask-access page and "My access".
 //!
 //! The files are compiled into the binary. They load nothing from other
 //! origins, and the CSP forbids inline script, so a page can only run
@@ -13,6 +14,7 @@ use crate::api::AppState;
 
 const CLAIM_HTML: &str = include_str!("web/claim.html");
 const ME_HTML: &str = include_str!("web/me.html");
+const ASK_HTML: &str = include_str!("web/ask.html");
 const CSS: &str = include_str!("web/hashi.css");
 const JS: &str = include_str!("web/hashi.js");
 
@@ -35,6 +37,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/claim/{code}",
             get(|| async { asset(CLAIM_HTML, "text/html; charset=utf-8") }),
+        )
+        .route(
+            "/ask-access/{code}",
+            get(|| async { asset(ASK_HTML, "text/html; charset=utf-8") }),
         )
         .route(
             "/me",
@@ -74,9 +80,20 @@ mod tests {
 
     #[test]
     fn pages_have_no_inline_script() {
-        for page in [CLAIM_HTML, ME_HTML] {
+        for page in [CLAIM_HTML, ME_HTML, ASK_HTML] {
             assert_eq!(page.matches("<script").count(), 1);
             assert!(page.contains("<script src=\"/assets/hashi.js\"></script>"));
         }
+    }
+
+    #[test]
+    fn ask_page_keeps_the_pickup_in_this_tab_and_checks_the_claim_code() {
+        assert!(ASK_HTML.contains("<body data-page=\"ask\">"));
+        assert!(JS.contains("sessionStorage.setItem(KEY, r.pickup)"));
+        // The claim link is built only from a code of the invite shape.
+        assert!(JS.contains(
+            "s.status === \"accepted\" && typeof s.claimCode === \"string\" && SAFE_CODE.test(s.claimCode)"
+        ));
+        assert!(JS.contains("$(\"claim-link\").href = `/claim/${s.claimCode}`;"));
     }
 }

@@ -70,18 +70,37 @@ fn invite_code(code: &str) -> bool {
 ///
 /// Explains what is wrong with the link.
 pub fn parse_invite_url(input: &str) -> Result<InviteLink> {
+    let (base_url, host, code) = parse_bridge_url(input, "/claim/", "an invite link")?;
+    if !invite_code(&code) {
+        bail!("this is not an invite link: the code must be {INVITE_PREFIX} and hex digits");
+    }
+    Ok(InviteLink {
+        base_url,
+        host,
+        code,
+    })
+}
+
+/// Splits `scheme://host[:port]<path><code>` into its base URL, host and
+/// code, with the checks [`parse_invite_url`] describes. `what` names the
+/// kind of link in messages. The code itself is checked by the caller.
+///
+/// # Errors
+///
+/// Explains what is wrong with the link.
+pub fn parse_bridge_url(input: &str, path: &str, what: &str) -> Result<(String, String, String)> {
     let s = input.trim();
     let (scheme, rest) = if let Some(r) = s.strip_prefix("https://") {
         ("https", r)
     } else if let Some(r) = s.strip_prefix("http://") {
         ("http", r)
     } else {
-        bail!("an invite link starts with https://");
+        bail!("{what} starts with https://");
     };
     let slash = rest
         .find('/')
-        .context("the link has no /claim/ path; paste the whole invite link")?;
-    let (authority, path) = rest.split_at(slash);
+        .with_context(|| format!("the link has no {path} path; paste the whole link"))?;
+    let (authority, rest_path) = rest.split_at(slash);
     if authority.contains('@') {
         bail!("the link must not contain a user name or password");
     }
@@ -114,24 +133,21 @@ pub fn parse_invite_url(input: &str) -> Result<InviteLink> {
         }
     }
     if scheme == "http" && !is_loopback_host(&host) {
-        bail!("refusing a plain http:// link for {host}; invite links must use https://");
+        bail!("refusing a plain http:// link for {host}; {what} must use https://");
     }
-    let code = path
-        .strip_prefix("/claim/")
-        .context("this is not an invite link: the path must be /claim/<code>")?;
-    if !invite_code(code) {
-        bail!("this is not an invite link: the code must be {INVITE_PREFIX} and hex digits");
-    }
+    let code = rest_path
+        .strip_prefix(path)
+        .with_context(|| format!("this is not {what}: the path must be {path}<code>"))?;
     let shown_host = if host.contains(':') {
         format!("[{host}]")
     } else {
         host.clone()
     };
-    Ok(InviteLink {
-        base_url: format!("{scheme}://{shown_host}{port}"),
+    Ok((
+        format!("{scheme}://{shown_host}{port}"),
         host,
-        code: code.to_owned(),
-    })
+        code.to_owned(),
+    ))
 }
 
 // ── names and quoting ───────────────────────────────────────────────────────
@@ -272,7 +288,7 @@ pub fn pick<'a>(remotes: &'a [Remote], name: Option<&str>) -> Result<&'a Remote>
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
 
-fn http() -> ureq::Agent {
+pub(crate) fn http() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         // Never carry the token, or the invite code, to another host.
@@ -293,7 +309,12 @@ fn read(
     Ok((status, body))
 }
 
-fn post(agent: &ureq::Agent, url: &str, token: Option<&str>, body: &Value) -> Result<(u16, Value)> {
+pub(crate) fn post(
+    agent: &ureq::Agent,
+    url: &str,
+    token: Option<&str>,
+    body: &Value,
+) -> Result<(u16, Value)> {
     let mut req = agent.post(url);
     if let Some(t) = token {
         req = req.header("Authorization", &format!("Bearer {t}"));
@@ -309,7 +330,7 @@ fn get(agent: &ureq::Agent, url: &str, token: &str) -> Result<(u16, Value)> {
 }
 
 /// The server's error message, made safe to print.
-fn error_text(status: u16, body: &Value) -> String {
+pub(crate) fn error_text(status: u16, body: &Value) -> String {
     let msg = body["error"]["message"]
         .as_str()
         .map_or_else(|| format!("request failed ({status})"), str::to_owned);

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>Ask for access</title>
+  <link rel="stylesheet" href="/assets/hashi.css">
+</head>
+<body data-page="ask">
+  <main class="card">
+    <header class="brand">
+      <svg viewBox="0 0 64 40" width="56" height="35" aria-hidden="true">
+        <defs><linearGradient id="sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c4dff"/><stop offset="1" stop-color="#f9b4f6"/></linearGradient></defs>
+        <path d="M14 26a18 18 0 0 1 36 0z" fill="url(#sun)"/>
+        <path class="bridge" d="M4 36 12 30V18h4v10c5-3 11-4 16-4s11 1 16 4V18h4v12l8 6H44a4 4 0 0 0-8 0h-8a4 4 0 0 0-8 0z"/>
+      </svg>
+      <div><h1>Ask for access</h1><p class="muted" id="server">to a Hashi bridge</p></div>
+    </header>
+
+    <section id="loading"><p class="muted">Checking your link…</p></section>
+
+    <section id="error" hidden>
+      <p class="bad" id="error-text"></p>
+      <p class="muted">Ask the person who shared it for a new link.</p>
+    </section>
+
+    <form id="ask" hidden>
+      <p class="notice wrap" id="note" hidden></p>
+      <dl class="facts">
+        <dt id="project-label" hidden>Project</dt><dd id="project" hidden></dd>
+        <dt>Link closes</dt><dd id="closes"></dd>
+      </dl>
+      <label for="name">Your name</label>
+      <input id="name" type="text" autocomplete="name" spellcheck="false" maxlength="60" required>
+      <label for="message">What you want it for (optional)</label>
+      <textarea id="message" maxlength="500"></textarea>
+      <label>Agents you want</label>
+      <div class="choices" id="agents"></div>
+      <p class="muted small" id="ask-notice"></p>
+      <button class="primary" type="submit" id="send">Send my request</button>
+      <p class="bad" id="ask-error" hidden></p>
+    </form>
+
+    <section id="status" hidden>
+      <p id="status-text"></p>
+      <p class="muted small wrap" id="status-detail"></p>
+      <a class="button" id="claim-link" href="#" hidden>Get my access</a>
+      <p class="muted small" id="status-hint">This page checks again every few seconds. Keep this tab open, or come back to it: the request is remembered in this tab only.</p>
+      <button id="forget" type="button">Forget this request</button>
+    </section>
+  </main>
+  <script src="/assets/hashi.js"></script>
+</body>
+</html>

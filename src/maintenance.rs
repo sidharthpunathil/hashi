@@ -1,6 +1,7 @@
 //! Hourly housekeeping while the server runs: prunes finished requests past
 //! retention (never the current month), old audit records and spent invites,
-//! then returns free pages to the file system.
+//! and access requests decided or expired 30 days ago, then returns free
+//! pages to the file system.
 //!
 //! Startup already prunes once, so the first pass runs an hour after start.
 
@@ -51,6 +52,7 @@ pub fn spawn(
                     requests = p.requests,
                     audit = p.audit,
                     invites = p.invites,
+                    access_requests = p.access,
                     "maintenance pruned old records"
                 ),
                 Ok(Ok(_)) => {}
@@ -109,5 +111,41 @@ mod tests {
         assert!(store.get_request("new").unwrap().is_some());
         // A fresh database is created with incremental auto-vacuum.
         assert!(store.compact().unwrap());
+    }
+
+    #[test]
+    fn run_once_purges_access_requests_thirty_days_after_they_end() {
+        use crate::access::{self, NewPerson, OpenLink};
+        let store = Store::open_in_memory().unwrap();
+        let ask = |name: &str| {
+            let (_, code) = access::open_link(&store, "cli", OpenLink::default()).unwrap();
+            access::submit_new(
+                &store,
+                NewPerson {
+                    code,
+                    name: name.into(),
+                    message: None,
+                    agents: None,
+                },
+            )
+            .unwrap()
+            .0
+        };
+        let declined = ask("declined");
+        access::decline(&store, "cli", &declined.id, Some("no")).unwrap();
+        ask("waiting");
+        // 29 days on, nothing goes: the declined one is recent enough and the
+        // waiting one expired only 22 days ago.
+        store.backdate_access_for_tests(29);
+        assert_eq!(run_once(&store, 14).unwrap().access, 0);
+        // Two more days and the declined one is past 30 days.
+        store.backdate_access_for_tests(2);
+        assert_eq!(run_once(&store, 14).unwrap().access, 1);
+        // The expired one goes 30 days after its 7-day expiry.
+        store.backdate_access_for_tests(7);
+        assert_eq!(run_once(&store, 14).unwrap().access, 1);
+        assert!(store.list_access_requests().unwrap().is_empty());
+        // Old closed links with no requests left are dropped too.
+        assert!(store.latest_access_link().unwrap().is_none());
     }
 }

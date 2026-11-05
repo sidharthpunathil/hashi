@@ -36,7 +36,7 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "Hashi relays prompts to coding agents (such as Claude Code and \
 Codex) running on its owner's machine. Use an ask_<agent> tool to send a prompt and get the \
 answer. Long runs return a request id: pass it to get_result, or to cancel to stop it. \
-my_usage shows this token's limits and usage.";
+my_usage shows this token's limits and usage, and request_more asks the owner for more.";
 
 /// A JSON-RPC error: code and message.
 struct RpcError(i64, String);
@@ -219,6 +219,26 @@ fn tools(state: &AppState, agents: &[AgentKind]) -> Vec<Value> {
                         usage today and this month, and when limits reset.",
         "inputSchema": { "type": "object", "properties": {}, "required": [] },
     }));
+    list.push(json!({
+        "name": "request_more",
+        "description": "Ask the owner of this Hashi for more: higher daily or monthly \
+                        prompts or budget, more agents, a later expiry, or anything in \
+                        a message. The owner decides; nothing changes until they accept. \
+                        At most 3 open requests, and one new one an hour.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dailyRequests": { "type": "integer", "minimum": 0, "description": "Prompts per UTC day wanted." },
+                "monthlyRequests": { "type": "integer", "minimum": 0, "description": "Prompts per UTC month wanted." },
+                "dailyBudgetUsd": { "type": "number", "minimum": 0, "description": "Spend per UTC day wanted, in USD." },
+                "monthlyBudgetUsd": { "type": "number", "minimum": 0, "description": "Spend per UTC month wanted, in USD." },
+                "agents": { "type": "array", "items": { "type": "string" }, "description": "Agents wanted on top of the current ones." },
+                "expiresInDays": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "A new lifetime in days, from when it is accepted." },
+                "message": { "type": "string", "maxLength": 500, "description": "Anything else, for the owner to read." },
+            },
+            "required": [],
+        },
+    }));
     list
 }
 
@@ -267,6 +287,20 @@ async fn call_tool(state: &AppState, token: &Token, call: CallParams) -> Result<
                 false,
             )
         }),
+        "request_more" => {
+            let input: crate::access::MoreInput = args(call.arguments)?;
+            api::ask_more_for(state, token, input).map(|r| {
+                (
+                    format!(
+                        "Sent to the owner (request {}): {}. They decide; nothing changes \
+                         until they accept. Check my_usage later.",
+                        r.id,
+                        crate::access::asked_text(&r)
+                    ),
+                    false,
+                )
+            })
+        }
         other => {
             return Err(RpcError(INVALID_PARAMS, format!("unknown tool: {other}")));
         }

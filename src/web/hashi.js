@@ -1,4 +1,4 @@
-// Claim and "My access" pages. All dynamic text goes through textContent and
+// Claim, "Ask for access" and "My access" pages. All dynamic text goes through textContent and
 // is never parsed as HTML, so nothing from the server can inject markup.
 "use strict";
 
@@ -129,8 +129,188 @@ function claimPage() {
   });
 }
 
+// The ask-access page. The pickup secret is shown by the server once and is
+// kept in sessionStorage, like the token on "My access", so only this tab
+// can collect the answer.
+function askPage() {
+  const KEY = "hashi.pickup";
+  const code = decodeURIComponent(location.pathname.split("/ask-access/")[1] || "");
+  const fail = (msg) => { show("loading", false); show("ask", false); $("error-text").textContent = msg; show("error"); };
+  const forget = () => { try { sessionStorage.removeItem(KEY); } catch { /* ignore */ } };
+  let timer = null;
+
+  const render = (s) => {
+    const text = $("status-text");
+    const detail = $("status-detail");
+    detail.textContent = "";
+    show("claim-link", false);
+    show("status-hint", s.status === "pending");
+    if (typeof s.server === "string") $("server").textContent = `to ${s.server}`;
+    if (s.status === "pending") {
+      text.className = "";
+      text.textContent = "Your request is waiting for the owner.";
+      detail.textContent = `It expires ${when(s.expiresAt)} if nobody answers.`;
+    } else if (s.status === "accepted" && typeof s.claimCode === "string" && SAFE_CODE.test(s.claimCode)) {
+      text.className = "good";
+      text.textContent = "✓ The owner said yes.";
+      detail.textContent = "Your access is ready. The link below works once.";
+      $("claim-link").href = `/claim/${s.claimCode}`;
+      show("claim-link");
+    } else if (s.status === "declined") {
+      text.className = "bad";
+      text.textContent = "The owner declined this request.";
+      if (typeof s.reason === "string" && s.reason) detail.textContent = `Their reason: ${s.reason}`;
+      forget();
+    } else if (s.status === "claimed") {
+      text.className = "good";
+      text.textContent = "This access was already collected.";
+      forget();
+    } else {
+      text.className = "bad";
+      text.textContent = "This request has expired. Ask the owner for a new link.";
+      forget();
+    }
+    show("loading", false);
+    show("ask", false);
+    show("status");
+  };
+
+  const poll = async (pickup) => {
+    clearTimeout(timer);
+    try {
+      const s = await api("/v1/ask-access/status", { method: "POST", body: { pickup } });
+      render(s);
+      if (s.status === "pending") timer = setTimeout(() => poll(pickup), 10000);
+    } catch (e) {
+      forget();
+      fail(e.message);
+    }
+  };
+
+  $("claim-link").addEventListener("click", forget);
+  $("forget").addEventListener("click", () => { forget(); location.reload(); });
+
+  let saved = null;
+  try { saved = sessionStorage.getItem(KEY); } catch { /* ignore */ }
+  if (saved) { poll(saved); return; }
+
+  api("/v1/ask-access/preview", { method: "POST", body: { code } })
+    .then((p) => {
+      $("server").textContent = `to ${p.server}`;
+      if (typeof p.note === "string" && p.note) { $("note").textContent = p.note; show("note"); }
+      showProject(p.project);
+      $("closes").textContent = when(p.closesAt);
+      $("name").maxLength = p.maxName || 60;
+      $("message").maxLength = p.maxMessage || 500;
+      $("ask-notice").textContent = p.notice;
+      const box = $("agents");
+      box.replaceChildren();
+      for (const a of p.agents || []) {
+        const label = document.createElement("label");
+        label.className = "check";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = a;
+        input.checked = true;
+        label.append(input, document.createTextNode(agentsText([a])));
+        box.append(label);
+      }
+      show("loading", false);
+      show("ask");
+    })
+    .catch((e) => fail(e.message));
+
+  $("ask").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    show("ask-error", false);
+    $("send").disabled = true;
+    const agents = [...document.querySelectorAll("#agents input:checked")].map((i) => i.value);
+    try {
+      const r = await api("/v1/ask-access", {
+        method: "POST",
+        body: { code, name: $("name").value, message: $("message").value, agents },
+      });
+      try { sessionStorage.setItem(KEY, r.pickup); } catch { /* storage may be blocked */ }
+      poll(r.pickup);
+    } catch (e) {
+      $("ask-error").textContent = e.message;
+      show("ask-error");
+    } finally {
+      $("send").disabled = false;
+    }
+  });
+}
+
+function askedText(r) {
+  const a = r.asked || {};
+  const parts = [];
+  if (a.dailyRequests != null) parts.push(`${a.dailyRequests} prompts a day`);
+  if (a.monthlyRequests != null) parts.push(`${a.monthlyRequests} a month`);
+  if (a.dailyBudgetUsd != null) parts.push(`$${a.dailyBudgetUsd} a day`);
+  if (a.monthlyBudgetUsd != null) parts.push(`$${a.monthlyBudgetUsd} a month`);
+  if ((r.agents || []).length) parts.push(`also ${agentsText(r.agents)}`);
+  if (a.expiresInDays != null) parts.push(`${a.expiresInDays} more day(s)`);
+  return parts.length ? parts.join(", ") : "see message";
+}
+
 function mePage() {
   const KEY = "hashi.token";
+  let current = null;
+  const renderRequests = (list) => {
+    const ul = $("my-requests");
+    ul.replaceChildren();
+    for (const r of list || []) {
+      const li = document.createElement("li");
+      const pill = document.createElement("span");
+      pill.className = `pill ${r.status}`;
+      pill.textContent = r.status;
+      const what = document.createElement("span");
+      what.textContent = ` ${askedText(r)} · ${when(r.createdAt)}`;
+      li.append(pill, what);
+      if (r.status === "declined" && r.reason) {
+        const why = document.createElement("div");
+        why.className = "muted small wrap";
+        why.textContent = `Reason: ${r.reason}`;
+        li.append(why);
+      }
+      ul.append(li);
+    }
+    show("my-requests", (list || []).length > 0);
+  };
+  const loadRequests = async () => {
+    if (!current) return;
+    try {
+      renderRequests((await api("/v1/me/requests", { token: current })).requests);
+    } catch { /* the access view still works without it */ }
+  };
+  const number = (id) => {
+    const v = $(id).value.trim();
+    return v === "" ? undefined : Number(v);
+  };
+  $("more-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    show("more-error", false);
+    show("more-sent", false);
+    const agents = $("more-agents").value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    const body = {
+      dailyRequests: number("more-daily"),
+      monthlyRequests: number("more-monthly"),
+      dailyBudgetUsd: number("more-daily-budget"),
+      monthlyBudgetUsd: number("more-monthly-budget"),
+      expiresInDays: number("more-expiry"),
+      agents: agents.length ? agents : undefined,
+      message: $("more-message").value.trim() || undefined,
+    };
+    try {
+      await api("/v1/me/requests", { method: "POST", body, token: current });
+      $("more-form").reset();
+      show("more-sent");
+      loadRequests();
+    } catch (e) {
+      $("more-error").textContent = e.message;
+      show("more-error");
+    }
+  });
   const render = (m) => {
     $("server").textContent = `on ${m.server.name}`;
     $("name").textContent = m.name;
@@ -172,6 +352,8 @@ function mePage() {
       meters.append(wrap);
     }
     $("resets").textContent = `Daily limits reset ${when(m.resets.day)}. Spend is the estimate the agent reports (Claude only).`;
+    // Admin tokens change their own access, so they have nobody to ask.
+    show("more", m.role !== "admin");
     show("login", false);
     show("access");
   };
@@ -179,7 +361,9 @@ function mePage() {
   const load = async (token) => {
     show("login-error", false);
     try {
+      current = token;
       render(await api("/v1/me", { token }));
+      loadRequests();
       return true;
     } catch (e) {
       $("login-error").textContent = e.message;
@@ -198,6 +382,7 @@ function mePage() {
   });
   $("forget").addEventListener("click", () => {
     try { sessionStorage.removeItem(KEY); } catch { /* ignore */ }
+    current = null;
     show("access", false);
     show("login");
   });
@@ -213,3 +398,4 @@ document.addEventListener("click", (ev) => {
 
 if (document.body.dataset.page === "claim") claimPage();
 if (document.body.dataset.page === "me") mePage();
+if (document.body.dataset.page === "ask") askPage();

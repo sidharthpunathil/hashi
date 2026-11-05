@@ -70,6 +70,10 @@ hashi account add claude work              # another login for an agent (see Acc
 hashi project add api ~/code/api           # a folder to share (see Projects)
 hashi share bob --project api              # an invite that works in that folder
 hashi invite list                          # pending, claimed and expired invites
+hashi requests open --hours 48             # let people ask for access (see Access requests)
+hashi requests list                        # pending requests; --all for decided ones too
+hashi requests accept <id> --daily-requests 50   # or: hashi requests decline <id> --reason "..."
+hashi request '<ask-access link>' --name Sam      # on a friend's machine: ask someone's Hashi
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
@@ -206,6 +210,36 @@ hashi ask --remote work "Explain main.rs" -a codex
 - `hashi connect` accepts only `https://` links, or `http://` for `localhost` and loopback addresses, with the path `/claim/hashi_inv_<code>`. It saves `{name, baseUrl, token}` in `~/.hashi/remotes.json`, readable only by you, and prints the `claude mcp add` and `codex mcp add` commands, a first `hashi ask --remote` and your `/me` link. The name defaults to the server's name in lowercase with dashes.
 - It never runs another program unless you pass `--setup claude`, which runs `claude mcp add --transport http <name> <base>/mcp --header "Authorization: Bearer <token>"` (set `HASHI_CLAUDE_BIN` to use a different executable).
 - `hashi ask --remote` sends the prompt, waits up to 60 seconds at a time until it completes or fails, and prints the answer with control characters removed. A failure prints the server's error and exits non-zero. Without `-a`, the server's default agent answers.
+
+### Access requests
+
+People can ask you for access instead of waiting for an invite. Nobody can until you open the link, and nothing is granted until you accept.
+
+```bash
+hashi requests open                                  # a link for a week (--hours 1 to 720, default 168)
+hashi requests open --project api --note "For the API team"
+hashi requests close                                 # opening a new link also closes the old one
+hashi requests list                                  # pending requests, with what each asks for
+hashi requests list --all                            # decided and expired ones too
+hashi requests accept 1a2b3c4d                       # with what they asked for
+hashi requests accept 1a2b3c4d --agents claude --daily-requests 20 --expires-in-days 30
+hashi requests decline 1a2b3c4d --reason "Only the team for now"
+```
+
+- **The link.** `hashi requests open` prints `<base>/ask-access/hashi_ask_<code>` once, using the same base URL as `hashi share` (`--public-url`, `HASHI_PUBLIC_URL`, or the running server's public URL). The code has 128 random bits and only its hash is stored. With `--project`, requests are for that project and people choose among its agents. The page shows your bridge's name and your note, and asks for a name (1 to 60 characters), a message (up to 500) and the agents wanted. It never shows other people's requests or any account names.
+- **New people.** Accepting creates a single-use invite exactly as `hashi share` would, filled in with their name, the agents they asked for (within the link's project) and the project. Every `hashi share` flag works on `accept` and overrides what was filled in: `--label`, `--agents`, `--stateful`, `--expires-in-days`, `--link-hours` (default 168), `--account`, `--project` and the limit flags. The invite's code is derived from the requester's pickup secret and never shown to you, so their page, or `hashi request status`, collects it. If they never do, it expires like any invite.
+- **More.** A token holder asks from the "Ask for more" form on `/me`, `POST /v1/me/requests` or the MCP tool `request_more`: higher daily or monthly prompts or budget, more agents, a later expiry, or a message. `hashi requests list` shows their current limits next to what accepting would give. `accept` applies the asked values, with your flags replacing any of them (`--expires-in-days 0` removes the expiry); the result is saved as `hashi token update` would, and the token's project still bounds its agents.
+- **Limits.** Submissions count against the per-minute rate limit (`--rate-limit`) per client address, and failed lookups of codes and pickup secrets are throttled like invite claims. A link holds at most 50 pending requests and the server 200. A token holds at most 3 open requests and opens at most one an hour. A request nobody decides expires after 7 days, and decided or expired requests are deleted 30 days later by the hourly maintenance.
+- **The dashboard** shows a toast when a request arrives. Every link change, request, acceptance and decline is in `hashi audit`.
+
+On a friend's machine, `hashi request` asks from a terminal:
+
+```bash
+hashi request 'https://host/ask-access/hashi_ask_...' --name Sam --message "For the docs" --agents claude
+hashi request status            # checks each pending request; accepted ones are connected
+```
+
+It accepts the same links as `hashi connect` (`https://`, or `http://` for loopback), keeps each pickup secret in `~/.hashi/pending-requests.json` (readable only by you) and, once a request is accepted, redeems the invite and saves the remote exactly as `hashi connect` does (`--remote-name` picks its name). Declined, expired and collected requests are dropped from the file. `--name` defaults to your login name.
 
 ## Dashboard keys
 

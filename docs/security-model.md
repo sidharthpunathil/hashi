@@ -64,6 +64,16 @@ To show how much of a plan is left, Hashi reads the quota of Claude Code and Cod
 - **Admins only.** Quota figures, plans and reset times are shown only to admin tokens (`GET /v1/accounts`, the refresh endpoint and the dashboard). `/v1/me`, the MCP tools, the OpenAI-compatible API and the claim pages carry none of them. Refreshes are audited and limited to one per account per minute; background reads are at most one per account per minute too, back off on `429` and `403`, and wait an hour after a rejected sign-in.
 - **Off switch.** `--no-usage-poll` (or `HASHI_USAGE_POLL=0`) stops the background reads. Figures from runs are still recorded.
 
+## Access requests
+
+Letting people ask for access is off by default: there is no ask-access page until you run `hashi requests open` (or `POST /v1/request-link`), and the link closes by itself after its hours (a week by default, a month at most) or when you close it. Asking never grants anything. Only you accept or decline, from the CLI, the dashboard or the admin API, and there is no rule that accepts on its own.
+
+- **Secrets.** The link code has 128 random bits and the pickup secret a requester gets 256; both are stored only as SHA-256 hashes, and codes travel in request bodies, never in a path or a Referer. Accepting a new person creates a single-use invite whose code is derived from their pickup secret, and the database keeps only its hash, so neither you, the database nor anyone reading it can learn the claim link: only the requester can collect it. An invite nobody collects expires like any other.
+- **Abuse limits.** Every submission counts against the rate limit for its client address (`askaccess:<address>`, with the `--rate-limit` budget per minute), and wrong link codes and pickup secrets are throttled per address like invite codes. A link holds at most 50 pending requests and the server 200; a token holds at most 3 open requests for more and opens at most one an hour. A request nobody decides expires after 7 days, and decided or expired requests are deleted 30 days later by the hourly maintenance.
+- **Fields.** The name (1 to 60 characters), message (500), note (200) and decline reason (300) are stripped of control, bidi and zero-width characters before they are stored and checked, and again whenever they are shown, in the API, the CLI, the dashboard and the pages, which use `textContent` only.
+- **Privacy.** The ask-access page shows the bridge's name, your note, the project's name and its agents, never other people's requests, folders or account names. Requesters' addresses are not stored with their requests or shown to you.
+- **Never wider than you accept.** Accepting fills in what was asked, within the link's project, and your values override it. The same checks as `hashi share` and `token update` apply, so a request cannot take a token outside its project's agents or accounts.
+
 ## Withdrawing access
 
 Pause holds queued prompts, expiry fails them, and revoke stops running ones at once (within about 2 seconds when you revoke from another terminal with `hashi token revoke`). Revoking deletes the token's workspace, removing symlinks without following them. Every token and invite change is audited. Hashi shuts down cleanly on Ctrl-C, `SIGTERM`, `SIGHUP` and Windows console close, and a second signal exits at once.
@@ -72,14 +82,14 @@ Pause holds queued prompts, expiry fails them, and revoke stops running ones at 
 
 - Hashi binds to `127.0.0.1` by default. Binding elsewhere without TLS prints a warning. Tunnels and HTTPS are opt-in.
 - Cross-origin browser access is off unless you list an origin with `--cors-origin`. Over plain HTTP, Hashi answers only requests whose `Host` is an IP address, `localhost`, the `--public-url` host or a name you list with `--allowed-host`, which stops DNS rebinding.
-- The claim and My access pages load nothing from other sites, run no inline script, and are served with a strict Content Security Policy, `no-referrer` and `no-store`, so an invite code never leaks through a Referer header or a cache.
+- The claim, ask-access and My access pages load nothing from other sites, run no inline script, and are served with a strict Content Security Policy, `no-referrer` and `no-store`, so an invite code never leaks through a Referer header or a cache.
 - Invite links are single-use, hashed, short-lived and create `user` tokens only.
 
 ## Data on disk
 
 - On macOS and Linux, `~/.hashi` is created `0700`, and the database with its WAL and SHM files, logs, crash files, the tunnel config and `hashi report` output are `0600`. On Windows, Hashi limits the home to you, SYSTEM and Administrators; a `HASHI_HOME` outside your profile prints a warning, and Hashi refuses to start there if it cannot set that.
 - Errors returned to token holders have your home directory replaced by `~` and secrets masked. Headless output strips control and text-direction characters, so agent output cannot rewrite your terminal.
-- Every hour Hashi deletes finished requests older than `--retention-days` (never the current month, which monthly caps count from), plus audit records and claimed or expired invites older than the retention period or 90 days, whichever is longer, and returns the freed pages to the disk.
+- Every hour Hashi deletes finished requests older than `--retention-days` (never the current month, which monthly caps count from), plus audit records and claimed or expired invites older than the retention period or 90 days, whichever is longer, and access requests decided or expired more than 30 days ago, and returns the freed pages to the disk.
 
 ## Supply chain
 

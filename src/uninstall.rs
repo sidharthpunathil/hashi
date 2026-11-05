@@ -46,6 +46,7 @@ pub fn is_hashi_entry(name: &str) -> bool {
         "workspaces",
         crate::accounts::DIR,
         crate::remote::REMOTES_FILE,
+        crate::access_client::PENDING_FILE,
         crate::update::CACHE_FILE,
         crate::server::PUBLIC_URL_FILE,
         crate::server::PID_FILE,
@@ -57,6 +58,8 @@ pub fn is_hashi_entry(name: &str) -> bool {
     EXACT.contains(&name)
         // `remote::save` writes through a temporary file.
         || name.starts_with(".remotes.json.")
+        // `access_client::save` does too.
+        || name.starts_with(".pending-requests.json.")
         // `hashi update` downloads into `update-<uuid>`.
         || name.strip_prefix("update-").is_some_and(|rest| {
             !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_hexdigit())
@@ -1066,6 +1069,8 @@ mod tests {
             "accounts",
             "remotes.json",
             ".remotes.json.123.tmp",
+            "pending-requests.json",
+            ".pending-requests.json.123.tmp",
             "update-check.json",
             "update-0123abcd",
             "public-url",

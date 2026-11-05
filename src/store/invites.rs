@@ -122,6 +122,18 @@ impl Store {
     pub fn create_invite(&self, new: &NewInvite) -> Result<(Invite, String)> {
         let bytes: [u8; 32] = rand::random();
         let code = format!("{INVITE_PREFIX}{}", hex::encode(bytes));
+        let invite = self.create_invite_with_hash(new, &token::hash(&code))?;
+        Ok((invite, code))
+    }
+
+    /// Creates an invite whose code only the holder of `hash`'s preimage
+    /// knows. An accepted access request uses this: its code is derived from
+    /// the requester's pickup secret, which the server never stores.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn create_invite_with_hash(&self, new: &NewInvite, hash: &str) -> Result<Invite> {
         let now = now_ms();
         let invite = Invite {
             id: uuid::Uuid::new_v4().to_string(),
@@ -145,7 +157,7 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 invite.id,
-                token::hash(&code),
+                hash,
                 invite.label,
                 invite.session_mode.as_str(),
                 token::encode_agents(&invite.agents),
@@ -161,7 +173,7 @@ impl Store {
                 invite.project,
             ],
         )?;
-        Ok((invite, code))
+        Ok(invite)
     }
 
     /// All invites, newest first.
