@@ -98,7 +98,169 @@ pub fn prepare_home(home: &Path) -> Result<()> {
         std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("securing {}", home.display()))?;
     }
+    #[cfg(windows)]
+    win_acl::secure_home(home)?;
     Ok(())
+}
+
+/// Owner-only access on Windows, which has no mode bits. The home's ACL is
+/// replaced with full control for the current user, SYSTEM and
+/// Administrators, inherited by everything created inside it. `icacls` and
+/// `whoami` are run by full path with no shell.
+#[cfg(any(windows, test))]
+mod win_acl {
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+
+    /// Where the home is relative to the user's profile.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Location {
+        /// Inside the profile, whose ACL already keeps other users out.
+        InProfile,
+        /// The profile directory itself: its ACL is left alone.
+        Profile,
+        /// Anywhere else, where the parent's ACL may let other users in.
+        Outside,
+        /// A drive root, never a valid home.
+        Root,
+    }
+
+    fn norm(p: &Path) -> String {
+        let s = p.display().to_string();
+        let s = s.trim_end_matches(['/', '\\']);
+        if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            s.to_owned()
+        }
+    }
+
+    pub(super) fn location(home: &Path, profile: Option<&Path>) -> Location {
+        if home.parent().is_none() {
+            return Location::Root;
+        }
+        let Some(profile) = profile else {
+            return Location::Outside;
+        };
+        let (home, profile) = (norm(home), norm(profile));
+        if home == profile {
+            Location::Profile
+        } else if home
+            .strip_prefix(&profile)
+            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+        {
+            Location::InProfile
+        } else {
+            Location::Outside
+        }
+    }
+
+    /// The SID in `whoami /user /fo csv /nh` output, such as
+    /// `"host\user","S-1-5-21-..."`. Anything that is not a plain SID is
+    /// rejected, so it cannot add arguments to `icacls`.
+    pub(super) fn parse_sid(output: &str) -> Option<String> {
+        let field = output.trim().rsplit(',').next()?.trim().trim_matches('"');
+        let rest = field.strip_prefix("S-1-")?;
+        let plain = !rest.is_empty()
+            && rest
+                .split('-')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+        plain.then(|| field.to_owned())
+    }
+
+    /// `icacls` arguments that drop inherited entries and grant full control
+    /// to `sid`, SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544) only.
+    /// SIDs, not names, so it works whatever the system language.
+    pub(super) fn grant_args(dir: &OsStr, sid: &str) -> Vec<OsString> {
+        let mut args = vec![dir.to_owned()];
+        for a in [
+            "/inheritance:r".to_owned(),
+            "/grant:r".to_owned(),
+            format!("*{sid}:(OI)(CI)F"),
+            "*S-1-5-18:(OI)(CI)F".to_owned(),
+            "*S-1-5-32-544:(OI)(CI)F".to_owned(),
+            "/Q".to_owned(),
+        ] {
+            args.push(a.into());
+        }
+        args
+    }
+
+    #[cfg(windows)]
+    fn system_tool(name: &str) -> std::path::PathBuf {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        Path::new(&root).join("System32").join(name)
+    }
+
+    #[cfg(windows)]
+    fn run(tool: &str, args: &[OsString]) -> anyhow::Result<String> {
+        let out = std::process::Command::new(system_tool(tool))
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !out.status.success() {
+            anyhow::bail!(
+                "{tool} failed ({}): {}{}",
+                out.status,
+                stdout.trim(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(stdout)
+    }
+
+    #[cfg(windows)]
+    fn restrict(home: &Path) -> anyhow::Result<()> {
+        let who = run(
+            "whoami.exe",
+            &["/user".into(), "/fo".into(), "csv".into(), "/nh".into()],
+        )?;
+        let sid = parse_sid(&who).ok_or_else(|| anyhow::anyhow!("whoami gave no SID"))?;
+        let dir = std::path::absolute(home)?.into_os_string();
+        // Drop explicit entries someone else may have added, then inherited
+        // ones, keeping only ours.
+        run("icacls.exe", &[dir.clone(), "/reset".into(), "/Q".into()])?;
+        run("icacls.exe", &grant_args(&dir, &sid))?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn secure_home(home: &Path) -> anyhow::Result<()> {
+        let profile = dirs::home_dir();
+        let shown = home.display();
+        match location(home, profile.as_deref()) {
+            Location::Root => {
+                anyhow::bail!("{shown} is a drive root; choose a folder for HASHI_HOME")
+            }
+            Location::Profile => {
+                eprintln!(
+                    "warning: HASHI_HOME is your profile folder ({shown}); its permissions are left \
+                     as they are. Use a folder inside it, such as the default .hashi."
+                );
+                Ok(())
+            }
+            Location::InProfile => {
+                if let Err(e) = restrict(home) {
+                    eprintln!("warning: could not restrict {shown} to your account: {e:#}");
+                }
+                Ok(())
+            }
+            Location::Outside => {
+                eprintln!(
+                    "warning: HASHI_HOME ({shown}) is outside your user profile. Hashi limits it \
+                     to your account, SYSTEM and Administrators, but cannot check who owns it. If \
+                     another account created this folder, it can still read and change your \
+                     tokens and history. Prefer a folder inside your profile."
+                );
+                restrict(home).map_err(|e| {
+                    e.context(format!(
+                        "could not restrict {shown} to your account; refusing to use it"
+                    ))
+                })
+            }
+        }
+    }
 }
 
 /// Opens the database in `home`, restricting it and its WAL and SHM files to
@@ -414,6 +576,69 @@ mod tests {
             assert_eq!(mode(&path), 0o600, "{name}");
         }
         assert_eq!(mode(&home), 0o700);
+    }
+
+    #[test]
+    fn parses_the_current_sid_from_whoami() {
+        use win_acl::parse_sid;
+        assert_eq!(
+            parse_sid(
+                "\"desktop-1\\\\alice\",\"S-1-5-21-1004336348-1177238915-682003330-1001\"\r\n"
+            )
+            .as_deref(),
+            Some("S-1-5-21-1004336348-1177238915-682003330-1001")
+        );
+        for bad in [
+            "",
+            "\"desktop-1\\\\alice\"",
+            "\"a\",\"S-1-5-21-1 /grant Everyone:F\"",
+            "\"a\",\"Everyone\"",
+            "\"a\",\"S-1-\"",
+        ] {
+            assert_eq!(parse_sid(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn icacls_grants_only_the_user_system_and_administrators() {
+        let args = win_acl::grant_args(std::ffi::OsStr::new("C:\\hashi"), "S-1-5-21-1-2-3-1001");
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "C:\\hashi",
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-21-1-2-3-1001:(OI)(CI)F",
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+                "/Q",
+            ]
+        );
+    }
+
+    #[test]
+    fn classifies_where_the_home_is() {
+        use win_acl::{Location, location};
+        let profile = Some(Path::new("/Users/alice"));
+        assert_eq!(
+            location(Path::new("/Users/alice/.hashi"), profile),
+            Location::InProfile
+        );
+        assert_eq!(
+            location(Path::new("/Users/alice"), profile),
+            Location::Profile
+        );
+        assert_eq!(
+            location(Path::new("/srv/hashi"), profile),
+            Location::Outside
+        );
+        assert_eq!(
+            location(Path::new("/Users/alicecooper/h"), profile),
+            Location::Outside
+        );
+        assert_eq!(location(Path::new("/srv/hashi"), None), Location::Outside);
+        assert_eq!(location(Path::new("/"), profile), Location::Root);
     }
 
     #[cfg(unix)]
