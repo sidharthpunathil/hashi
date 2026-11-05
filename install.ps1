@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 #
 # Options (environment variables):
-#   $env:HASHI_VERSION = "v0.2.0"      install a specific release (default: latest)
+#   $env:HASHI_VERSION = "v0.3.0"      install a specific release (default: latest)
 #   $env:HASHI_INSTALL_DIR = "C:\bin"  where to put hashi.exe
 #                                      (default: %LOCALAPPDATA%\Programs\hashi\bin)
 #   $env:HASHI_NO_DOCTOR = "1"         skip the post-install `hashi doctor` check
