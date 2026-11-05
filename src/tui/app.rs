@@ -1468,6 +1468,8 @@ impl App {
         match helper {
             Helper::Cloudflared => self.cloudflared.as_deref(),
             Helper::Tailscale => self.tailscale_bin.as_deref(),
+            // An agent, not a helper of the dashboard.
+            Helper::Crush => None,
         }
     }
 

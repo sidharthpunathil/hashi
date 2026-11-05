@@ -142,6 +142,9 @@ Hashi drives whichever of these you have installed and signed in to. Each runs h
 | [opencode](https://opencode.ai) 2.2+ | `opencode` | every tool denied except read, glob, grep, list and lsp; `.env` files unreadable; project config ignored | tokens and cost |
 | [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen` | `--approval-mode default`, so shell and edits are denied; no MCP servers | tokens |
 | [Cursor CLI](https://docs.cursor.com/en/cli/overview) | `cursor` | print mode with the sandbox on, never `--force`, so changes are proposed and not applied | text only |
+| [Crush](https://github.com/charmbracelet/crush) 0.100 (opt-in: `--enable-crush`) | `crush` | every tool removed except view, ls, glob, grep, todos and the read-only LSP queries; project config refused; Hashi-owned config for every account | tokens and cost |
+
+Crush is off unless you pass `--enable-crush`, because a headless `crush run` approves every tool call itself. Hashi can only take tools away, and the ones left can still read any file your user can read.
 
 Every agent works in its own directory per token. To loosen Claude Code or Codex, use `--claude-permission-mode` or `--codex-sandbox`; other defaults are fixed in this release. Adding an agent takes one file in `src/agent/`; see [CONTRIBUTING.md](CONTRIBUTING.md) and the [research notes](docs/research/agent-clis.md).
 

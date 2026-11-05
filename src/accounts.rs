@@ -16,6 +16,11 @@
 //! variables inherited from the owner ([`credential_vars`]), so an
 //! `ANTHROPIC_API_KEY` in the owner's shell cannot outrank the account.
 //!
+//! Crush is the exception to "a run on the default account changes
+//! nothing": its default account also has a Hashi-owned directory,
+//! `<home>/accounts/crush/default/`, so the owner's own Crush config (with
+//! its MCP servers and hooks) never loads. See [`run_env`].
+//!
 //! Tokens and invites carry an [`AccountMap`]: for each agent, the ordered
 //! list of accounts it may use. An agent with no entry uses `default`.
 
@@ -142,6 +147,31 @@ pub const fn dir_var(agent: AgentKind) -> Option<&'static str> {
         AgentKind::Opencode => Some("XDG_DATA_HOME"),
         AgentKind::Qwen => Some("QWEN_HOME"),
         AgentKind::Cursor => None,
+        // With the CRUSH_* directories beside it; see `account_vars`.
+        AgentKind::Crush => Some("HOME"),
+    }
+}
+
+/// The variables that point `agent` at the account directory `dir`: the
+/// [`dir_var`] alone, or for Crush its config, data, cache and skills
+/// directories and `HOME`.
+#[must_use]
+pub fn account_vars(agent: AgentKind, dir: &Path) -> Vec<(String, String)> {
+    match (agent, dir_var(agent)) {
+        (AgentKind::Crush, _) => crate::agent::crush::account_env(dir),
+        (_, Some(var)) => vec![(var.to_owned(), dir.to_string_lossy().into_owned())],
+        (_, None) => Vec::new(),
+    }
+}
+
+/// Inherited variables removed from every run of `agent`, on any account,
+/// default included. Only Crush has any: every `CRUSH_*` variable (each
+/// overrides the variable without the prefix) and the XDG directories.
+#[must_use]
+pub const fn always_removed(agent: AgentKind) -> &'static [&'static str] {
+    match agent {
+        AgentKind::Crush => &crate::agent::crush::ALWAYS_REMOVE,
+        _ => &[],
     }
 }
 
@@ -189,6 +219,7 @@ pub const fn credential_vars(agent: AgentKind) -> &'static [&'static str] {
             "BAILIAN_CODING_PLAN_API_KEY",
         ],
         AgentKind::Opencode => &["XDG_DATA_HOME", "OPENCODE_DB"],
+        AgentKind::Crush => &crate::agent::crush::PROVIDER_VARS,
     }
 }
 
@@ -232,6 +263,14 @@ pub const fn sign_in(agent: AgentKind) -> Option<SignIn> {
             args: &[],
             env: &[],
             hint: Some("type /auth and set up the API-key plan, then quit Qwen Code"),
+        },
+        AgentKind::Crush => SignIn {
+            args: &["login"],
+            env: &[],
+            hint: Some(
+                "this signs in to Charm Hyper; for Copilot, ChatGPT or Grok run the same command \
+                 with `login copilot`, `login openai` or `login grok`",
+            ),
         },
         AgentKind::Cursor => return None,
     })
@@ -279,6 +318,28 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     {
         std::fs::create_dir_all(dir)
     }
+}
+
+/// Creates the Crush default account's directory,
+/// `<home>/accounts/crush/default/`, owner-only, and returns it.
+///
+/// # Errors
+///
+/// Fails if a directory cannot be created or a non-directory is in the way.
+pub fn crush_default_dir(home: &Path) -> std::io::Result<PathBuf> {
+    let root = root(home);
+    create_private_dir(&root)?;
+    let agent_dir = root.join(AgentKind::Crush.as_str());
+    create_private_dir(&agent_dir)?;
+    let dir = agent_dir.join(DEFAULT);
+    if std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.is_dir()) {
+        return Err(std::io::Error::other(format!(
+            "{} exists and is not a directory",
+            dir.display()
+        )));
+    }
+    create_private_dir(&dir)?;
+    Ok(dir)
 }
 
 /// Creates the account's directory (and `accounts/<agent>/`), owner-only.
@@ -371,7 +432,9 @@ pub fn remove_dir(home: &Path, agent: AgentKind, name: &str) -> std::io::Result<
 }
 
 /// What a run on account `name` of `kind` changes in the child's
-/// environment, or `None` for the default account.
+/// environment, or `None` for the default account. Crush's default account
+/// is `Some`: its own directory (created here when missing) and only the
+/// [`always_removed`] variables, so the owner's provider keys still work.
 ///
 /// # Errors
 ///
@@ -384,9 +447,15 @@ pub fn run_env(
     kind: AccountKind,
 ) -> std::io::Result<Option<EnvOverride>> {
     let set = match kind {
+        AccountKind::Default if agent == AgentKind::Crush => {
+            return Ok(Some(EnvOverride {
+                remove: always_removed(agent).to_vec(),
+                set: account_vars(agent, &crush_default_dir(home)?),
+            }));
+        }
         AccountKind::Default => return Ok(None),
         AccountKind::Login => {
-            let var = dir_var(agent).ok_or_else(|| unsupported(agent, kind))?;
+            dir_var(agent).ok_or_else(|| unsupported(agent, kind))?;
             let dir = account_dir(home, agent, name);
             if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
                 return Err(std::io::Error::new(
@@ -394,17 +463,16 @@ pub fn run_env(
                     "the account directory is missing",
                 ));
             }
-            (var.to_owned(), dir.to_string_lossy().into_owned())
+            account_vars(agent, &dir)
         }
         AccountKind::ApiKey | AccountKind::OauthToken => {
             let var = key_var(agent, kind).ok_or_else(|| unsupported(agent, kind))?;
-            (var.to_owned(), read_key(home, agent, name)?)
+            vec![(var.to_owned(), read_key(home, agent, name)?)]
         }
     };
-    Ok(Some(EnvOverride {
-        remove: credential_vars(agent).to_vec(),
-        set: vec![set],
-    }))
+    let mut remove = credential_vars(agent).to_vec();
+    remove.extend_from_slice(always_removed(agent));
+    Ok(Some(EnvOverride { remove, set }))
 }
 
 fn unsupported(agent: AgentKind, kind: AccountKind) -> std::io::Error {

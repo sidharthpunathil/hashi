@@ -313,6 +313,22 @@ Fixture `crush_session.json`:
 {"meta":{"id":"a41f09c2d7e3b5f1","uuid":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b","title":"Create hello.py","created":"2026-11-05T10:00:00Z","modified":"2026-11-05T10:00:07Z","cost":0.0123,"prompt_tokens":1834,"completion_tokens":212,"total_tokens":2046},"messages":[]}
 ```
 
+### Crush as integrated (opt-in)
+
+Added 2026-11-06, re-read against `main` as fetched on 2026-11-05, a few hours after v0.100.0 was tagged. Hashi drives it from `src/agent/crush.rs`, only with `--enable-crush`. Corrections and additions to the notes above:
+
+- **Usage is not all cumulative.** `cost` is a running total, but `prompt_tokens` and `completion_tokens` are the last step's context size and output (`internal/agent/agent.go`, `updateSessionTokenCounters`). Hashi reports those tokens as they are, and for a resumed run the cost difference from `crush session show <id> --json` taken just before.
+- **Session lookup.** `session last` returns the most recently updated top-level session (`internal/db/sql/sessions.sql`, `ListSessions`). Hashi gives every account and workspace pair its own `--data-dir` (`<account>/data/<sha256 of the workspace path>`) and holds a lock per data directory across the run and the lookup. It stores `meta.uuid`, which `-s` resolves directly.
+- **Config layering.** `lookupConfigs` (`internal/config/load.go:1049-1090`) reads `/etc/crush/crush.json` (Unix), the global config and its sibling `crushrc`, the global data config, then `.crushrc`, `crushrc`, `.crush.json` and `crush.json` from the working directory up to `git rev-parse --show-toplevel` (or the working directory alone without one). The workspace config at `<data-dir>/crush.json` is merged last (`Load`, same file). A crushrc is executed as shell code.
+- **Tools.** `allToolNames` (`internal/config/config.go:1060-1096`) lists 33 built-ins. Hashi denies 23 through `options.disabled_tools` and keeps `view`, `ls`, `glob`, `grep`, `todos`, `lsp_diagnostics`, `lsp_references`, `lsp_symbols`, `lsp_definition` and `lsp_call_hierarchy`. No command prints the tool list (`crush schema` describes config, not tools), so the gate is the version: 0.100.x runs, anything newer needs `--crush-allow-newer`.
+- **Reads outside the workspace.** `view` (and the other read tools) ask permission for paths outside the working directory (`internal/agent/tools/view.go:115-153`); the headless auto-approval grants it.
+- **Environment.** `CRUSH_GLOBAL_CONFIG`, `CRUSH_GLOBAL_DATA` (`load.go:1325-1395`), `CRUSH_CACHE_DIR` and `CRUSH_SKILLS_DIR` (`load.go:1476-1485`) move every user-level path. `PushPopCrushEnv` (`load.go:406-430`) makes `CRUSH_<VAR>` stand in for `<VAR>` while providers are configured. The Copilot token import reads `$HOME/.config/github-copilot/apps.json`, or `%LOCALAPPDATA%` on Windows (`internal/oauth/copilot/disk.go:29-35`). `godotenv/autoload` in `main.go` loads `./.env` without overriding variables already set. `CRUSH_DISABLE_METRICS`/`DO_NOT_TRACK` (`internal/cmd/root.go:948-951`) and `CRUSH_DISABLE_PROVIDER_AUTO_UPDATE` (`load.go:787`) are honoured. `CRUSH_CLIENT_SERVER` switches `run` to a background server (`root.go:259-262`); Hashi never sets it and strips it.
+- **Sign-in.** `crush login [hyper|copilot|openai|grok]` (`internal/cmd/login.go:19-71`), Hyper by default, stores the credential in the global data config.
+- **Errors.** `agent processing failed: <error>` (`internal/app/app.go:502`) after Crush's own retries; a provider failure carries the provider's title and message, so limit detection matches generic wording only.
+- **Update check.** `app.checkForUpdates` (`internal/app/app.go:201, 1041-1050`) calls the GitHub releases API on every start, with no opt-out.
+
+**argv Hashi uses:** `["--data-dir", "<account>/data/<sha>", "run", "-q", ("-m", "<model>"), ("-s", "<uuid>"), "--", "<prompt>"]`, preceded by `["--version"]` and followed by `["--data-dir", "<same>", "session", "last", "--json"]`.
+
 ---
 
 ## 8. Amp
@@ -420,7 +436,7 @@ Criteria: headless maturity, JSON output that is stable and carries text, sessio
 
 Close runners-up: **Goose** (installed here, open source, tokens and USD in JSON) loses on safety and reliability: session ids are absent from output, setup errors go to stdout, mid-run provider failures exit 0 with `status:"completed"`, and the headless choice is "all tools" (`auto`) or "no tools" (`chat`). **Factory Droid** has the best permission model (read-only default, fail-fast) and a Claude-shaped `json` result but is closed source, lower profile and reports credits rather than USD. **Copilot CLI** has a good deny-by-default story but an undocumented event schema.
 
-Not recommended for now: **Crush** (no JSON, auto-approves everything, loads workspace `.env`), **Aider** (no JSON, EOF confirms default to yes, `!` prompts run shell, errors exit 0), **Kimi Code** (print mode forces auto-approve, no usage), **Cline CLI** (no headless resume, auto-approves by default, self-updates), **Amp** (no approvals by default).
+Not recommended for now: **Crush** (no JSON, auto-approves everything, loads workspace `.env`; since added as an opt-in backend with the containment in section 7), **Aider** (no JSON, EOF confirms default to yes, `!` prompts run shell, errors exit 0), **Kimi Code** (print mode forces auto-approve, no usage), **Cline CLI** (no headless resume, auto-approves by default, self-updates), **Amp** (no approvals by default).
 
 ## Verification notes
 
@@ -438,3 +454,4 @@ Added after the security audit. The runner skips each one when the agent's extra
 - **Codex**: no MCP flag. `-c` overrides are deep-merged, so `-c mcp_servers={}` does not remove configured servers; disabling one needs its name, `-c mcp_servers.<name>.enabled=false`.
 - **opencode**: the inline config starts with `"*": "deny"` and allows only `read` (without `.env` files), `glob`, `grep`, `list` and `lsp`. MCP tools are checked under `<server>_<tool>` and fall under the `*` deny.
 - **Cursor CLI**: `--approve-mcps` is stripped from extra arguments, like `--force` and `--yolo`.
+- **Crush** (opt-in, see [section 7](#crush-as-integrated-opt-in)): `-y`, `--yolo`, `-c`/`--cwd`, `-D`/`--data-dir` and `-H`/`--host` are stripped from extra arguments, `--data-dir` is always Hashi's, and the workspace config denies 23 of the 33 built-in tools.

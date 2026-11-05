@@ -249,10 +249,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         .iter()
         .any(|a| a.agent == agent && a.available)
     {
-        return Err(ApiError::Unavailable(format!(
-            "{} is not installed on this host",
-            agent.display_name()
-        )));
+        return Err(ApiError::Unavailable(agent::unavailable_message(agent)));
     }
 
     let id = uuid::Uuid::new_v4().to_string();

@@ -38,6 +38,9 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--claude-bin` | `HASHI_CLAUDE_BIN` | found on `PATH` |
 | `--codex-bin` | `HASHI_CODEX_BIN` | found on `PATH` |
 | `--gemini-bin`, `--opencode-bin`, `--qwen-bin`, `--cursor-bin` | `HASHI_GEMINI_BIN`, `HASHI_OPENCODE_BIN`, `HASHI_QWEN_BIN`, `HASHI_CURSOR_BIN` | found on `PATH` |
+| `--enable-crush` | `HASHI_ENABLE_CRUSH` | off. Offer Crush, which is opt-in: while off it is not probed, not listed and a request for it answers "Crush is not installed or not enabled". See [security model](security-model.md#crush) |
+| `--crush-bin` | `HASHI_CRUSH_BIN` | found on `PATH` |
+| `--crush-allow-newer` | `HASHI_CRUSH_ALLOW_NEWER` | off. Run a Crush release newer than 0.100.x, the newest whose tool list Hashi has checked. Without it such a release is refused |
 | `--max-turns` | `HASHI_MAX_TURNS` | `10` (Claude) |
 | `--claude-permission-mode` | `HASHI_CLAUDE_PERMISSION_MODE` | Claude's default |
 | `--codex-sandbox` | `HASHI_CODEX_SANDBOX` | `read-only` |
@@ -54,6 +57,7 @@ hashi serve --headless                     # start it with plain log lines inste
 hashi doctor                               # agents, cloudflared, tailscale and its sign-in
 hashi install cloudflared                  # show the official install command, run it on yes
 hashi install tailscale --yes              # run it without asking
+hashi install crush                        # Crush, from its README; then start with --enable-crush
 hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
 hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, --clear-limits
@@ -102,6 +106,9 @@ Names are 1 to 32 characters from `a-z`, `0-9` and `-`; `default` is reserved. `
 | opencode | `XDG_DATA_HOME`, `opencode auth login --standalone` | not supported |
 | Qwen Code | `QWEN_HOME`, `qwen`, then `/auth` | not supported |
 | Cursor CLI | not supported | `CURSOR_API_KEY` |
+| Crush | `HOME` with `CRUSH_GLOBAL_CONFIG`, `CRUSH_GLOBAL_DATA`, `CRUSH_CACHE_DIR` and `CRUSH_SKILLS_DIR` under it, `crush login` (Charm Hyper; `crush login copilot`, `openai` or `grok` for the others) | not supported |
+
+Crush's `default` account is not your own Crush login: it is `~/.hashi/accounts/crush/default/`, so your `~/.config/crush` (with its MCP servers and hooks) never loads in a Hashi run. Sign it in with `hashi account login crush default`, or leave your provider variables (such as `ANTHROPIC_API_KEY`) in Hashi's environment, which the default account still sees. Other Crush accounts see none of the provider variables in Crush's README, and no Crush run sees an inherited `CRUSH_*` or `XDG_*` directory variable.
 
 A login account is the directory `~/.hashi/accounts/<agent>/<name>/` (mode `0700`). `hashi account add` prints the sign-in command with that variable set and, on a terminal, runs it with the terminal attached once you confirm (`--yes` skips the question); without a terminal it only prints it. It then checks the result with `claude auth status --json` for Claude Code, and for the other CLIs that the CLI wrote something into the directory. Every run on the account sets the variable to the same absolute path, which matters to Claude Code on macOS, whose Keychain entry is tied to that exact string. Hashi never reads, copies or refreshes what the CLI keeps there.
 
@@ -114,6 +121,7 @@ A key account keeps its key in `~/.hashi/accounts/<agent>/<name>/key` (mode `060
 - Gemini CLI: "exhausted your daily quota", "exhausted your capacity", "quota exceeded", `QUOTA_EXHAUSTED`, `RATE_LIMIT_EXCEEDED` and "Please retry in Ns". N is the reset when it is over 300 seconds; a shorter wait uses the cooldown.
 - Qwen Code: an exhausted token plan ("The quota will reset at MM-DD HH:MM:SS UTC.", the next such time), "free allocated quota exceeded", `insufficient_quota` and "Qwen OAuth free tier has been discontinued".
 - opencode: its typed limit errors (`provider.rate-limit`, `provider.quota`, `provider.go-limit`, `provider.budget-limit`, `provider.model-budget-limit`, `provider.free-limit`, `provider.chatgpt-limit`), with `retryAfterMs` as the reset, and "usage limit reached".
+- Crush: Crush retries provider errors itself and then reports the provider's own message, so only generic wording is matched: "rate limit" (also `rate-limit`, `rate_limit`), "too many requests", "quota", "usage limit", `resource_exhausted` and a bare 429. Crush reports no quota of its own.
 - Cursor CLI: "usage limit", "rate limit", `resource_exhausted`, "quota", its limit codes (`FREE_USER_USAGE_LIMIT`, `PRO_USER_USAGE_LIMIT`, `FREE_USER_RATE_LIMIT_EXCEEDED`, `PRO_USER_RATE_LIMIT_EXCEEDED`, `RATE_LIMITED`, `GENERIC_RATE_LIMIT_EXCEEDED`) and a bare 429. "monthly cycle ends on M/D/YYYY" gives the reset date.
 
 Limits are tracked only for tokens that list accounts for the agent.

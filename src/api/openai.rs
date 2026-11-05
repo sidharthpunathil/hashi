@@ -154,7 +154,7 @@ fn parse_model(model: Option<&str>) -> Result<(Option<AgentKind>, Option<String>
             "model_not_found",
             format!(
                 "unknown model `{model}`; use an agent name such as claude, codex, gemini, \
-                 opencode, qwen or cursor, optionally followed by /<model>"
+                 opencode, qwen, cursor or crush, optionally followed by /<model>"
             ),
         )
     })?;
