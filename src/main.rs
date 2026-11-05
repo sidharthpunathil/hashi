@@ -201,6 +201,10 @@ struct ServeArgs {
     /// Authenticated requests per minute per token (0 disables).
     #[arg(long, default_value_t = 60, env = "HASHI_RATE_LIMIT")]
     rate_limit: u32,
+    /// Connections open at once; further clients wait until one closes.
+    #[arg(long, default_value_t = 512, env = "HASHI_MAX_CONNECTIONS",
+          value_parser = clap::value_parser!(u32).range(1..))]
+    max_connections: u32,
     /// Maximum pending requests across all agents.
     #[arg(long, default_value_t = 100, env = "HASHI_QUEUE_LIMIT")]
     queue_limit: u64,
@@ -305,6 +309,16 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
     let tui = !args.headless && std::io::stdout().is_terminal();
     server::prepare_home(home)?;
     init_logging(home, tui)?;
+    let max_connections = usize::try_from(args.max_connections).unwrap_or(usize::MAX);
+    if let Some(fds) = hashi::net::raise_fd_limit()
+        && fds < u64::from(args.max_connections) + 64
+    {
+        tracing::warn!(
+            open_files = fds,
+            max_connections,
+            "the open-file limit is close to --max-connections; raise it with ulimit -n"
+        );
+    }
 
     if !args.bind.is_loopback() {
         if args.tls_cert.is_some() {
@@ -357,7 +371,11 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
 
     let bus = Bus::default();
     let events = bus.subscribe();
-    let running = server::start(cfg, bus).await?;
+    let net = hashi::net::NetLimits {
+        max_connections,
+        ..hashi::net::NetLimits::default()
+    };
+    let running = server::start_with(cfg, net, bus).await?;
 
     if tui {
         let result = hashi::tui::run(

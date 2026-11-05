@@ -162,8 +162,20 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/audit", get(tokens::audit))
         .route("/v1/invites", get(invites::list).post(invites::create))
         .route("/v1/invites/{id}", delete(invites::cancel))
-        .route("/v1/claim/preview", post(invites::preview))
-        .route("/v1/claim/redeem", post(invites::redeem))
+        .route(
+            "/v1/claim/preview",
+            post(invites::preview).layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                claim_limit,
+            )),
+        )
+        .route(
+            "/v1/claim/redeem",
+            post(invites::redeem).layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                claim_limit,
+            )),
+        )
         .merge(crate::web::routes())
         .route(
             "/mcp",
@@ -174,6 +186,24 @@ pub fn router(state: AppState) -> Router {
         .layer(cors)
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
+}
+
+/// Charges invite claims to the client's address, before the body is read or
+/// the database is touched, so one client cannot lock everyone out of their
+/// invite links.
+async fn claim_limit(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let key = format!(
+        "claim:{}",
+        crate::net::request_client_key(req.extensions(), req.headers())
+    );
+    if !state.limiter.check(&key) {
+        return ApiError::TooManyRequests("too many claim attempts, slow down").into_response();
+    }
+    next.run(req).await
 }
 
 async fn security_headers(mut res: Response) -> Response {
@@ -310,7 +340,8 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 // ── auth ───────────────────────────────────────────────────────────────────
 
-/// Fixed-window request limiter keyed by token id.
+/// Fixed-window request limiter keyed by token id, and by client address for
+/// invite claims (`claim:<ip>`) and failed sign-ins (`authfail:<ip>`).
 #[derive(Debug)]
 pub struct RateLimiter {
     per_minute: u32,
@@ -346,6 +377,20 @@ impl RateLimiter {
         entry.1 += 1;
         entry.1 <= self.per_minute
     }
+
+    /// Whether `key` has used up its budget for the current window, without
+    /// recording a hit.
+    pub fn exhausted(&self, key: &str) -> bool {
+        if self.per_minute == 0 {
+            return false;
+        }
+        let Ok(map) = self.windows.lock() else {
+            return true;
+        };
+        map.get(key).is_some_and(|(start, hits)| {
+            start.elapsed() < Duration::from_secs(60) && *hits >= self.per_minute
+        })
+    }
 }
 
 /// Extractor for an unexpired token (paused tokens pass; see [`submit`]).
@@ -375,6 +420,34 @@ fn bearer(parts: &Parts) -> ApiResult<&str> {
         .ok_or(ApiError::Unauthorized("malformed Authorization header"))
 }
 
+/// Looks up the bearer token, throttling clients that keep presenting
+/// unknown ones. The check runs before hashing and the database lookup, and
+/// only failures are charged, so a shared address does not slow real users.
+fn authenticate(
+    parts: &Parts,
+    state: &AppState,
+    lookup: impl FnOnce(&Store, &str) -> Result<Option<Token>, StoreError>,
+    rejection: &'static str,
+) -> ApiResult<Token> {
+    let secret = bearer(parts)?;
+    let key = format!(
+        "authfail:{}",
+        crate::net::request_client_key(&parts.extensions, &parts.headers)
+    );
+    if state.limiter.exhausted(&key) {
+        return Err(ApiError::TooManyRequests(
+            "too many invalid tokens from this address, slow down",
+        ));
+    }
+    match lookup(&state.store, secret)? {
+        Some(token) => Ok(token),
+        None => {
+            state.limiter.check(&key);
+            Err(ApiError::Unauthorized(rejection))
+        }
+    }
+}
+
 fn rate_limit(state: &AppState, token: &Token) -> ApiResult<()> {
     if state.limiter.check(&token.id) {
         Ok(())
@@ -387,10 +460,12 @@ impl FromRequestParts<AppState> for Auth {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
-        let token = state
-            .store
-            .authenticate(bearer(parts)?)?
-            .ok_or(ApiError::Unauthorized("invalid or expired token"))?;
+        let token = authenticate(
+            parts,
+            state,
+            |store, secret| store.authenticate(secret),
+            "invalid or expired token",
+        )?;
         rate_limit(state, &token)?;
         Ok(Self(token))
     }
@@ -400,10 +475,12 @@ impl FromRequestParts<AppState> for AnyToken {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
-        let token = state
-            .store
-            .authenticate_any(bearer(parts)?)?
-            .ok_or(ApiError::Unauthorized("invalid token"))?;
+        let token = authenticate(
+            parts,
+            state,
+            |store, secret| store.authenticate_any(secret),
+            "invalid token",
+        )?;
         rate_limit(state, &token)?;
         Ok(Self(token))
     }
@@ -476,6 +553,18 @@ mod tests {
         assert!(rl.check("a") && rl.check("a"));
         assert!(!rl.check("a"));
         assert!(rl.check("b"));
+    }
+
+    #[test]
+    fn exhausted_peeks_without_charging() {
+        let rl = RateLimiter::new(2);
+        assert!(!rl.exhausted("a"));
+        assert!(!rl.exhausted("a"));
+        rl.check("a");
+        assert!(!rl.exhausted("a"));
+        rl.check("a");
+        assert!(rl.exhausted("a"));
+        assert!(!RateLimiter::new(0).exhausted("a"));
     }
 
     #[test]

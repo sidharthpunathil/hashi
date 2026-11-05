@@ -3,6 +3,8 @@
 //! Point `--tls-cert` and `--tls-key` at PEM files from Let's Encrypt,
 //! `mkcert`, `tailscale cert` or your own CA. Handshakes run on their own
 //! tasks with a timeout, so a slow or silent client cannot hold up others.
+//! The same connection cap as plain HTTP applies: a slot is taken before
+//! `accept` and held by the connection's IO until it closes.
 
 use std::io;
 use std::net::SocketAddr;
@@ -17,6 +19,8 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::server::TlsStream;
+
+use crate::net::Limited;
 
 /// How long a client gets to finish the TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -102,23 +106,36 @@ pub fn load(files: &TlsFiles) -> Result<Arc<ServerConfig>, TlsError> {
 /// A listener that yields connections only after their TLS handshake succeeds.
 #[derive(Debug)]
 pub struct TlsListener {
-    rx: mpsc::Receiver<(TlsStream<TcpStream>, SocketAddr)>,
+    rx: mpsc::Receiver<(Limited<TlsStream<TcpStream>>, SocketAddr)>,
     local: SocketAddr,
 }
 
 impl TlsListener {
-    /// Wraps a bound TCP listener.
+    /// Wraps a bound TCP listener, serving at most `max_connections` at once
+    /// (zero is treated as one).
     ///
     /// # Errors
     ///
     /// Fails if the listener has no local address.
-    pub fn new(tcp: TcpListener, config: Arc<ServerConfig>) -> io::Result<Self> {
+    pub fn new(
+        tcp: TcpListener,
+        config: Arc<ServerConfig>,
+        max_connections: usize,
+    ) -> io::Result<Self> {
         let local = tcp.local_addr()?;
         let (tx, rx) = mpsc::channel(64);
         let acceptor = TlsAcceptor::from(config);
         let permits = Arc::new(Semaphore::new(MAX_HANDSHAKES));
+        let slots = Arc::new(Semaphore::new(max_connections.max(1)));
         tokio::spawn(async move {
             loop {
+                // Take a connection slot first, so clients past the cap wait in
+                // the kernel backlog instead of holding a descriptor here.
+                let slot = tokio::select! {
+                    () = tx.closed() => return,
+                    s = Arc::clone(&slots).acquire_owned() => s,
+                };
+                let Ok(slot) = slot else { return };
                 let accepted = tokio::select! {
                     () = tx.closed() => return,
                     a = tcp.accept() => a,
@@ -140,7 +157,7 @@ impl TlsListener {
                     let _permit = permit;
                     match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                         Ok(Ok(tls)) => {
-                            let _ = tx.send((tls, peer)).await;
+                            let _ = tx.send((Limited::new(tls, slot), peer)).await;
                         }
                         Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
                         Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
@@ -153,7 +170,7 @@ impl TlsListener {
 }
 
 impl axum::serve::Listener for TlsListener {
-    type Io = TlsStream<TcpStream>;
+    type Io = Limited<TlsStream<TcpStream>>;
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {

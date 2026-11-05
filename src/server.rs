@@ -9,12 +9,13 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::agent::{self, AgentConfig, AgentKind, Limits};
 use crate::api::{self, AgentInfo, AppState, RateLimiter, Runtime};
 use crate::events::{Bus, Event};
 use crate::guard::{ResourceGuard, ResourceSettings};
+use crate::net::{LimitedListener, NetLimits};
 use crate::queue::{self, Dispatcher, QueueConfig};
 use crate::store::{NewToken, Store};
 use crate::token::{Role, SessionMode};
@@ -156,12 +157,25 @@ pub async fn discover_agents(agents: &HashMap<AgentKind, AgentConfig>) -> Vec<Ag
     out
 }
 
-/// Starts the API, workers and (optionally) the tunnel.
+/// Starts the API, workers and (optionally) the tunnel, with the default
+/// [`NetLimits`].
 ///
 /// # Errors
 ///
 /// Fails if the database cannot be opened or the port cannot be bound.
 pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
+    start_with(cfg, NetLimits::default(), bus).await
+}
+
+/// Starts the API, workers and (optionally) the tunnel, with explicit
+/// connection limits. `CF-Connecting-IP` is trusted from loopback peers when
+/// a tunnel is configured, or when `net.trust_forwarded` is already set.
+///
+/// # Errors
+///
+/// Fails if the database cannot be opened or the port cannot be bound.
+pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Result<Running> {
+    net.trust_forwarded |= cfg.tunnel || cfg.tunnel_token.is_some();
     let store = Arc::new(open_store(&cfg.home)?);
     let recovered = store.recover_interrupted()?;
     if recovered > 0 {
@@ -251,23 +265,12 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         Some(config) => {
             // Browsers should keep using HTTPS for this host from now on.
             app = app.layer(axum::middleware::map_response(hsts));
-            let listener = crate::tls::TlsListener::new(listener, config)?;
-            tasks.spawn(async move {
-                let serve =
-                    axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
-                if let Err(e) = serve.await {
-                    warn!(error = %e, "https server stopped");
-                }
-            });
+            let listener = crate::tls::TlsListener::new(listener, config, net.max_connections)?;
+            tasks.spawn(async move { crate::net::serve(listener, app, &net, shutdown).await });
         }
         None => {
-            tasks.spawn(async move {
-                let serve =
-                    axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
-                if let Err(e) = serve.await {
-                    warn!(error = %e, "http server stopped");
-                }
-            });
+            let listener = LimitedListener::new(listener, net.max_connections);
+            tasks.spawn(async move { crate::net::serve(listener, app, &net, shutdown).await });
         }
     }
     bus.log(format!("listening on {scheme}://{local}"));

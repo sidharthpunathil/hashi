@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod events;
 pub mod guard;
 pub mod mcp;
+pub mod net;
 pub mod queue;
 pub mod server;
 pub mod store;

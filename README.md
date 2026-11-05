@@ -386,6 +386,7 @@ Every flag also reads an environment variable.
 | `--nice` | `HASHI_NICE` | `10`. Lower priority for agent runs, `0` to `19` (`0` disables; on Windows any value above `0` means below-normal priority) |
 | `--timeout` | `HASHI_TIMEOUT` | `300` seconds |
 | `--rate-limit` | `HASHI_RATE_LIMIT` | `60` per minute per token (`0` disables) |
+| `--max-connections` | `HASHI_MAX_CONNECTIONS` | `512` open connections; more wait until one closes |
 | `--queue-limit` | `HASHI_QUEUE_LIMIT` | `100` pending requests |
 | `--retention-days` | `HASHI_RETENTION_DAYS` | `14` |
 | `--claude-bin` | `HASHI_CLAUDE_BIN` | found on `PATH` |

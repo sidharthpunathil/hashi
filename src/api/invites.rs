@@ -199,13 +199,9 @@ pub(super) async fn cancel(
     Ok(Json(json!({ "ok": true })))
 }
 
-fn check_code(state: &AppState, code: &str) -> ApiResult<()> {
-    // Unauthenticated endpoints share one rate-limit bucket.
-    if !state.limiter.check("claim") {
-        return Err(ApiError::TooManyRequests(
-            "too many claim attempts, slow down",
-        ));
-    }
+fn check_code(_state: &AppState, code: &str) -> ApiResult<()> {
+    // Attempts are rate limited per client address by the router, before
+    // the handler runs (see `claim_limit`).
     if !code.starts_with(crate::store::INVITE_PREFIX) || code.len() > 128 {
         return Err(not_found());
     }
