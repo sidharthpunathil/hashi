@@ -34,8 +34,9 @@ const MASK: &str = "[redacted]";
 /// Masks secrets and the user's home directory in `input`.
 ///
 /// Covers Hashi tokens and invite codes, `Bearer` credentials, Cloudflare
-/// tunnel tokens, common provider API keys and JWTs. Running it twice gives
-/// the same result as running it once.
+/// tunnel tokens (keyed or bare), common provider API keys, AWS access key
+/// ids, Google OAuth access tokens and JWTs. Running it twice gives the same
+/// result as running it once.
 #[must_use]
 pub fn redact(input: &str) -> String {
     static HOME: OnceLock<Option<String>> = OnceLock::new();
@@ -103,7 +104,43 @@ fn match_secret(rest: &str, boundary: bool) -> Option<(usize, String)> {
     match_hashi(rest)
         .or_else(|| match_bearer(rest))
         .or_else(|| match_provider_key(rest))
+        .or_else(|| match_aws_key(rest))
+        .or_else(|| match_google_oauth(rest))
         .or_else(|| match_jwt(rest))
+        .or_else(|| match_tunnel_blob(rest))
+}
+
+/// AWS access key ids: `AKIA` (long-term) or `ASIA` (temporary) followed by
+/// exactly 16 uppercase letters or digits.
+fn match_aws_key(rest: &str) -> Option<(usize, String)> {
+    let prefix = ["AKIA", "ASIA"].into_iter().find(|p| rest.starts_with(p))?;
+    let tail = &rest[prefix.len()..];
+    let len = run(tail, |b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    let next = tail.as_bytes().get(len);
+    if len != 16 || next.is_some_and(|b| is_word_byte(*b)) {
+        return None;
+    }
+    Some((prefix.len() + len, format!("{prefix}{MASK}")))
+}
+
+/// Google OAuth access tokens, `ya29.` followed by a long base64url run.
+fn match_google_oauth(rest: &str) -> Option<(usize, String)> {
+    const PREFIX: &str = "ya29.";
+    let tail = rest.strip_prefix(PREFIX)?;
+    let len = run(tail, is_key_byte);
+    (len >= 20).then(|| (PREFIX.len() + len, format!("{PREFIX}{MASK}")))
+}
+
+/// A bare Cloudflare tunnel token: base64 JSON (`eyJ`) with no dots, far
+/// longer than any word. JWTs are matched first, by [`match_jwt`].
+fn match_tunnel_blob(rest: &str) -> Option<(usize, String)> {
+    if !rest.starts_with("eyJ") {
+        return None;
+    }
+    let len = run(rest, |b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
+    });
+    (len >= 80).then(|| (len, MASK.to_owned()))
 }
 
 /// `hashi_` + hex tokens and `hashi_inv_` + hex invite codes. Short display
@@ -267,6 +304,120 @@ fn replace_home(s: &str, home: &str) -> String {
     out
 }
 
+// ── terminal output ────────────────────────────────────────────────────────
+
+/// Longest error printed by [`headless_line`], in characters. The database
+/// keeps the full text.
+pub const HEADLESS_ERROR_CHARS: usize = 500;
+
+/// Bidirectional and isolate controls (U+200E, U+200F, U+061C, U+202A to
+/// U+202E and U+2066 to U+2069), which can make text display in a different
+/// order from the bytes.
+#[must_use]
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Replaces every control character (C0, DEL and C1, so nothing can start an
+/// escape sequence) and every bidi control with `?`. With `keep_lines`,
+/// newlines and tabs stay; otherwise they become spaces.
+#[must_use]
+pub fn neutralize_controls(s: &str, keep_lines: bool) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\t' if keep_lines => c,
+            '\n' | '\t' | '\r' => ' ',
+            c if c.is_control() || is_bidi_control(c) => '?',
+            c => c,
+        })
+        .collect()
+}
+
+/// `s` made safe to print on one terminal line: control and bidi characters
+/// are neutralised, then secrets and the home directory are redacted as in
+/// the log.
+#[must_use]
+pub fn terminal_safe(s: &str) -> String {
+    redact(&neutralize_controls(s, false))
+}
+
+/// [`terminal_safe`] with an explicit home directory, for tests.
+#[must_use]
+pub fn terminal_safe_with_home(s: &str, home: Option<&str>) -> String {
+    redact_with_home(&neutralize_controls(s, false), home)
+}
+
+/// The line `hashi serve --headless` prints for an event. Every string in it
+/// can come from an agent, a token holder or `cloudflared`, so all of it goes
+/// through [`terminal_safe`].
+#[must_use]
+pub fn headless_line(ev: &crate::events::Event) -> String {
+    use crate::events::Event;
+    fn short(id: &str) -> &str {
+        id.get(..8).unwrap_or(id)
+    }
+    let line = match ev {
+        Event::Queued { id, agent, token } => {
+            format!("  ◌ {} queued for {agent} by {token}", short(id))
+        }
+        Event::Started { id, agent } => format!("  ⠿ {agent} picked up {}", short(id)),
+        Event::Finished {
+            id,
+            agent,
+            ok: true,
+            duration_ms,
+            ..
+        } => format!("  ✓ {agent} answered {} in {duration_ms}ms", short(id)),
+        Event::Finished {
+            id, agent, error, ..
+        } => format!(
+            "  ✗ {agent} failed {}: {}",
+            short(id),
+            crate::util::truncate(
+                error.as_deref().unwrap_or("unknown error"),
+                HEADLESS_ERROR_CHARS
+            )
+        ),
+        Event::Held { reason, detail } => format!("  ! held     {reason}: {detail}"),
+        Event::TunnelReady(url) => format!("  ⌁ public   {url}"),
+        Event::TunnelDown(why) => format!("  ! tunnel   {why}"),
+        Event::Log(msg) => format!("  · {msg}"),
+    };
+    terminal_safe(&line)
+}
+
+// ── private files ──────────────────────────────────────────────────────────
+
+/// Writes `contents` to `path`, readable only by its owner on Unix. A file
+/// that already existed is truncated and its mode tightened to 0600.
+///
+/// # Errors
+///
+/// Fails if the file cannot be opened, written or secured.
+pub fn write_private(path: &Path, contents: &str) -> io::Result<()> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Only regular files: never chmod a device such as /dev/stdout.
+        if file.metadata()?.is_file() {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    file.write_all(contents.as_bytes())?;
+    file.flush()
+}
+
 // ── error ids ──────────────────────────────────────────────────────────────
 
 /// A short random id such as `E-1a2b3c4d`, logged with a failure and shown to
@@ -328,7 +479,16 @@ pub fn open_log_file(dir: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts.open(dir.join(LOG_FILE))
+    let file = opts.open(dir.join(LOG_FILE))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The mode above applies only when the file is created.
+        if file.metadata()?.is_file() {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(file)
 }
 
 /// `dir/hashi.log`, opened for appending, that rotates itself once it grows
@@ -567,7 +727,14 @@ pub fn write_crash(logs_dir: &Path, text: &str, now: OffsetDateTime) -> io::Resu
             format!("crash-{stamp}-{n}.txt")
         };
         let path = logs_dir.join(name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
             Ok(mut file) => {
                 file.write_all(text.as_bytes())?;
                 drop(file);
@@ -935,6 +1102,171 @@ mod tests {
             a.file_name().unwrap().to_str().unwrap(),
             "crash-19700101T000000Z.txt"
         );
+    }
+
+    #[test]
+    fn masks_aws_access_keys() {
+        assert_eq!(
+            r("aws_access_key_id = AKIAIOSFODNN7EXAMPLE end"),
+            "aws_access_key_id = AKIA[redacted] end"
+        );
+        assert_eq!(r("ASIAIOSFODNN7EXAMPLE"), "ASIA[redacted]");
+        // Too short, too long or lowercase: not a key.
+        for s in [
+            "AKIAIOSFODNN7",
+            "AKIAIOSFODNN7EXAMPLEX",
+            "AKIAiosfodnn7example",
+        ] {
+            assert_eq!(r(s), s);
+        }
+    }
+
+    #[test]
+    fn masks_google_oauth_tokens() {
+        assert_eq!(
+            r("token ya29.a0AfH6SMBx3kLmNoPqRsTuVwXyZ0123456789-_abc ok"),
+            "token ya29.[redacted] ok"
+        );
+        let s = "ya29.short";
+        assert_eq!(r(s), s);
+    }
+
+    #[test]
+    fn masks_unkeyed_cloudflare_tunnel_tokens() {
+        // Base64 of {"a":"<account>","t":"<tunnel>","s":"<secret>"}: no dots.
+        let token = "eyJhIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJ0IjoiMDEyMzQ1NjctODlhYi1jZGVmLTAxMjMtNDU2Nzg5YWJjZGVmIiwicyI6IlpHVm1ZWFZzZEhObFkzSmxkQT09In0=";
+        assert_eq!(
+            r(&format!("cloudflared tunnel run {token} now")),
+            "cloudflared tunnel run [redacted] now"
+        );
+        // JWTs keep their own label, and short eyJ strings are left alone.
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        assert_eq!(r(jwt), "[redacted-jwt]");
+        assert_eq!(r("eyJhIjoiMTIz"), "eyJhIjoiMTIz");
+    }
+
+    #[test]
+    fn new_patterns_are_idempotent() {
+        let s = "AKIAIOSFODNN7EXAMPLE ya29.a0AfH6SMBx3kLmNoPqRsTuVwXyZ0123456789 \
+                 eyJhIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJ0IjoiMDEyMzQ1NjctODlhYi1jZGVmLTAxMjMtNDU2Nzg5YWJjZGVmIn0=";
+        let once = r(s);
+        assert_eq!(r(&once), once);
+    }
+
+    fn has_unsafe_terminal_chars(s: &str) -> bool {
+        s.chars().any(|c| c.is_control() || is_bidi_control(c))
+    }
+
+    #[test]
+    fn terminal_text_has_no_escape_or_bidi_characters() {
+        let hostile = "boom \u{1b}]0;owned\u{7}\u{1b}[2J\u{1b}[H\u{1b}]52;c;aGk=\u{7} \u{9b}31m \
+                       \u{202e}txt.exe\u{202c} \u{2066}x\u{2069}\r\nnext\tline\u{7f}";
+        let out = terminal_safe_with_home(hostile, None);
+        assert!(!has_unsafe_terminal_chars(&out), "{out:?}");
+        assert!(out.starts_with("boom "));
+        assert!(out.contains("next line"));
+    }
+
+    #[test]
+    fn terminal_text_is_redacted() {
+        let out = terminal_safe_with_home(
+            &format!("failed with {} in /Users/alice/bin", token()),
+            Some(HOME),
+        );
+        assert_eq!(out, "failed with hashi_1a2b…[redacted] in ~/bin");
+        // A control character cannot hide a secret from the redactor.
+        let out = terminal_safe_with_home(&format!("x\u{1b}{}", token()), Some(HOME));
+        assert!(!out.contains("1a2b3c4d1a2b"), "{out}");
+    }
+
+    #[test]
+    fn headless_lines_are_sanitised() {
+        use crate::agent::AgentKind;
+        use crate::events::Event;
+        let ev = Event::Finished {
+            id: "0123456789abcdef".into(),
+            agent: AgentKind::Claude,
+            ok: false,
+            duration_ms: 5,
+            error: Some(format!(
+                "agent exited with 1: \u{1b}]0;pwned\u{7}\u{1b}[2J {}",
+                token()
+            )),
+        };
+        let line = headless_line(&ev);
+        assert!(!has_unsafe_terminal_chars(&line), "{line:?}");
+        assert!(line.starts_with("  ✗ claude failed 01234567: agent exited with 1: "));
+        assert!(!line.contains("1a2b3c4d1a2b"));
+
+        let ev = Event::Queued {
+            id: "abc".into(),
+            agent: AgentKind::Codex,
+            token: "bob\u{1b}[31m\u{202e}".into(),
+        };
+        let line = headless_line(&ev);
+        assert!(!has_unsafe_terminal_chars(&line), "{line:?}");
+        assert!(line.contains("queued for codex by bob"));
+        for ev in [
+            Event::TunnelDown("x\u{1b}[2Jy".into()),
+            Event::TunnelReady("https://a\u{7}.example".into()),
+            Event::Log("a\u{9b}b".into()),
+        ] {
+            assert!(!has_unsafe_terminal_chars(&headless_line(&ev)));
+        }
+    }
+
+    #[test]
+    fn headless_errors_are_capped() {
+        use crate::agent::AgentKind;
+        use crate::events::Event;
+        let ev = Event::Finished {
+            id: "id".into(),
+            agent: AgentKind::Claude,
+            ok: false,
+            duration_ms: 5,
+            error: Some("x".repeat(4_000)),
+        };
+        assert!(headless_line(&ev).chars().count() < HEADLESS_ERROR_CHARS + 40);
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_files_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_crash(dir.path(), "boom", OffsetDateTime::UNIX_EPOCH).unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_log_is_tightened_on_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG_FILE);
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_log_file(dir.path()).unwrap());
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_files_are_owner_only_even_when_they_existed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.md");
+        write_private(&path, "one").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, "two").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
     }
 
     #[test]

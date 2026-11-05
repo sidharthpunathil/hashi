@@ -182,7 +182,7 @@ impl Worker {
                 (true, None)
             }
             Err(err) => {
-                let msg = truncate(&err, 4_000);
+                let msg = client_error(&err);
                 let error_id = crate::diagnostics::new_error_id();
                 warn!(
                     id = %req.id,
@@ -259,6 +259,14 @@ impl Worker {
     }
 }
 
+/// A failed run's error as stored and returned to the token holder: secrets
+/// and the owner's home directory (for example in the binary path of a
+/// "failed to start" error) are redacted, then it is capped at 4000
+/// characters. Redacting first means a cut cannot leave half a secret.
+fn client_error(err: &str) -> String {
+    truncate(&crate::diagnostics::redact(err), 4_000)
+}
+
 /// The part of an agent's error that goes into the log.
 fn log_excerpt(err: &str) -> String {
     truncate(err, LOG_ERROR_CHARS)
@@ -267,6 +275,25 @@ fn log_excerpt(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_errors_hide_the_owner_home_and_secrets() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let home = home.display().to_string();
+        let err = format!(
+            "failed to start `{home}/.local/bin/claude`: No such file or directory, key sk-ant-api03-AbCdEfGhIjKlMnOpQrSt"
+        );
+        let msg = client_error(&err);
+        assert!(!msg.contains(&home), "{msg}");
+        assert!(
+            msg.starts_with("failed to start `~/.local/bin/claude`"),
+            "{msg}"
+        );
+        assert!(!msg.contains("AbCdEfGhIjKlMnOpQrSt"), "{msg}");
+        assert_eq!(client_error(&"x".repeat(5_000)).chars().count(), 4_000);
+    }
 
     #[test]
     fn logged_errors_are_short_but_short_errors_are_whole() {

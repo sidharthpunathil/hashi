@@ -114,6 +114,21 @@ pub async fn start_named(
     })
 }
 
+/// The warning printed when [`token_in_argv`] is true.
+pub const ARGV_TOKEN_WARNING: &str = "warning: --tunnel-token on the command line is visible to \
+     other users of this machine in the process list; set HASHI_TUNNEL_TOKEN in the environment \
+     instead";
+
+/// Whether the tunnel token was given as a `--tunnel-token` flag rather than
+/// through `HASHI_TUNNEL_TOKEN`. Arguments are readable by every local user
+/// (`ps`), so the flag form leaks the token.
+pub fn token_in_argv(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    args.into_iter().take_while(|a| a != "--").any(|a| {
+        a.to_str()
+            .is_some_and(|a| a == "--tunnel-token" || a.starts_with("--tunnel-token="))
+    })
+}
+
 /// An empty cloudflared config owned by Hashi.
 ///
 /// Without `--config`, cloudflared also loads `~/.cloudflared/config.yml`.
@@ -121,7 +136,7 @@ pub async fn start_named(
 /// catch-all `http_status:404`) silently override Hashi's tunnel target.
 fn isolated_config(home: &Path) -> Result<PathBuf, TunnelError> {
     let path = home.join("cloudflared.yml");
-    std::fs::write(
+    crate::diagnostics::write_private(
         &path,
         "# Managed by Hashi. Keeps ~/.cloudflared/config.yml out of Hashi's tunnel.\n",
     )?;
@@ -200,6 +215,42 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         // Only a comment: no tunnel, credentials or ingress rules.
         assert!(body.lines().all(|l| l.starts_with('#')));
+    }
+
+    #[test]
+    fn spots_a_tunnel_token_on_the_command_line() {
+        let argv = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(token_in_argv(argv(&[
+            "hashi",
+            "serve",
+            "--tunnel-token",
+            "x"
+        ])));
+        assert!(token_in_argv(argv(&["hashi", "serve", "--tunnel-token=x"])));
+        assert!(!token_in_argv(argv(&["hashi", "serve", "--tunnel"])));
+        assert!(!token_in_argv(argv(&[
+            "hashi",
+            "serve",
+            "--public-url",
+            "https://x"
+        ])));
+        // After `--` it is a value, not a flag.
+        assert!(!token_in_argv(argv(&[
+            "hashi",
+            "ask",
+            "--",
+            "--tunnel-token"
+        ])));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = isolated_config(dir.path()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

@@ -66,7 +66,9 @@ struct ReportArgs {
     /// Print the report instead of writing a file.
     #[arg(long)]
     stdout: bool,
-    /// Include excerpts (500 characters) of the prompts that failed.
+    /// Include excerpts (500 characters) of the prompts that failed, and their
+    /// error text, which can contain agent output (stdout, stderr or the
+    /// model's own reply). Without it, failures are listed by kind only.
     #[arg(long)]
     include_prompts: bool,
     #[command(flatten)]
@@ -321,6 +323,9 @@ fn init_logging(home: &std::path::Path, tui: bool) -> Result<()> {
 }
 
 async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
+    if args.tunnel_token.is_some() && hashi::tunnel::token_in_argv(std::env::args_os()) {
+        eprintln!("{}", hashi::tunnel::ARGV_TOKEN_WARNING);
+    }
     let tui = !args.headless && std::io::stdout().is_terminal();
     server::prepare_home(home)?;
     init_logging(home, tui)?;
@@ -441,39 +446,10 @@ fn print_banner(running: &server::Running) {
     println!();
 }
 
+/// Agent output, token names and tunnel messages reach this line, so it is
+/// sanitised and redacted by [`diagnostics::headless_line`].
 fn print_event(ev: &Event) {
-    match ev {
-        Event::Queued { id, agent, token } => {
-            println!("  ◌ {} queued for {agent} by {token}", short(id))
-        }
-        Event::Started { id, agent } => println!("  ⠿ {agent} picked up {}", short(id)),
-        Event::Finished {
-            id,
-            agent,
-            ok: true,
-            duration_ms,
-            ..
-        } => {
-            println!("  ✓ {agent} answered {} in {duration_ms}ms", short(id));
-        }
-        Event::Finished {
-            id, agent, error, ..
-        } => {
-            println!(
-                "  ✗ {agent} failed {}: {}",
-                short(id),
-                error.as_deref().unwrap_or("unknown error")
-            );
-        }
-        Event::Held { reason, detail } => println!("  ! held     {reason}: {detail}"),
-        Event::TunnelReady(url) => println!("  ⌁ public   {url}"),
-        Event::TunnelDown(why) => println!("  ! tunnel   {why}"),
-        Event::Log(msg) => println!("  · {msg}"),
-    }
-}
-
-fn short(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+    println!("{}", diagnostics::headless_line(ev));
 }
 
 async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
@@ -555,13 +531,19 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
         Some(p) => p,
         None => PathBuf::from(name),
     };
-    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+    diagnostics::write_private(&path, &text)
+        .with_context(|| format!("writing {}", path.display()))?;
     println!("\n  ✦ hashi report\n");
     let shown = std::path::absolute(&path).unwrap_or(path);
     println!("  Saved {}", shown.display());
     println!();
-    println!("  Read it before you share it. Secrets are redacted and prompts are left out,");
-    println!("  but it does contain error messages and log lines from this machine.");
+    if args.include_prompts {
+        println!("  Read it before you share it. Secrets are redacted, but it includes prompt");
+        println!("  excerpts, agent error output and log lines from this machine.");
+    } else {
+        println!("  Read it before you share it. Secrets are redacted and prompts, responses and");
+        println!("  agent error output are left out, but it has log lines from this machine.");
+    }
     println!();
     println!("  To file a bug, open this link and attach the file:");
     println!("  {issue}");
