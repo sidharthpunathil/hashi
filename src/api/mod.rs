@@ -28,9 +28,13 @@ mod ask;
 mod invites;
 mod tokens;
 
-pub use ask::{AskBody, SubmitInput, me_json, request_json, submit, wait_until_done};
+pub use ask::{
+    AskBody, SubmitInput, me_json, reads_any_request, request_json, submit, wait_until_done,
+};
 pub use invites::{CreateInviteBody, snippets, validate_new_invite};
-pub use tokens::{CreateTokenBody, UpdateTokenBody, validate_limits, validate_new_token};
+pub use tokens::{
+    CreateTokenBody, LimitsPatch, UpdateTokenBody, validate_limits, validate_new_token,
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -61,7 +65,7 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Upper bound for `wait` long-polls, in seconds.
 pub const MAX_WAIT_SECS: u64 = 120;
 /// Upper bound on stored tokens.
-pub const MAX_TOKENS: usize = 100;
+pub const MAX_TOKENS: usize = crate::store::MAX_TOKENS;
 
 /// Readiness of one agent, discovered at startup.
 #[derive(Debug, Clone, Serialize)]

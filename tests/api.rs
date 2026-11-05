@@ -1324,3 +1324,376 @@ fn remove_workspace_never_leaves_the_workspace_root() {
     assert!(server::remove_workspace(&home, "").is_err());
     assert!(outside.join("keep.txt").exists());
 }
+
+// ── token lifecycle: pause, expiry and revoke reach queued and running work ──
+
+/// Polls `GET /v1/ask/{id}` as admin until `want` or a timeout.
+async fn wait_for_status(h: &Harness, id: &str, want: &str) -> Value {
+    for _ in 0..100 {
+        let (_, v) = h.get(&format!("/v1/ask/{id}"), Some(&h.admin)).await;
+        if v["status"] == want {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("request {id} never reached {want}");
+}
+
+#[tokio::test]
+async fn paused_token_queued_prompt_waits_until_resume() {
+    let h = harness().await;
+    let token = h.user_token(json!({"name": "pausable"})).await;
+    let tid = h.token_id("pausable").await;
+    let (_, one) = h
+        .post("/v1/ask", &token, json!({"message": "slow one"}))
+        .await;
+    let (_, two) = h
+        .post("/v1/ask", &token, json!({"message": "slow two"}))
+        .await;
+    let one = one["id"].as_str().unwrap().to_owned();
+    let two = two["id"].as_str().unwrap().to_owned();
+    wait_for_status(&h, &one, "running").await;
+    let (status, _) = h
+        .patch(&format!("/v1/tokens/{tid}"), json!({"paused": true}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    // The first run finishes after 2 s; the second must not start while paused.
+    wait_for_status(&h, &one, "completed").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let (_, v) = h.get(&format!("/v1/ask/{two}"), Some(&h.admin)).await;
+    assert_eq!(v["status"], "queued", "{v}");
+
+    h.patch(&format!("/v1/tokens/{tid}"), json!({"paused": false}))
+        .await;
+    let (_, v) = h
+        .get(&format!("/v1/ask/{two}?wait=10"), Some(&h.admin))
+        .await;
+    assert_eq!(v["status"], "completed", "{v}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn expired_token_queued_prompt_fails_without_running() {
+    let h = harness().await;
+    let token = h
+        .user_token(json!({"name": "brief", "expiresInDays": 1}))
+        .await;
+    let tid = h.token_id("brief").await;
+    let (_, one) = h
+        .post("/v1/ask", &token, json!({"message": "slow one"}))
+        .await;
+    let (_, two) = h
+        .post("/v1/ask", &token, json!({"message": "slow two"}))
+        .await;
+    let one = one["id"].as_str().unwrap().to_owned();
+    let two = two["id"].as_str().unwrap().to_owned();
+    wait_for_status(&h, &one, "running").await;
+    let mut t = h.running.state.store.get_token(&tid).unwrap().unwrap();
+    t.expires_at = Some(1);
+    h.running.state.store.save_token_policy(&t).unwrap();
+    let v = wait_for_status(&h, &two, "failed").await;
+    assert!(
+        v["error"].as_str().unwrap().contains("expired"),
+        "unexpected error: {v}"
+    );
+    assert!(v.get("response").is_none(), "{v}");
+    h.running.shutdown().await;
+}
+
+/// A fake Claude that records its pid, then beats every 100 ms for a minute.
+fn heartbeat_agent(dir: &Path) -> (PathBuf, PathBuf) {
+    let pidfile = dir.join("agent.pid");
+    let beats = dir.join("beats");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"--version\" ]; then echo '9.9.9 (Fake Claude)'; exit 0; fi\n\
+         echo $$ > '{pid}'\n\
+         i=0\n\
+         while [ $i -lt 600 ]; do echo $i >> '{beats}'; i=$((i+1)); sleep 0.1; done\n",
+        pid = pidfile.display(),
+        beats = beats.display()
+    );
+    write_script(dir, "claude", &script);
+    (pidfile, beats)
+}
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+async fn read_pid(pidfile: &Path) -> String {
+    for _ in 0..100 {
+        if let Ok(p) = std::fs::read_to_string(pidfile)
+            && !p.trim().is_empty()
+        {
+            return p.trim().to_owned();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the agent never started");
+}
+
+async fn heartbeat_harness() -> (Harness, PathBuf, PathBuf) {
+    let mut files = (PathBuf::new(), PathBuf::new());
+    let h = harness_with(|c| {
+        let dir = c.home.parent().unwrap().join("beat");
+        std::fs::create_dir_all(&dir).unwrap();
+        files = heartbeat_agent(&dir);
+        if let Some(claude) = c.agents.get_mut(&AgentKind::Claude) {
+            claude.bin = dir.join("claude");
+        }
+        c.limits.timeout = Duration::from_secs(60);
+    })
+    .await;
+    (h, files.0, files.1)
+}
+
+fn kill_stray(pid: &str) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", pid])
+        .status();
+}
+
+#[tokio::test]
+async fn revoking_a_token_kills_its_running_agent() {
+    let (h, pidfile, beats) = heartbeat_harness().await;
+    let user = h.user_token(json!({})).await;
+    let (status, _) = h.post("/v1/ask", &user, json!({"message": "job"})).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let pid = read_pid(&pidfile).await;
+    let id = user_id(&h).await;
+    let (status, _) = h
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/v1/tokens/{id}"),
+            Some(&h.admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    // Revoke waits for the kill, so the agent is gone almost at once.
+    let mut gone = false;
+    for _ in 0..10 {
+        if !alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if !gone {
+        kill_stray(&pid);
+    }
+    assert!(gone, "agent {pid} kept running after revoke");
+    let count = std::fs::read_to_string(&beats).unwrap().lines().count();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let after = std::fs::read_to_string(&beats).unwrap().lines().count();
+    assert_eq!(count, after, "heartbeats continued after revoke");
+    let workspace = h._dir.path().join("home/workspaces").join(&id);
+    assert!(!workspace.exists(), "the workspace survived the revoke");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn revoke_from_another_process_stops_the_run_within_seconds() {
+    let (h, pidfile, _beats) = heartbeat_harness().await;
+    let user = h.user_token(json!({})).await;
+    let (status, _) = h.post("/v1/ask", &user, json!({"message": "job"})).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let pid = read_pid(&pidfile).await;
+    let id = user_id(&h).await;
+    // A second connection to the same database, as `hashi token revoke` uses.
+    let other = hashi::store::Store::open(&h._dir.path().join("home/hashi.db")).unwrap();
+    assert!(matches!(
+        other.revoke_token(&id).unwrap(),
+        hashi::store::Revoke::Revoked(_)
+    ));
+    let mut gone = false;
+    for _ in 0..80 {
+        if !alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !gone {
+        kill_stray(&pid);
+    }
+    assert!(gone, "agent {pid} outlived an offline revoke");
+    h.running.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_submits_never_exceed_request_caps() {
+    let h = harness().await;
+    for (round, limits) in [
+        json!({"dailyRequests": 3}),
+        json!({"monthlyRequests": 3}),
+        json!({"dailyRequests": 3, "maxPending": 3}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("burst-{round}");
+        h.user_token(json!({"name": name, "limits": limits})).await;
+        let tid = h.token_id(&name).await;
+        let token = h.running.state.store.get_token(&tid).unwrap().unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..32 {
+            let state = h.running.state.clone();
+            let token = token.clone();
+            let barrier = Arc::clone(&barrier);
+            set.spawn(async move {
+                barrier.wait().await;
+                hashi::api::submit(
+                    &state,
+                    &token,
+                    hashi::api::SubmitInput {
+                        message: format!("hi {i}"),
+                        agent: None,
+                        model: None,
+                    },
+                )
+                .await
+            });
+        }
+        let mut accepted = 0;
+        let mut limited = 0;
+        while let Some(r) = set.join_next().await {
+            match r.unwrap() {
+                Ok(_) => accepted += 1,
+                Err(e) if format!("{e:?}").contains("limit_reached") => limited += 1,
+                Err(_) => {}
+            }
+        }
+        let usage = h
+            .running
+            .state
+            .store
+            .token_usage(&tid, hashi::util::now_ms())
+            .unwrap();
+        assert_eq!(accepted, 3, "round {round}");
+        assert_eq!(limited, 29, "round {round}");
+        assert_eq!(usage.today_requests, 3, "round {round}");
+    }
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn cap_errors_keep_the_limit_name_and_reset_time() {
+    let h = harness().await;
+    let token = h
+        .user_token(json!({"limits": {"monthlyRequests": 1}}))
+        .await;
+    let (status, _) = h
+        .post("/v1/ask", &token, json!({"message": "hi", "wait": 10}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, v) = h.post("/v1/ask", &token, json!({"message": "hi"})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(v["error"]["limit"], "monthlyRequests", "{v}");
+    assert!(
+        v["error"]["resetAt"]
+            .as_str()
+            .unwrap()
+            .ends_with("-01T00:00:00Z"),
+        "{v}"
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn patch_limits_keeps_max_pending_unless_set() {
+    let h = harness().await;
+    h.user_token(json!({"name": "ci"})).await;
+    let id = h.token_id("ci").await;
+    let (status, v) = h
+        .patch(
+            &format!("/v1/tokens/{id}"),
+            json!({"limits": {"dailyRequests": 5}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["record"]["limits"]["dailyRequests"], 5, "{v}");
+    assert_eq!(v["record"]["limits"]["maxPending"], 3, "{v}");
+    let (_, v) = h
+        .patch(
+            &format!("/v1/tokens/{id}"),
+            json!({"limits": {"maxPending": 7}}),
+        )
+        .await;
+    assert_eq!(v["record"]["limits"]["maxPending"], 7, "{v}");
+    assert!(v["record"]["limits"]["dailyRequests"].is_null(), "{v}");
+    let (_, v) = h
+        .patch(
+            &format!("/v1/tokens/{id}"),
+            json!({"limits": {"maxPending": null}}),
+        )
+        .await;
+    assert!(v["record"]["limits"]["maxPending"].is_null(), "{v}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn paused_admin_cannot_read_other_tokens_requests() {
+    let h = harness().await;
+    let user = h.user_token(json!({})).await;
+    let (status, v) = h
+        .post(
+            "/v1/tokens",
+            &h.admin,
+            json!({"name": "ops", "role": "admin"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let ops = v["token"].as_str().unwrap().to_owned();
+    let ops_id = v["record"]["id"].as_str().unwrap().to_owned();
+    let (_, v) = h
+        .post("/v1/ask", &user, json!({"message": "hi", "wait": 10}))
+        .await;
+    let rid = v["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        h.get(&format!("/v1/ask/{rid}"), Some(&ops)).await.0,
+        StatusCode::OK
+    );
+    h.patch(&format!("/v1/tokens/{ops_id}"), json!({"paused": true}))
+        .await;
+    assert_eq!(
+        h.get(&format!("/v1/ask/{rid}"), Some(&ops)).await.0,
+        StatusCode::NOT_FOUND
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn invites_cannot_exceed_the_token_cap() {
+    let h = harness().await;
+    let (code, _) = new_invite(&h, json!({"label": "late"})).await;
+    let have = h.running.state.store.list_tokens().unwrap().len();
+    for i in have..hashi::api::MAX_TOKENS {
+        h.running
+            .state
+            .store
+            .create_token(&hashi::store::NewToken {
+                name: format!("filler-{i}"),
+                role: hashi::token::Role::User,
+                session_mode: hashi::token::SessionMode::Stateless,
+                agents: vec![AgentKind::Claude],
+                expires_in_days: None,
+                note: None,
+                limits: hashi::token::Limits::default(),
+            })
+            .unwrap();
+    }
+    let (status, v) = claim(&h, "redeem", &code).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{v}");
+    assert_eq!(
+        h.running.state.store.list_tokens().unwrap().len(),
+        hashi::api::MAX_TOKENS
+    );
+    h.running.shutdown().await;
+}

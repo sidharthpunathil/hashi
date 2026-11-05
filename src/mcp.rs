@@ -285,7 +285,7 @@ async fn get_result(
         .store
         .get_request(&a.id)?
         .ok_or(ApiError::NotFound("request not found"))?;
-    if req.token_id != token.id && !token.is_admin() {
+    if req.token_id != token.id && !api::reads_any_request(token) {
         // Same answer as a missing id, as for `GET /v1/ask/{id}`.
         return Err(ApiError::NotFound("request not found"));
     }

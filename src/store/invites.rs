@@ -93,6 +93,9 @@ pub enum Redeemed {
     Expired,
     /// No such code.
     NotFound,
+    /// The server already holds [`super::MAX_TOKENS`] tokens. The code is
+    /// left unused.
+    TokenLimit,
 }
 
 const INVITE_COLUMNS: &str = "id, label, session_mode, agents, token_expires_in_days, \
@@ -223,6 +226,10 @@ impl Store {
             InviteState::Expired => return Ok(Redeemed::Expired),
             InviteState::NotFound => return Ok(Redeemed::NotFound),
         };
+        let tokens: i64 = tx.query_row("SELECT COUNT(*) FROM tokens", [], |r| r.get(0))?;
+        if usize::try_from(tokens).unwrap_or(usize::MAX) >= super::MAX_TOKENS {
+            return Ok(Redeemed::TokenLimit);
+        }
         let (token, secret) = insert_token(
             &tx,
             &NewToken {
@@ -303,6 +310,32 @@ mod tests {
             },
             link_hours,
         }
+    }
+
+    #[test]
+    fn redeem_refuses_once_the_token_cap_is_reached() {
+        let s = Store::open_in_memory().unwrap();
+        let (_, code) = s.create_invite(&new_invite(24)).unwrap();
+        for i in 0..super::super::MAX_TOKENS {
+            s.create_token(&NewToken {
+                name: format!("t{i}"),
+                role: Role::User,
+                session_mode: SessionMode::Stateless,
+                agents: vec![AgentKind::Claude],
+                expires_in_days: None,
+                note: None,
+                limits: Limits::default(),
+            })
+            .unwrap();
+        }
+        assert!(matches!(
+            s.redeem_invite(&code).unwrap(),
+            Redeemed::TokenLimit
+        ));
+        assert!(matches!(
+            s.preview_invite(&code).unwrap(),
+            InviteState::Pending(_)
+        ));
     }
 
     #[test]

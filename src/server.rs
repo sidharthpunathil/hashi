@@ -128,6 +128,16 @@ pub fn open_store(home: &Path) -> Result<Store> {
 /// Fails if `token_id` is not a plain id, if the workspace root is not a real
 /// directory, or if deleting fails.
 pub fn remove_workspace(home: &Path, token_id: &str) -> std::io::Result<bool> {
+    remove_token_workspace(&home.join("workspaces"), token_id)
+}
+
+/// Like [`remove_workspace`], given the workspace root itself
+/// (`<home>/workspaces`) instead of the data directory.
+///
+/// # Errors
+///
+/// As for [`remove_workspace`].
+pub fn remove_token_workspace(root: &Path, token_id: &str) -> std::io::Result<bool> {
     use std::io::{Error, ErrorKind};
     if token_id.is_empty()
         || !token_id
@@ -136,8 +146,7 @@ pub fn remove_workspace(home: &Path, token_id: &str) -> std::io::Result<bool> {
     {
         return Err(Error::new(ErrorKind::InvalidInput, "not a token id"));
     }
-    let root = home.join("workspaces");
-    match std::fs::symlink_metadata(&root) {
+    match std::fs::symlink_metadata(root) {
         Ok(m) if m.is_dir() => {}
         Ok(_) => return Err(Error::other("the workspace root is not a directory")),
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
