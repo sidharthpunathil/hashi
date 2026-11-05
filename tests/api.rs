@@ -2124,3 +2124,43 @@ async fn accounts_endpoint_lists_state_and_never_keys() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     h.running.shutdown().await;
 }
+
+/// `curl -d` sends `application/x-www-form-urlencoded`. An authenticated JSON
+/// body sent that way, or with no content type, works like real JSON, as the
+/// README's curl examples do.
+#[tokio::test]
+async fn curl_style_bodies_are_read_as_json_when_authenticated() {
+    let h = harness().await;
+    for content_type in [Some("application/x-www-form-urlencoded"), None] {
+        let mut req = h
+            .http
+            .post(format!("{}/v1/tokens", h.base))
+            .bearer_auth(&h.admin)
+            .body(r#"{"name":"curl-app"}"#);
+        if let Some(ct) = content_type {
+            req = req.header("content-type", ct);
+        }
+        let res = req.send().await.unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED, "{content_type:?}");
+    }
+    h.running.shutdown().await;
+}
+
+/// Without a token, a form-encoded body is not read as JSON, so a plain
+/// cross-site HTML form cannot post to the unauthenticated claim endpoints.
+#[tokio::test]
+async fn unauthenticated_form_posts_are_not_read_as_json() {
+    let h = harness().await;
+    let res = h
+        .http
+        .post(format!("{}/v1/claim/preview", h.base))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(r#"{"code":"hashi_inv_00"}"#)
+        .send()
+        .await
+        .unwrap();
+    let status = res.status();
+    let text = res.text().await.unwrap();
+    assert!(text.contains("Content-Type"), "{status} {text}");
+    h.running.shutdown().await;
+}

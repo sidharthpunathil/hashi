@@ -308,6 +308,7 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
             post(crate::mcp::handle).get(crate::mcp::get_not_allowed),
         )
         .fallback(|| async { ApiError::NotFound("no such route") })
+        .layer(axum::middleware::map_request(json_by_default))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
     if let Some(cors) = cors(&net.cors_origins) {
         app = app.layer(cors);
@@ -315,6 +316,31 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
     app.layer(axum::middleware::from_fn_with_state(hosts, host_check))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
+}
+
+/// Treats an authenticated request body as JSON when it says nothing else.
+///
+/// `curl -d` sends `application/x-www-form-urlencoded`, and some clients send
+/// no content type at all; every body this API takes is JSON, so those are
+/// read as JSON. Only requests with an `Authorization` header qualify: a web
+/// page on another site cannot add one without a CORS preflight, so a plain
+/// cross-site HTML form still cannot post JSON to the unauthenticated claim
+/// and ask-access endpoints.
+async fn json_by_default(mut req: axum::extract::Request) -> axum::extract::Request {
+    let h = req.headers();
+    let loose = match h.get(header::CONTENT_TYPE) {
+        None => true,
+        Some(v) => v
+            .to_str()
+            .is_ok_and(|v| v.trim().starts_with("application/x-www-form-urlencoded")),
+    };
+    if loose && h.contains_key(header::AUTHORIZATION) {
+        req.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    req
 }
 
 /// The rate-limit key of the client behind a request (see
