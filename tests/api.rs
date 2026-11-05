@@ -104,6 +104,7 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         tls: None,
         tunnel_token: None,
         update_check: false,
+        account_cooldown: std::time::Duration::from_secs(3600),
     };
     tweak(&mut cfg);
 
@@ -1687,6 +1688,7 @@ async fn invites_cannot_exceed_the_token_cap() {
                 expires_in_days: None,
                 note: None,
                 limits: hashi::token::Limits::default(),
+                accounts: Default::default(),
             })
             .unwrap();
     }
@@ -1696,5 +1698,406 @@ async fn invites_cannot_exceed_the_token_cap() {
         h.running.state.store.list_tokens().unwrap().len(),
         hashi::api::MAX_TOKENS
     );
+    h.running.shutdown().await;
+}
+
+// ── several accounts per agent ─────────────────────────────────────────────
+
+/// A fake Claude Code that knows which account it runs on: the name file in
+/// `CLAUDE_CONFIG_DIR`, or `default`. A `limited` file there makes it print
+/// a session limit message (its contents, when there are any).
+const FAKE_ACCOUNT_CLAUDE: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "9.9.9 (Fake Claude)"; exit 0; fi
+for last; do :; done
+acct=default
+if [ -n "$CLAUDE_CONFIG_DIR" ] && [ -f "$CLAUDE_CONFIG_DIR/name" ]; then acct=$(cat "$CLAUDE_CONFIG_DIR/name"); fi
+if [ "$acct" != default ] && [ -f "$CLAUDE_CONFIG_DIR/limited" ]; then
+  msg=$(cat "$CLAUDE_CONFIG_DIR/limited")
+  [ -n "$msg" ] || msg="Claude AI usage limit reached: you have hit your session limit"
+  printf '{"type":"result","is_error":true,"subtype":"error_during_execution","result":"%s"}\n' "$msg"
+  exit 1
+fi
+resumed=no
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--resume" ]; then resumed="$a"; fi
+  prev="$a"
+done
+printf '{"type":"result","is_error":false,"result":"%s on %s (resume=%s)","session_id":"sess-%s","usage":{"input_tokens":1,"output_tokens":1}}\n' "$last" "$acct" "$resumed" "$acct"
+"#;
+
+async fn accounts_harness() -> Harness {
+    harness_with(|cfg| {
+        let bin = cfg.home.parent().unwrap().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        if let Some(claude) = cfg.agents.get_mut(&AgentKind::Claude) {
+            claude.bin = write_script(&bin, "claude-accounts", FAKE_ACCOUNT_CLAUDE);
+        }
+    })
+    .await
+}
+
+impl Harness {
+    fn home(&self) -> PathBuf {
+        self._dir.path().join("home")
+    }
+
+    /// Adds a Claude login account the fake agent can recognise.
+    fn add_login(&self, name: &str) -> PathBuf {
+        let dir = hashi::accounts::create_dir(&self.home(), AgentKind::Claude, name).unwrap();
+        std::fs::write(dir.join("name"), name).unwrap();
+        self.running
+            .state
+            .store
+            .add_account(AgentKind::Claude, name, hashi::accounts::AccountKind::Login)
+            .unwrap();
+        dir
+    }
+
+    async fn ask(&self, token: &str, message: &str) -> Value {
+        let (status, v) = self
+            .post("/v1/ask", token, json!({"message": message, "wait": 10}))
+            .await;
+        assert!(status.is_success(), "{v}");
+        v
+    }
+
+    async fn account(&self, name: &str) -> Value {
+        let (status, v) = self.get("/v1/accounts", Some(&self.admin)).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        v["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+}
+
+#[tokio::test]
+async fn a_limited_account_fails_over_to_the_next_and_only_admins_see_which() {
+    let h = accounts_harness().await;
+    let work = h.add_login("work");
+    h.add_login("personal");
+    std::fs::write(work.join("limited"), "").unwrap();
+    let token = h
+        .user_token(json!({"accounts": {"claude": ["work", "personal"]}}))
+        .await;
+
+    let v = h.ask(&token, "hi").await;
+    assert_eq!(v["status"], "completed", "{v}");
+    assert_eq!(v["response"], "hi on personal (resume=no)");
+    assert!(
+        v.get("account").is_none(),
+        "holders never see accounts: {v}"
+    );
+    let id = v["id"].as_str().unwrap().to_owned();
+    let (_, own) = h.get(&format!("/v1/ask/{id}"), Some(&token)).await;
+    assert!(own.get("account").is_none(), "{own}");
+    let (_, admin) = h.get(&format!("/v1/ask/{id}"), Some(&h.admin)).await;
+    assert_eq!(admin["account"], "personal");
+
+    // Not an interruption: the request remembers the account it left.
+    let r = h.running.state.store.get_request(&id).unwrap().unwrap();
+    assert_eq!(r.accounts_tried, ["work"]);
+    assert_eq!(r.account.as_deref(), Some("personal"));
+
+    // Marked limited for the default cooldown, since the message names no time.
+    let w = h.account("work").await;
+    assert_eq!(w["state"], "limited", "{w}");
+    let until = time::OffsetDateTime::parse(
+        w["limitedUntil"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let left = (until - time::OffsetDateTime::now_utc()).whole_seconds();
+    assert!((3_500..=3_600).contains(&left), "{left}");
+    assert_eq!(h.account("personal").await["runsToday"], 1);
+
+    // The next prompt skips the limited account without running it.
+    let v = h.ask(&token, "again").await;
+    assert_eq!(v["response"], "again on personal (resume=no)");
+    let id = v["id"].as_str().unwrap();
+    let r = h.running.state.store.get_request(id).unwrap().unwrap();
+    assert!(r.accounts_tried.is_empty());
+
+    // A token without a list keeps using the default account.
+    let plain = h.user_token(json!({"name": "plain"})).await;
+    assert_eq!(
+        h.ask(&plain, "x").await["response"],
+        "x on default (resume=no)"
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn every_account_at_its_limit_fails_with_the_earliest_reset() {
+    let h = accounts_harness().await;
+    let work = h.add_login("work");
+    let personal = h.add_login("personal");
+    std::fs::write(work.join("limited"), "").unwrap();
+    std::fs::write(
+        personal.join("limited"),
+        "you have hit your session limit, try again in 2 hours",
+    )
+    .unwrap();
+    let token = h
+        .user_token(json!({"accounts": {"claude": ["work", "personal"]}}))
+        .await;
+    let v = h.ask(&token, "hi").await;
+    assert_eq!(v["status"], "failed", "{v}");
+    let err = v["error"].as_str().unwrap();
+    let prefix = "every account for Claude Code this token can use is at its limit until ";
+    assert!(err.starts_with(prefix), "{err}");
+    let until = time::OffsetDateTime::parse(
+        &err[prefix.len()..],
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    // The earliest of the two: work's hour of cooldown, not personal's two hours.
+    let left = (until - time::OffsetDateTime::now_utc()).whole_seconds();
+    assert!((3_500..=3_600).contains(&left), "{left}");
+    let p = h.account("personal").await;
+    let until = time::OffsetDateTime::parse(
+        p["limitedUntil"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let left = (until - time::OffsetDateTime::now_utc()).whole_seconds();
+    assert!(
+        (7_100..=7_200).contains(&left),
+        "the message's own reset: {left}"
+    );
+    assert!(!err.contains("work") && !err.contains("personal"));
+
+    // While both stay limited, a new prompt fails without running at all.
+    let v = h.ask(&token, "later").await;
+    assert_eq!(v["status"], "failed", "{v}");
+    assert!(v["error"].as_str().unwrap().starts_with(prefix));
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_success_clears_the_limit_and_disabled_accounts_are_skipped() {
+    let h = accounts_harness().await;
+    h.add_login("work");
+    h.add_login("personal");
+    let store = &h.running.state.store;
+    // An expired mark: the account is usable, and a success clears it.
+    store
+        .mark_account_limited(AgentKind::Claude, "work", hashi::util::now_ms() - 1_000)
+        .unwrap();
+    let token = h
+        .user_token(json!({"accounts": {"claude": ["work", "personal"]}}))
+        .await;
+    assert_eq!(
+        h.ask(&token, "a").await["response"],
+        "a on work (resume=no)"
+    );
+    let w = store
+        .get_account(AgentKind::Claude, "work")
+        .unwrap()
+        .unwrap();
+    assert_eq!(w.limited_until, None);
+    assert!(w.last_used.is_some());
+
+    store
+        .set_account_disabled(AgentKind::Claude, "work", true)
+        .unwrap();
+    assert_eq!(
+        h.ask(&token, "b").await["response"],
+        "b on personal (resume=no)"
+    );
+    assert_eq!(h.account("work").await["state"], "disabled");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn stateful_sessions_are_kept_per_account() {
+    let h = accounts_harness().await;
+    let work = h.add_login("work");
+    h.add_login("personal");
+    let token = h
+        .user_token(json!({
+            "sessionMode": "stateful",
+            "accounts": {"claude": ["work", "personal"]},
+        }))
+        .await;
+    assert_eq!(
+        h.ask(&token, "1").await["response"],
+        "1 on work (resume=no)"
+    );
+    assert_eq!(
+        h.ask(&token, "2").await["response"],
+        "2 on work (resume=sess-work)"
+    );
+    // Failing over starts the conversation fresh on the next account.
+    std::fs::write(work.join("limited"), "").unwrap();
+    assert_eq!(
+        h.ask(&token, "3").await["response"],
+        "3 on personal (resume=no)"
+    );
+    assert_eq!(
+        h.ask(&token, "4").await["response"],
+        "4 on personal (resume=sess-personal)"
+    );
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn account_bindings_are_checked_and_hidden_from_holders() {
+    let h = accounts_harness().await;
+    h.add_login("work");
+
+    let (status, v) = h
+        .post(
+            "/v1/tokens",
+            &h.admin,
+            json!({"name": "x", "accounts": {"claude": ["ghost"]}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("claude:ghost")
+    );
+    let (status, _) = h
+        .post(
+            "/v1/tokens",
+            &h.admin,
+            json!({"name": "x", "accounts": {"copilot": ["work"]}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, v) = h
+        .post(
+            "/v1/tokens",
+            &h.admin,
+            json!({"name": "bot", "accounts": {"claude": ["work", "default"]}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        v["record"]["accounts"],
+        json!({"claude": ["work", "default"]})
+    );
+    let token = v["token"].as_str().unwrap().to_owned();
+    let id = h.token_id("bot").await;
+    let (_, list) = h.get("/v1/tokens", Some(&h.admin)).await;
+    let bot = list["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "bot")
+        .unwrap()
+        .clone();
+    assert_eq!(bot["accounts"]["claude"][0], "work");
+
+    // The holder's own views say nothing about accounts.
+    let (status, me) = h.get("/v1/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        me.get("accounts").is_none() && !me.to_string().contains("work"),
+        "{me}"
+    );
+    for method in ["tools/list", "tools/call"] {
+        let params = if method == "tools/call" {
+            json!({"name": "my_usage", "arguments": {}})
+        } else {
+            json!({})
+        };
+        let (status, v) = h
+            .post(
+                "/mcp",
+                &token,
+                json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert!(
+            !v.to_string().contains("\"work\"") && !v.to_string().contains("accounts"),
+            "{v}"
+        );
+    }
+    let (status, _) = h.get("/v1/accounts", Some(&token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // PATCH replaces the map, checking names; {} goes back to default.
+    let (status, _) = h
+        .patch(
+            &format!("/v1/tokens/{id}"),
+            json!({"accounts": {"claude": ["nope"]}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, v) = h
+        .patch(&format!("/v1/tokens/{id}"), json!({"accounts": {}}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["record"]["accounts"], json!({}));
+
+    // Invites carry the map to the token they create, unseen by the guest.
+    let (status, v) = h
+        .post(
+            "/v1/invites",
+            &h.admin,
+            json!({"label": "carol", "accounts": {"claude": ["ghost"]}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let (code, v) = new_invite(
+        &h,
+        json!({"label": "carol", "accounts": {"claude": ["work"]}}),
+    )
+    .await;
+    assert_eq!(v["invite"]["accounts"], json!({"claude": ["work"]}));
+    let (status, preview) = claim(&h, "preview", &code).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        preview.get("accounts").is_none() && !preview.to_string().contains("work"),
+        "{preview}"
+    );
+    let (status, redeemed) = claim(&h, "redeem", &code).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(!redeemed.to_string().contains("\"work\""), "{redeemed}");
+    let carol = h.token_id("carol").await;
+    let t = h.running.state.store.get_token(&carol).unwrap().unwrap();
+    assert_eq!(t.accounts[&AgentKind::Claude], ["work"]);
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn accounts_endpoint_lists_state_and_never_keys() {
+    let h = accounts_harness().await;
+    h.add_login("work");
+    hashi::accounts::write_key(&h.home(), AgentKind::Codex, "ci", "sk-secret-key-123").unwrap();
+    h.running
+        .state
+        .store
+        .add_account(AgentKind::Codex, "ci", hashi::accounts::AccountKind::ApiKey)
+        .unwrap();
+    h.user_token(json!({"accounts": {"claude": ["work"], "codex": ["ci"]}}))
+        .await;
+    let (status, v) = h.get("/v1/accounts", Some(&h.admin)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(!v.to_string().contains("sk-secret-key-123"));
+    assert_eq!(v["perAgent"]["claude"], 1);
+    assert_eq!(v["perAgent"]["codex"], 1);
+    assert_eq!(v["perAgent"]["gemini"], 0);
+    let ci = h.account("ci").await;
+    assert_eq!(
+        (
+            ci["kind"].as_str(),
+            ci["state"].as_str(),
+            ci["tokens"].as_u64()
+        ),
+        (Some("api-key"), Some("ready"), Some(1))
+    );
+    let (status, _) = h.get("/v1/accounts", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     h.running.shutdown().await;
 }

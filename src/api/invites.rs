@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Admin, ApiError, ApiResult, AppState, ClientKey, claim_outcome};
+use crate::accounts::AccountMap;
 use crate::agent::AgentKind;
 use crate::store::{Invite, InviteState, NewInvite, Redeemed};
 use crate::token::{Limits, SessionMode};
@@ -39,6 +40,9 @@ pub struct CreateInviteBody {
     /// Link validity in hours: 1, 24 (default) or 168.
     #[serde(default)]
     pub link_hours: Option<u32>,
+    /// Accounts per agent the token may use, as on `POST /v1/tokens`.
+    #[serde(default)]
+    pub accounts: Option<AccountMap>,
 }
 
 /// Body of the claim endpoints.
@@ -60,6 +64,7 @@ fn invite_json(i: &Invite, now: i64) -> Value {
         "expiresAt": rfc3339(i.expires_at),
         "createdAt": rfc3339(i.created_at),
         "claimedAt": i.claimed_at.and_then(rfc3339),
+        "accounts": i.accounts,
     })
 }
 
@@ -77,6 +82,7 @@ pub fn validate_new_invite(body: CreateInviteBody) -> ApiResult<NewInvite> {
         expires_in_days: body.expires_in_days,
         note: None,
         limits: body.limits,
+        accounts: body.accounts,
     })?;
     let link_hours = body.link_hours.unwrap_or(24);
     if !LINK_HOURS.contains(&link_hours) {
@@ -93,6 +99,7 @@ pub fn validate_new_invite(body: CreateInviteBody) -> ApiResult<NewInvite> {
         token_expires_in_days: probe.expires_in_days,
         limits,
         link_hours,
+        accounts: probe.accounts,
     })
 }
 
@@ -194,7 +201,8 @@ pub(super) async fn create(
     body: Result<Json<CreateInviteBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
-    let new = validate_new_invite(body)?;
+    let mut new = validate_new_invite(body)?;
+    new.accounts = super::check_accounts(&state.store, new.accounts)?;
     let now = now_ms();
     let pending = state
         .store
@@ -387,6 +395,7 @@ mod tests {
             expires_in_days: None,
             limits: None,
             link_hours: None,
+            accounts: None,
         }
     }
 

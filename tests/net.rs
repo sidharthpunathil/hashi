@@ -58,6 +58,7 @@ async fn start_full(rate_limit: u32, net: NetLimits, public_url: Option<String>)
         tls: None,
         tunnel_token: None,
         update_check: false,
+        account_cooldown: std::time::Duration::from_secs(3600),
     };
     let running = server::start_with(cfg, net, Bus::default()).await.unwrap();
     let base = running.state.runtime.local_url.clone();

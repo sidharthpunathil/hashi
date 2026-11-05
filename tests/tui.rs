@@ -32,6 +32,7 @@ fn state() -> AppState {
             expires_in_days: None,
             note: None,
             limits: Default::default(),
+            accounts: Default::default(),
         })
         .unwrap();
     for (i, (agent, msg)) in [
@@ -369,6 +370,7 @@ fn add_user(app: &mut App, name: &str) {
             expires_in_days: None,
             note: None,
             limits: Default::default(),
+            accounts: Default::default(),
         })
         .unwrap();
     app.refresh();
@@ -545,6 +547,7 @@ fn tokens_table_shows_status_and_usage() {
                 daily_requests: Some(100),
                 ..Default::default()
             },
+            accounts: Default::default(),
         })
         .unwrap();
     for i in 0..2 {

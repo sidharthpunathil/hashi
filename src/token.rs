@@ -187,6 +187,8 @@ pub struct Token {
     pub note: Option<String>,
     /// Usage caps.
     pub limits: Limits,
+    /// Accounts per agent, in order of preference. Only admins see these.
+    pub accounts: crate::accounts::AccountMap,
 }
 
 impl Token {

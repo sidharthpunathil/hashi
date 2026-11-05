@@ -14,6 +14,15 @@
 //! (killing their process groups) before its workspace is deleted. A revoke
 //! from another process, such as `hashi token revoke`, deletes the request
 //! row; workers notice that within [`ROW_CHECK_EVERY`] and stop the run too.
+//!
+//! A token can list several accounts per agent (see [`crate::accounts`]).
+//! A run uses the first one that is enabled and not at its limit. When the
+//! run fails with that agent's limit message, the account is marked limited
+//! (until the reset time in the message, or for the cooldown) and the
+//! request goes back to the queue, keeping its place, to run on the next
+//! account. That is not counted as an interruption, and each account is
+//! tried at most once per request. A token with no list for the agent runs
+//! on the default account exactly as before, with no limit tracking.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -26,11 +35,12 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
+use crate::accounts::{self as acct, AccountKind};
+use crate::agent::{self, AgentConfig, AgentKind, EnvOverride, Invocation, Limits};
 use crate::events::{Bus, Event};
 use crate::guard::ResourceGuard;
-use crate::store::{EXPIRED_BEFORE_START, Request, Store};
-use crate::token::TokenStatus;
+use crate::store::{AccountStatus, EXPIRED_BEFORE_START, Request, Store};
+use crate::token::{Token, TokenStatus};
 use crate::util::{now_ms, truncate};
 
 /// Characters of an agent's error written to the log. The database row keeps
@@ -57,7 +67,15 @@ pub struct QueueConfig {
     pub limits: Limits,
     /// Root directory under which each token gets its own workspace.
     pub workspace: PathBuf,
+    /// The Hashi home, which holds `accounts/`.
+    pub home: PathBuf,
+    /// How long an account that hit its limit is skipped when the message
+    /// does not say when the limit resets.
+    pub account_cooldown: Duration,
 }
+
+/// Default for [`QueueConfig::account_cooldown`].
+pub const DEFAULT_ACCOUNT_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
 /// One claimed run, as seen by [`Dispatcher::cancel_token_runs`].
 #[derive(Debug)]
@@ -242,6 +260,9 @@ enum Halt {
     Failed(String),
     /// Put back in the queue (its token is paused).
     Requeued,
+    /// Put back in the queue to run on the next account, after this one hit
+    /// its limit.
+    Failover(String),
     /// Its token is gone.
     Revoked,
 }
@@ -396,6 +417,16 @@ impl Worker {
                 info!(id = %req.id, agent = %self.agent, "token paused, request left in the queue");
                 return;
             }
+            Err(Halt::Failover(account)) => {
+                info!(id = %req.id, agent = %self.agent, account = %account,
+                      "account at its limit, the request goes to the next account");
+                self.bus.log(format!(
+                    "{} account {account} is at its limit; trying the next one",
+                    self.agent.display_name()
+                ));
+                self.dispatcher.wake(self.agent);
+                return;
+            }
             Err(Halt::Revoked) => (false, Some(REVOKED_ERROR.to_owned())),
             Err(Halt::Failed(err)) => {
                 let msg = client_error(&err);
@@ -426,19 +457,76 @@ impl Worker {
     /// Re-reads the request's token right before the run. A paused token
     /// puts the request back, an expired one fails it, and a missing one
     /// (revoked) drops it.
-    fn token_gate(&self, req: &Request) -> Result<(), Halt> {
+    fn token_gate(&self, req: &Request) -> Result<Token, Halt> {
         let token = self
             .store
             .get_token(&req.token_id)
-            .map_err(|e| e.to_string())?;
-        match token.map(|t| t.status(now_ms())) {
-            None => Err(Halt::Revoked),
-            Some(TokenStatus::Active) => Ok(()),
-            Some(TokenStatus::Paused) => {
+            .map_err(|e| e.to_string())?
+            .ok_or(Halt::Revoked)?;
+        match token.status(now_ms()) {
+            TokenStatus::Active => Ok(token),
+            TokenStatus::Paused => {
                 self.store.requeue(&req.id).map_err(|e| e.to_string())?;
                 Err(Halt::Requeued)
             }
-            Some(TokenStatus::Expired) => Err(EXPIRED_BEFORE_START.into()),
+            TokenStatus::Expired => Err(EXPIRED_BEFORE_START.into()),
+        }
+    }
+
+    /// The account the token's next run on this agent should use: the first
+    /// in its list that is not in `tried`, still exists, is enabled and is
+    /// not at its limit. A token without a list uses the default account.
+    fn pick_account(&self, token: &Token, tried: &[String]) -> Result<Option<Picked>, Halt> {
+        let Some(list) = token.accounts.get(&self.agent).filter(|l| !l.is_empty()) else {
+            return Ok(Some(Picked {
+                name: acct::DEFAULT.to_owned(),
+                kind: AccountKind::Default,
+                listed: false,
+            }));
+        };
+        let now = now_ms();
+        for name in list.iter().filter(|n| !tried.contains(n)) {
+            let state = self
+                .store
+                .get_account(self.agent, name)
+                .map_err(|e| e.to_string())?;
+            let kind = match &state {
+                _ if name == acct::DEFAULT => AccountKind::Default,
+                // Removed since the token was saved.
+                None => continue,
+                Some(s) if s.kind == AccountKind::Default => continue,
+                Some(s) => s.kind,
+            };
+            if state.is_none_or(|s| s.status(now) == AccountStatus::Ready) {
+                return Ok(Some(Picked {
+                    name: name.clone(),
+                    kind,
+                    listed: true,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Why no account of the token's list can run this agent now.
+    fn none_left(&self, token: &Token) -> String {
+        let now = now_ms();
+        let until = acct::for_agent(&token.accounts, self.agent)
+            .iter()
+            .filter_map(|n| self.store.get_account(self.agent, n).ok().flatten())
+            .filter_map(|s| match s.status(now) {
+                AccountStatus::Limited(until) => Some(until),
+                _ => None,
+            })
+            .min();
+        let agent = self.agent.display_name();
+        match until.and_then(crate::util::rfc3339) {
+            Some(t) => {
+                format!("every account for {agent} this token can use is at its limit until {t}")
+            }
+            None => {
+                format!("every account for {agent} this token can use is at its limit or disabled")
+            }
         }
     }
 
@@ -449,7 +537,7 @@ impl Worker {
             .get(&self.agent)
             .ok_or("agent is not configured")?;
 
-        self.token_gate(req)?;
+        let token = self.token_gate(req)?;
 
         // Each token gets a private working directory per agent. Agents key
         // their session history by cwd, so this keeps resumes consistent. It
@@ -482,9 +570,30 @@ impl Worker {
             return Err(Halt::Revoked);
         }
 
+        let Some(account) = self.pick_account(&token, &req.accounts_tried)? else {
+            return Err(Halt::Failed(self.none_left(&token)));
+        };
+        // The owner's credential variables are removed and the account's
+        // own set, for every account but the default.
+        let env = acct::run_env(&self.cfg.home, self.agent, &account.name, account.kind).map_err(
+            |e| {
+                warn!(agent = %self.agent, account = %account.name, error = %e,
+                      "could not load an account");
+                format!(
+                    "an account for {} could not be loaded; the owner should check                      `hashi account list`",
+                    self.agent.display_name()
+                )
+            },
+        )?;
+        self.store
+            .set_request_account(&req.id, &account.name)
+            .map_err(|e| e.to_string())?;
+
+        // Conversations live in the account's own directory, so each
+        // account keeps its own session.
         let resume = if req.stateful {
             self.store
-                .session(&req.token_id, self.agent)
+                .account_session(&req.token_id, self.agent, &account.name)
                 .map_err(|e| e.to_string())?
         } else {
             None
@@ -499,18 +608,94 @@ impl Worker {
         let mut limits = self.cfg.limits.clone();
         limits.nice = self.guard.config().nice;
         limits.memory = Some(self.guard.watch());
-        let out = agent::execute(self.agent, cfg, inv, &workdir, limits)
-            .await
-            .map_err(|e| e.to_string())?;
+        let result = agent::execute_as(self.agent, cfg, inv, &workdir, limits, env.as_ref()).await;
+        let out = match result {
+            Ok(out) => out,
+            Err(e) => return Err(self.failed(req, &token, &account, env.as_ref(), &e.to_string())),
+        };
+        if account.listed
+            && let Err(e) = self
+                .store
+                .mark_account_used(self.agent, &account.name, true)
+        {
+            warn!(error = %e, "failed to record the account's use");
+        }
 
         if req.stateful
             && let Some(session) = out.session_id.as_deref().filter(|s| agent::is_safe_arg(s))
-            && let Err(e) = self.store.set_session(&req.token_id, self.agent, session)
+            && let Err(e) =
+                self.store
+                    .set_account_session(&req.token_id, self.agent, &account.name, session)
         {
             warn!(error = %e, "failed to persist session");
         }
         Ok(out)
     }
+
+    /// Handles a failed run on `account`. A limit message on an account the
+    /// token lists marks it limited and fails the request over to the next
+    /// account, or fails it when none is left; anything else fails it with
+    /// the agent's error. The account's directory and key never reach the
+    /// error text.
+    fn failed(
+        &self,
+        req: &Request,
+        token: &Token,
+        account: &Picked,
+        env: Option<&EnvOverride>,
+        error: &str,
+    ) -> Halt {
+        let mut error = error.to_owned();
+        for (_, value) in env.map(|e| e.set.as_slice()).unwrap_or_default() {
+            error = error.replace(value.as_str(), "<account>");
+        }
+        if !account.listed {
+            return Halt::Failed(error);
+        }
+        let Some(reset) = agent::limit_hit(self.agent, &error) else {
+            if let Err(e) = self
+                .store
+                .mark_account_used(self.agent, &account.name, false)
+            {
+                warn!(error = %e, "failed to record the account's use");
+            }
+            return Halt::Failed(error);
+        };
+        let now = now_ms();
+        let cooldown = i64::try_from(self.cfg.account_cooldown.as_millis()).unwrap_or(i64::MAX);
+        let until = reset
+            .map(|t| i64::try_from(t.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX))
+            .filter(|t| *t > now)
+            .unwrap_or_else(|| now.saturating_add(cooldown));
+        if let Err(e) = self
+            .store
+            .mark_account_limited(self.agent, &account.name, until)
+        {
+            warn!(error = %e, "failed to mark the account limited");
+        }
+        info!(agent = %self.agent, account = %account.name,
+              until = %crate::util::rfc3339(until).unwrap_or_default(), "account at its limit");
+        let mut tried = req.accounts_tried.clone();
+        tried.push(account.name.clone());
+        match self.pick_account(token, &tried) {
+            Ok(Some(_)) => match self.store.requeue_after_limit(&req.id, &account.name) {
+                Ok(()) => Halt::Failover(account.name.clone()),
+                Err(e) => Halt::Failed(e.to_string()),
+            },
+            Ok(None) => Halt::Failed(self.none_left(token)),
+            Err(halt) => halt,
+        }
+    }
+}
+
+/// The account a run uses.
+#[derive(Debug, Clone)]
+struct Picked {
+    name: String,
+    kind: AccountKind,
+    /// Whether it came from the token's list. Only listed accounts have
+    /// their limits tracked; a token without a list runs as before.
+    listed: bool,
 }
 
 /// A failed run's error as stored and returned to the token holder: secrets

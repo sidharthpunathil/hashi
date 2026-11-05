@@ -13,12 +13,15 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 
+mod accounts;
 mod audit;
 mod invites;
 
+pub use accounts::{AccountState, AccountStatus};
 pub use audit::AuditEntry;
 pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
 
+use crate::accounts::{self as acct, AccountMap};
 use crate::agent::{AgentKind, Usage};
 use crate::token::{self, GeneratedToken, Limits, Role, SessionMode, Token};
 use crate::util::{month_start_utc, now_ms};
@@ -117,6 +120,12 @@ pub struct Request {
     pub started_at: Option<i64>,
     /// Finish time, Unix ms.
     pub completed_at: Option<i64>,
+    /// The account that ran it (`default` for the owner's own login), once
+    /// a worker has picked one. Shown to admins only.
+    pub account: Option<String>,
+    /// Accounts this request already ran into a limit on, so a failover
+    /// never tries one twice.
+    pub accounts_tried: Vec<String>,
 }
 
 impl Request {
@@ -144,6 +153,9 @@ pub struct NewToken {
     pub note: Option<String>,
     /// Usage caps.
     pub limits: Limits,
+    /// Accounts per agent, in order of preference. An agent without an
+    /// entry uses its default account.
+    pub accounts: AccountMap,
 }
 
 /// Upper bound on stored tokens, enforced by the API and by invite redemption.
@@ -393,7 +405,41 @@ CREATE INDEX IF NOT EXISTS idx_requests_usage ON requests(token_id, created_at, 
 CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status, agent);
 ";
 
-const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+/// Version 4: several accounts per agent. Account state, the accounts each
+/// token and invite may use, the account that ran each request (and those
+/// it already hit a limit on), and sessions kept per account. The sessions
+/// table is rebuilt because its primary key gains the account.
+const SCHEMA_V4: &str = r"
+CREATE TABLE IF NOT EXISTS accounts (
+    agent         TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    disabled      INTEGER NOT NULL DEFAULT 0,
+    limited_until INTEGER,
+    last_used     INTEGER,
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (agent, name)
+);
+ALTER TABLE tokens ADD COLUMN accounts TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE invites ADD COLUMN accounts TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE requests ADD COLUMN account TEXT;
+ALTER TABLE requests ADD COLUMN accounts_tried TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_requests_account ON requests(agent, account, started_at);
+CREATE TABLE sessions_v4 (
+    token_id         TEXT NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+    agent            TEXT NOT NULL,
+    account          TEXT NOT NULL DEFAULT 'default',
+    agent_session_id TEXT NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    PRIMARY KEY (token_id, agent, account)
+);
+INSERT INTO sessions_v4 (token_id, agent, account, agent_session_id, updated_at)
+    SELECT token_id, agent, 'default', agent_session_id, updated_at FROM sessions;
+DROP TABLE sessions;
+ALTER TABLE sessions_v4 RENAME TO sessions;
+";
+
+const MIGRATIONS: [&str; 4] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
 
 /// Usage of token `?1` since day start `?2` and month start `?3`. Every
 /// column it touches is in `idx_requests_usage`.
@@ -408,10 +454,11 @@ const TOKEN_USAGE_SQL: &str = "SELECT
 
 const TOKEN_COLUMNS: &str = "id, name, prefix, role, session_mode, agents, expires_at, created_at, \
      last_used_at, paused, note, daily_requests, monthly_requests, daily_budget_usd, \
-     monthly_budget_usd, max_pending";
+     monthly_budget_usd, max_pending, accounts";
 
 const REQUEST_COLUMNS: &str = "id, token_id, token_name, agent, model, message, stateful, status, \
-     response, error, input_tokens, output_tokens, cost_usd, created_at, started_at, completed_at";
+     response, error, input_tokens, output_tokens, cost_usd, created_at, started_at, completed_at, \
+     account, accounts_tried";
 
 impl Store {
     /// Opens (or creates) the database at `path`.
@@ -525,7 +572,8 @@ impl Store {
             .transpose()
     }
 
-    /// Writes a token's editable fields: name, note, pause, expiry and limits.
+    /// Writes a token's editable fields: name, note, pause, expiry, limits
+    /// and accounts.
     ///
     /// # Errors
     ///
@@ -535,7 +583,7 @@ impl Store {
         self.conn()?.execute(
             "UPDATE tokens SET name = ?1, note = ?2, paused = ?3, expires_at = ?4,
                  daily_requests = ?5, monthly_requests = ?6, daily_budget_usd = ?7,
-                 monthly_budget_usd = ?8, max_pending = ?9
+                 monthly_budget_usd = ?8, max_pending = ?9, accounts = ?11
              WHERE id = ?10",
             params![
                 t.name,
@@ -548,6 +596,7 @@ impl Store {
                 l.monthly_budget_usd,
                 l.max_pending,
                 t.id,
+                acct::encode(&t.accounts),
             ],
         )?;
         Ok(())
@@ -870,7 +919,7 @@ impl Store {
         let sql = format!(
             "SELECT id, token_id, token_name, agent, model, substr(message, 1, {n}), stateful,
                  status, NULL, substr(error, 1, {n}), input_tokens, output_tokens, cost_usd,
-                 created_at, started_at, completed_at
+                 created_at, started_at, completed_at, account, accounts_tried
              FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?1",
             n = BRIEF_MESSAGE_CHARS
         );
@@ -1121,37 +1170,73 @@ impl Store {
 
     // ── sessions ───────────────────────────────────────────────────────────
 
-    /// The agent session a stateful token should resume, if any.
+    /// The agent session a stateful token should resume on its default
+    /// account, if any.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn session(&self, token_id: &str, agent: AgentKind) -> Result<Option<String>> {
+        self.account_session(token_id, agent, acct::DEFAULT)
+    }
+
+    /// The agent session a stateful token should resume on `account`. The
+    /// conversation lives in the account's own directory, so each account
+    /// has its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn account_session(
+        &self,
+        token_id: &str,
+        agent: AgentKind,
+        account: &str,
+    ) -> Result<Option<String>> {
         Ok(self
             .conn()?
             .query_row(
-                "SELECT agent_session_id FROM sessions WHERE token_id = ?1 AND agent = ?2",
-                params![token_id, agent.as_str()],
+                "SELECT agent_session_id FROM sessions
+                 WHERE token_id = ?1 AND agent = ?2 AND account = ?3",
+                params![token_id, agent.as_str(), account],
                 |r| r.get(0),
             )
             .optional()?)
     }
 
-    /// Records the agent session for a token.
+    /// Records the agent session for a token on its default account.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn set_session(&self, token_id: &str, agent: AgentKind, session: &str) -> Result<()> {
+        self.set_account_session(token_id, agent, acct::DEFAULT, session)
+    }
+
+    /// Records the agent session for a token on `account`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_account_session(
+        &self,
+        token_id: &str,
+        agent: AgentKind,
+        account: &str,
+        session: &str,
+    ) -> Result<()> {
         self.conn()?.execute(
-            "INSERT INTO sessions (token_id, agent, agent_session_id, updated_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(token_id, agent) DO UPDATE SET agent_session_id = ?3, updated_at = ?4",
-            params![token_id, agent.as_str(), session, now_ms()],
+            "INSERT INTO sessions (token_id, agent, account, agent_session_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(token_id, agent, account) DO UPDATE SET agent_session_id = ?4,
+                 updated_at = ?5",
+            params![token_id, agent.as_str(), account, session, now_ms()],
         )?;
         Ok(())
     }
 
-    /// Forgets a token's session with `agent`, so the next prompt starts fresh.
+    /// Forgets a token's sessions with `agent`, on every account, so the
+    /// next prompt starts fresh.
     ///
     /// # Errors
     ///
@@ -1241,13 +1326,14 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
         paused: false,
         note: new.note.clone(),
         limits: new.limits,
+        accounts: new.accounts.clone(),
     };
     let l = token.limits;
     conn.execute(
         "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, expires_at,
              created_at, note, daily_requests, monthly_requests, daily_budget_usd,
-             monthly_budget_usd, max_pending)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             monthly_budget_usd, max_pending, accounts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             token.id,
             token.name,
@@ -1264,6 +1350,7 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
             l.daily_budget_usd,
             l.monthly_budget_usd,
             l.max_pending,
+            acct::encode(&token.accounts),
         ],
     )?;
     Ok((token, secret))
@@ -1273,6 +1360,7 @@ fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
     let role: String = r.get(3)?;
     let mode: String = r.get(4)?;
     let agents: String = r.get(5)?;
+    let accounts: String = r.get(16)?;
     let build = || -> Result<Token> {
         Ok(Token {
             id: r.get(0)?,
@@ -1293,6 +1381,7 @@ fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
                 monthly_budget_usd: r.get(14)?,
                 max_pending: r.get(15)?,
             },
+            accounts: acct::decode(&accounts),
         })
     };
     Ok(build())
@@ -1304,6 +1393,7 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<Result<Request>> {
     let input: Option<i64> = r.get(10)?;
     let output: Option<i64> = r.get(11)?;
     let cost: Option<f64> = r.get(12)?;
+    let tried: String = r.get(17)?;
     let build = || -> Result<Request> {
         let to_u64 = |n: i64| u64::try_from(n).unwrap_or(0);
         Ok(Request {
@@ -1330,6 +1420,12 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<Result<Request>> {
             created_at: r.get(13)?,
             started_at: r.get(14)?,
             completed_at: r.get(15)?,
+            account: r.get(16)?,
+            accounts_tried: tried
+                .split(',')
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+                .collect(),
         })
     };
     Ok(build())
@@ -1352,6 +1448,7 @@ mod tests {
             expires_in_days: None,
             note: None,
             limits: Limits::default(),
+            accounts: AccountMap::new(),
         }
     }
 
@@ -1394,7 +1491,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         // Opening again is a no-op.
         drop(s);
         assert!(Store::open(&path).is_ok());
@@ -1433,7 +1530,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 2).unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 3);
+        assert_eq!(s.schema_version().unwrap(), 4);
         let conn = s.conn().unwrap();
         let mode: i64 = conn
             .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
@@ -1443,6 +1540,69 @@ mod tests {
             .query_row("SELECT COUNT(attempts) FROM requests", [], |r| r.get(0))
             .unwrap();
         assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn migrates_v3_database_to_v4_keeping_sessions_on_the_default_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.execute(
+                "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, created_at)
+                 VALUES ('t1', 'old', ?1, 'hashi_old', 'user', 'stateful', 'claude', 1)",
+                [token::hash("hashi_old_secret")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (token_id, agent, agent_session_id, updated_at)
+                 VALUES ('t1', 'claude', 'sess-1', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO requests (id, token_id, token_name, agent, message, status, created_at)
+                 VALUES ('r1', 't1', 'old', 'claude', 'hi', 'completed', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO invites (id, hash, label, session_mode, agents, expires_at, created_at)
+                 VALUES ('i1', 'h', 'bob', 'stateless', 'claude', 9999999999999, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 4);
+        let t = s.get_token("t1").unwrap().unwrap();
+        assert!(t.accounts.is_empty());
+        assert_eq!(
+            s.session("t1", AgentKind::Claude).unwrap().as_deref(),
+            Some("sess-1")
+        );
+        assert_eq!(
+            s.account_session("t1", AgentKind::Claude, "default")
+                .unwrap()
+                .as_deref(),
+            Some("sess-1")
+        );
+        let r = s.get_request("r1").unwrap().unwrap();
+        assert_eq!((r.account, r.accounts_tried.len()), (None, 0));
+        assert!(s.list_invites().unwrap()[0].accounts.is_empty());
+        assert!(s.list_accounts().unwrap().is_empty());
+        // Deleting the token still cascades to its sessions.
+        s.conn()
+            .unwrap()
+            .execute("DELETE FROM tokens WHERE id = 't1'", [])
+            .unwrap();
+        assert!(s.session("t1", AgentKind::Claude).unwrap().is_none());
     }
 
     #[test]

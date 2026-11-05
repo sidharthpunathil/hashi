@@ -5,6 +5,7 @@ use rusqlite::{OptionalExtension, Row, params};
 use serde::Serialize;
 
 use super::{NewToken, Result, Store, StoreError, insert_token};
+use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
 use crate::token::{self, GeneratedToken, Limits, Role, SessionMode, Token};
 use crate::util::now_ms;
@@ -27,6 +28,8 @@ pub struct NewInvite {
     pub limits: Limits,
     /// How long the link stays valid, in hours.
     pub link_hours: u32,
+    /// Accounts per agent the created token may use.
+    pub accounts: AccountMap,
 }
 
 /// A stored invite. Never contains the code.
@@ -53,6 +56,9 @@ pub struct Invite {
     pub claimed_at: Option<i64>,
     /// The token it created, once claimed.
     pub token_id: Option<String>,
+    /// Accounts per agent the created token may use. Admins only: the claim
+    /// page never shows them.
+    pub accounts: AccountMap,
 }
 
 impl Invite {
@@ -73,7 +79,7 @@ impl Invite {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InviteState {
     /// Valid and unclaimed.
-    Pending(Invite),
+    Pending(Box<Invite>),
     /// Already used.
     Claimed,
     /// Past its link expiry.
@@ -100,7 +106,7 @@ pub enum Redeemed {
 
 const INVITE_COLUMNS: &str = "id, label, session_mode, agents, token_expires_in_days, \
      daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd, max_pending, \
-     expires_at, created_at, claimed_at, token_id";
+     expires_at, created_at, claimed_at, token_id, accounts";
 
 impl Store {
     /// Creates an invite and returns it with its one-time code.
@@ -123,13 +129,14 @@ impl Store {
             created_at: now,
             claimed_at: None,
             token_id: None,
+            accounts: new.accounts.clone(),
         };
         let l = invite.limits;
         self.conn()?.execute(
             "INSERT INTO invites (id, hash, label, session_mode, agents, token_expires_in_days,
                  daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd,
-                 max_pending, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 max_pending, expires_at, created_at, accounts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 invite.id,
                 token::hash(&code),
@@ -144,6 +151,7 @@ impl Store {
                 l.max_pending,
                 invite.expires_at,
                 invite.created_at,
+                acct::encode(&invite.accounts),
             ],
         )?;
         Ok((invite, code))
@@ -221,7 +229,7 @@ impl Store {
             .transpose()?;
         let now = now_ms();
         let invite = match classify(found, now) {
-            InviteState::Pending(i) => i,
+            InviteState::Pending(i) => *i,
             InviteState::Claimed => return Ok(Redeemed::Claimed),
             InviteState::Expired => return Ok(Redeemed::Expired),
             InviteState::NotFound => return Ok(Redeemed::NotFound),
@@ -243,6 +251,7 @@ impl Store {
                     crate::util::rfc3339(invite.created_at).unwrap_or_default()
                 )),
                 limits: invite.limits,
+                accounts: invite.accounts.clone(),
             },
         )?;
         let changed = tx.execute(
@@ -263,13 +272,14 @@ fn classify(found: Option<Invite>, now: i64) -> InviteState {
         None => InviteState::NotFound,
         Some(i) if i.claimed_at.is_some() => InviteState::Claimed,
         Some(i) if i.expires_at <= now => InviteState::Expired,
-        Some(i) => InviteState::Pending(i),
+        Some(i) => InviteState::Pending(Box::new(i)),
     }
 }
 
 fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Result<Invite>> {
     let mode: String = r.get(2)?;
     let agents: String = r.get(3)?;
+    let accounts: String = r.get(14)?;
     let build = || -> Result<Invite> {
         Ok(Invite {
             id: r.get(0)?,
@@ -288,6 +298,7 @@ fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Result<Invite>> {
             created_at: r.get(11)?,
             claimed_at: r.get(12)?,
             token_id: r.get(13)?,
+            accounts: acct::decode(&accounts),
         })
     };
     Ok(build())
@@ -309,6 +320,7 @@ mod tests {
                 ..Limits::default()
             },
             link_hours,
+            accounts: AccountMap::new(),
         }
     }
 
@@ -325,6 +337,7 @@ mod tests {
                 expires_in_days: None,
                 note: None,
                 limits: Limits::default(),
+                accounts: AccountMap::new(),
             })
             .unwrap();
         }

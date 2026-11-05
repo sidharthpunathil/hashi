@@ -43,6 +43,9 @@ enum Command {
     /// List or cancel invite links.
     #[command(subcommand)]
     Invite(admin_cli::InviteCommand),
+    /// Add, sign in, list, disable and remove agent accounts.
+    #[command(subcommand)]
+    Account(admin_cli::AccountCommand),
     /// Show recent sharing and access changes.
     Audit {
         /// How many entries to show.
@@ -266,6 +269,11 @@ struct ServeArgs {
     /// Days to keep finished requests.
     #[arg(long, default_value_t = 14, env = "HASHI_RETENTION_DAYS")]
     retention_days: u32,
+    /// Minutes an account that hit its limit is skipped when the agent's
+    /// message does not say when the limit resets.
+    #[arg(long, default_value_t = 60, env = "HASHI_ACCOUNT_COOLDOWN",
+          value_parser = clap::value_parser!(u32).range(1..=10_080))]
+    account_cooldown: u32,
     #[command(flatten)]
     agents: AgentArgs,
 }
@@ -357,6 +365,7 @@ async fn main() -> Result<()> {
         Some(Command::Token(cmd)) => admin_cli::token(&server::open_store(&home)?, cmd),
         Some(Command::Share(args)) => admin_cli::share(&server::open_store(&home)?, args),
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
+        Some(Command::Account(cmd)) => admin_cli::account(&server::open_store(&home)?, &home, cmd),
         Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
         Some(Command::Ask(args)) if args.remote.is_some() => ask_remote(home, args).await,
         Some(Command::Ask(args)) => ask(&home, args).await,
@@ -479,6 +488,7 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         },
         tunnel_token: args.tunnel_token.clone(),
         update_check: !args.no_update_check,
+        account_cooldown: Duration::from_secs(u64::from(args.account_cooldown) * 60),
     };
 
     let bus = Bus::default();
@@ -810,6 +820,7 @@ async fn doctor(home: &std::path::Path, args: &AgentArgs) -> Result<()> {
             "cloudflared"
         ),
     }
+    admin_cli::doctor_accounts(home);
     doctor_update(home).await;
     println!();
     if found == 0 {

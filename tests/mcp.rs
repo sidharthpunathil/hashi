@@ -102,6 +102,7 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         tls: None,
         tunnel_token: None,
         update_check: false,
+        account_cooldown: std::time::Duration::from_secs(3600),
     };
     tweak(&mut cfg);
 
