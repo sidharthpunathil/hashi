@@ -22,7 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
-- Logs are always written to `~/.hashi/logs/hashi.log`, also in `--headless` mode, with tokens, keys and the home directory redacted. The file rotates past 5 MB and keeps three old copies.
+- Logs are always written to `~/.hashi/logs/hashi.log`, also in `--headless` mode, with tokens, keys and the home directory redacted. The file rotates once it passes 5 MB, at startup and while Hashi runs, and keeps three old copies. Only the newest ten crash files are kept.
 
 ### Fixed
 
@@ -35,6 +35,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Each agent now gets its own workspace per token, so an agent with write access cannot plant project config (including hooks) that another agent would load. Existing stateful conversations start fresh once after upgrading.
 - A `~/.cloudflared/config.yml` from another project no longer hijacks Hashi's tunnel.
 - Pruning old requests no longer removes the current month, which monthly caps count from.
+- The dashboard no longer redraws ten times a second while idle: it draws on input, events, data refreshes and only animates while something moves (a running request, the tunnel spinner, a toast or a form cursor). The Requests view builds only the visible rows from the first 200 characters of each prompt and keeps the detail pane between frames, so long histories of large prompts no longer cost a CPU core.
 
 ## [0.1.1] - 2026-11-05
 
