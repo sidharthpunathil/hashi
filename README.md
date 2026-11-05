@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <strong>Call Claude Code and Codex over HTTP.</strong><br>
+  <strong>Call Claude Code, Codex and other coding agents over HTTP.</strong><br>
   Hashi runs on the machine where your agents are already signed in and gives every app, script and bot one authenticated API to reach them.
 </p>
 
@@ -50,7 +50,7 @@ curl http://127.0.0.1:7878/v1/ask \
 
 | | |
 |---|---|
-| **Two agents, one API** | Send `"agent": "claude"` or `"agent": "codex"`. Each agent has its own worker queue, so a long Claude run never blocks a Codex prompt. |
+| **Six agents, one API** | Claude Code, Codex, Gemini CLI, opencode, Qwen Code and Cursor CLI. Send `"agent": "gemini"` and so on. Each agent has its own worker queue, so a long Claude run never blocks a Codex prompt. |
 | **Tokens you can hand out** | Create a token per app. Scope it to one agent, make it expire, revoke it from the dashboard. Only a SHA-256 hash is stored. |
 | **Conversations that continue** | A `stateful` token resumes its own Claude or Codex session on every prompt. `DELETE /v1/session/{agent}` starts over. |
 | **Answers in one request** | Pass `"wait": 60` to hold the request open until the agent finishes. Or take the `202`, then poll. |
@@ -61,6 +61,23 @@ curl http://127.0.0.1:7878/v1/ask \
 | **HTTPS your way** | A Cloudflare quick tunnel, a named tunnel on your own domain, or Hashi serving TLS itself with your certificate. All off until you ask. |
 | **A live dashboard** | A terminal UI shows each agent's state, queue, latency, throughput, recent requests and tokens. |
 | **One binary** | A single Rust executable with SQLite built in. It needs no runtime and no external database. |
+
+## Supported agents
+
+Hashi drives whichever of these you have installed and signed in to. `hashi doctor` shows which it found. Each runs headless with its safest unattended setting, so a prompt can never make it approve its own tool use.
+
+| Agent | `agent` value | Binary | Headless defaults Hashi uses | Reports |
+|---|---|---|---|---|
+| Claude Code | `claude` | `claude` | print mode, normal permission rules, 10-turn limit | tokens and cost |
+| Codex | `codex` | `codex` | `exec`, read-only sandbox | tokens |
+| Gemini CLI | `gemini` | `gemini` | `--approval-mode default` (tools that need approval are denied), no relaunch | tokens |
+| opencode (2.2+) | `opencode` | `opencode` | `run --standalone`, permission asks rejected, project config ignored | tokens and cost |
+| Qwen Code | `qwen` | `qwen` | `--approval-mode default` (shell and edits denied), no relaunch | tokens |
+| Cursor CLI | `cursor` | `cursor-agent` or `agent` | print mode, sandbox on, never `--force`, so changes are proposed and not applied | text only |
+
+Gemini CLI and Qwen Code run prompts that start with `/` as built-in commands. Hashi adds a leading space to such prompts so a shared user cannot reach commands like `/config`. Every agent works in its own directory per token, so one agent can never leave behind configuration that another agent loads.
+
+Adding another agent takes one file in `src/agent/`; see [CONTRIBUTING.md](CONTRIBUTING.md) and the research notes in [docs/research/agent-clis.md](docs/research/agent-clis.md).
 
 ## Install
 
@@ -234,7 +251,7 @@ Every endpoint except `/healthz` and `/v1/status` needs `Authorization: Bearer <
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `message` | string | required | Up to 32 KB |
-| `agent` | `"claude"` or `"codex"` | server default (`claude`) | Must be allowed for the token |
+| `agent` | `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor` | server default (`claude`) | Must be installed and allowed for the token |
 | `model` | string | agent default | Passed to the agent's `--model` / `-m` |
 | `wait` | seconds | none | Hold the request open up to this long (max 120) |
 
@@ -247,7 +264,7 @@ It returns `200` with the result when the run finished within `wait`, or `202` w
 | `name` | string, 1 to 100 chars | required |
 | `role` | `"user"` or `"admin"` | `"user"` |
 | `sessionMode` | `"stateless"` or `"stateful"` | `"stateless"` |
-| `agents` | array of agent names | both |
+| `agents` | array of agent names | all |
 | `expiresInDays` | 1 to 3650 | never expires |
 | `note` | string, up to 200 chars | none |
 | `limits` | object, see [Sharing](#sharing) | no limits |
@@ -367,6 +384,7 @@ Every flag also reads an environment variable.
 | `--retention-days` | `HASHI_RETENTION_DAYS` | `14` |
 | `--claude-bin` | `HASHI_CLAUDE_BIN` | found on `PATH` |
 | `--codex-bin` | `HASHI_CODEX_BIN` | found on `PATH` |
+| `--gemini-bin`, `--opencode-bin`, `--qwen-bin`, `--cursor-bin` | `HASHI_GEMINI_BIN`, `HASHI_OPENCODE_BIN`, `HASHI_QWEN_BIN`, `HASHI_CURSOR_BIN` | found on `PATH` |
 | `--max-turns` | `HASHI_MAX_TURNS` | `10` (Claude) |
 | `--claude-permission-mode` | `HASHI_CLAUDE_PERMISSION_MODE` | Claude's default |
 | `--codex-sandbox` | `HASHI_CODEX_SANDBOX` | `read-only` |
@@ -435,4 +453,4 @@ Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) co
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option.
 
-Hashi is an independent project. It is not affiliated with Anthropic or OpenAI. Claude Code and Codex are trademarks of their respective owners.
+Hashi is an independent project. It is not affiliated with Anthropic, OpenAI, Google, Alibaba, Anysphere or the opencode project. All product names are trademarks of their respective owners.

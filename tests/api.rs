@@ -893,9 +893,24 @@ printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n'
     })
     .await;
     let token = h.user_token(json!({})).await;
-    let (_, a) = h.post("/v1/ask", &token, json!({"message": "where", "agent": "claude", "wait": 10})).await;
-    let (_, b) = h.post("/v1/ask", &token, json!({"message": "where", "agent": "codex", "wait": 10})).await;
-    let (a, b) = (a["response"].as_str().unwrap().to_owned(), b["response"].as_str().unwrap().to_owned());
+    let (_, a) = h
+        .post(
+            "/v1/ask",
+            &token,
+            json!({"message": "where", "agent": "claude", "wait": 10}),
+        )
+        .await;
+    let (_, b) = h
+        .post(
+            "/v1/ask",
+            &token,
+            json!({"message": "where", "agent": "codex", "wait": 10}),
+        )
+        .await;
+    let (a, b) = (
+        a["response"].as_str().unwrap().to_owned(),
+        b["response"].as_str().unwrap().to_owned(),
+    );
     assert_ne!(a, b, "agents must not share a working directory");
     assert!(a.ends_with("/claude") && b.ends_with("/codex"), "{a} {b}");
     h.running.shutdown().await;

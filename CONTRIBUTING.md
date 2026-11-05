@@ -36,10 +36,12 @@ cargo deny check          # cargo install --locked cargo-deny
 
 ## Adding an agent
 
-1. Add a variant to `AgentKind` in `src/agent/mod.rs`.
-2. Create `src/agent/<name>.rs` with a pure `build_args` and `parse_output`, plus fixture tests.
-3. Wire both into `agent::execute`.
-4. Add a fake script for it to `tests/api.rs`.
+1. Add a variant to `AgentKind` in `src/agent/mod.rs`, with its name, display name and binary names.
+2. Create `src/agent/<name>.rs` with pure `build_args`, `env` and `parse_output` functions, plus fixture tests. Use the agent's safest unattended mode: never an auto-approve flag. Make sure no part of the prompt can be read as a flag, and check whether a leading `/` runs built-in commands.
+3. Wire it into `agent::execute`, and give it a colour and glyph in `src/tui/theme.rs`.
+4. Add `tests/<name>.rs` with a fake agent script, following `tests/gemini.rs`.
+
+`docs/research/agent-clis.md` has notes on CLIs that are not supported yet.
 
 ## Commit messages
 
