@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | sh
 #
 # Options (environment variables):
-#   HASHI_VERSION=v0.1.1        install a specific release (default: latest)
+#   HASHI_VERSION=v0.2.0        install a specific release (default: latest)
 #   HASHI_INSTALL_DIR=~/bin     where to put the binary (default: ~/.local/bin)
 #   HASHI_NO_DOCTOR=1           skip the post-install `hashi doctor` check
 #

@@ -100,18 +100,18 @@ That's the whole install. The script picks the right build for your computer and
 
 | Variable | Effect |
 |---|---|
-| `HASHI_VERSION=v0.1.1` | Install a specific release instead of the latest |
+| `HASHI_VERSION=v0.2.0` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
 
 ```bash
 # pin a version on macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.1.1 sh
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.2.0 sh
 ```
 
 ```powershell
 # pin a version on Windows
-$env:HASHI_VERSION = "v0.1.1"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+$env:HASHI_VERSION = "v0.2.0"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
 **Download by hand.** Every [release](https://github.com/sidharthpunathil/hashi/releases) has archives for Linux (x64, ARM64), macOS (Intel, Apple Silicon) and Windows (x64), each with a `.sha256` file.

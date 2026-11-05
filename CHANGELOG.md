@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-05
+
 ### Added
 
 - Four more agents: Gemini CLI (`gemini`), opencode (`opencode`, 2.2 or later), Qwen Code (`qwen`) and Cursor CLI (`cursor`), each with its safest headless settings. `hashi doctor` lists them; the dashboard shows a card per installed agent.
@@ -25,7 +27,6 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - Logs are always written to `~/.hashi/logs/hashi.log`, also in `--headless` mode, with tokens, keys and the home directory redacted. The file rotates once it passes 5 MB, at startup and while Hashi runs, and keeps three old copies. Only the newest ten crash files are kept.
-- Logs are always written to `~/.hashi/logs/hashi.log`, also in `--headless` mode, with tokens, keys and the home directory redacted. The file rotates past 5 MB and keeps three old copies.
 - `user` tokens created without limits (`POST /v1/tokens`, `hashi token create`, dashboard `n`) now get `maxPending: 3`, like invite tokens. Admin tokens stay unlimited. Lift it with `PATCH /v1/tokens/{id}` or `hashi token update --clear-limits`.
 - 10% of the queue (at least 5 slots, at most half) is reserved for admin tokens.
 - A token may hold at most 4 long polls at once across `POST /v1/ask`, `GET /v1/ask/{id}` and MCP `ask_*` and `get_result`. Further waits answer at once with the current state (202).
@@ -38,7 +39,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - A client that does not send a complete request head within 10 seconds, or leaves a keep-alive connection idle that long, is disconnected. Before, a slow or silent client could hold a socket forever.
 - Hashi raises its open-file soft limit toward the hard limit (up to 8192) at startup on Unix, and warns when it is still close to `--max-connections`. macOS starts launchd and GUI processes at 256.
 - Invite claims (`/v1/claim/preview`, `/v1/claim/redeem`) are rate limited per client address instead of in one shared bucket, so one client can no longer stop everyone from claiming their invites. Unknown bearer tokens are throttled per client address before the database lookup. Behind a tunnel the address comes from `CF-Connecting-IP`, which is trusted only from loopback.
-
 - opencode runs are now read-only: shell, edits, web fetches and paths outside the workspace are denied. opencode allows most tools by default and has no sandbox of its own.
 - Agent runs start in their own process group on Unix, and the whole group is killed on timeout, memory stop, output overflow, cancellation and shutdown; on Windows the process tree is ended with `taskkill /T /F`. Shells and servers an agent started no longer outlive its run. `hashi ask` now stops the agent on Ctrl-C.
 - Each agent now gets its own workspace per token, so an agent with write access cannot plant project config (including hooks) that another agent would load. Existing stateful conversations start fresh once after upgrading.
