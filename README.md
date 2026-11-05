@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Hashi the Bridge" width="420">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <img src="assets/logo-light.png" alt="Hashi the Bridge" width="420">
+  </picture>
 </p>
 
 <p align="center">
@@ -105,6 +108,8 @@ You can also manage tokens from the dashboard (`3`, then `n`) or the CLI (`hashi
 
 Run `hashi` in a terminal and the dashboard takes over the screen. When stdout is not a terminal, or with `--headless`, Hashi prints plain log lines instead.
 
+The dashboard is built for long agent runs. Running requests count up their elapsed time, so a two-minute answer never looks frozen. Every status pairs a symbol with its colour (`✓` done, `✗` failed, `◌` queued, spinner for running). Body text uses your terminal's own foreground colour, so light and dark themes both stay readable. Set `HASHI_REDUCED_MOTION=1` to stop the spinners and shimmer.
+
 | Key | Action |
 |---|---|
 | `1` `2` `3` `4` | Overview, Requests, Tokens, Logs |
@@ -113,7 +118,9 @@ Run `hashi` in a terminal and the dashboard takes over the screen. When stdout i
 | `n` / `d` | Create or revoke a token (Tokens view) |
 | `c` | Copy the API URL, or the token being shown |
 | `?` | All key bindings |
-| `q` | Quit and stop the bridge |
+| `Esc` | Close a popup |
+| `q` | Quit and stop the bridge. Asks first while requests are in flight |
+| `Ctrl-C` | Quit immediately |
 
 ## API
 
@@ -229,6 +236,7 @@ Every flag also reads an environment variable.
 | `--port` | `HASHI_PORT` | `7878` |
 | `--tunnel` | `HASHI_TUNNEL` | off |
 | `--headless` | | off (on when stdout is not a terminal) |
+| | `HASHI_REDUCED_MOTION` | off. Set to `1` to freeze dashboard animation |
 | `--default-agent` | `HASHI_DEFAULT_AGENT` | `claude` |
 | `--concurrency` | `HASHI_CONCURRENCY` | `1` run per agent |
 | `--timeout` | `HASHI_TIMEOUT` | `300` seconds |

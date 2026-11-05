@@ -123,7 +123,7 @@ fn dump_html(buf: &ratatui::buffer::Buffer, dir: &std::path::Path) {
     for y in 0..buf.area.height {
         for x in 0..buf.area.width {
             let cell = &buf[(x, y)];
-            let mut style = format!("color:{};", css(cell.fg, "#e8e4f5"));
+            let mut style = format!("color:{};", css(cell.fg, "inherit"));
             if let Color::Rgb(..) = cell.bg {
                 style.push_str(&format!("background:{};", css(cell.bg, "transparent")));
             }
@@ -274,4 +274,55 @@ fn every_view_renders() {
         app.on_key(key(KeyCode::Char(tab)));
         draw(&mut app, 120, 34);
     }
+}
+
+#[test]
+fn quitting_with_work_in_flight_asks_first() {
+    // The fixture leaves one request running.
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('q')));
+    assert!(matches!(app.popup, Some(Popup::ConfirmQuit { pending: 1 })));
+    assert!(draw(&mut app, 140, 40).contains("still in flight"));
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(!app.should_quit && app.popup.is_none());
+    app.on_key(key(KeyCode::Char('q')));
+    app.on_key(key(KeyCode::Char('y')));
+    assert!(app.should_quit);
+}
+
+#[test]
+fn escape_never_quits() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Esc));
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn empty_token_name_shows_inline_error() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('n')));
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("Name is required"));
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(!draw(&mut app, 140, 40).contains("Name is required"));
+}
+
+#[test]
+fn running_requests_show_elapsed_time() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('2')));
+    // Newest first: the running request is selected.
+    assert!(draw(&mut app, 140, 40).contains("so far"));
+}
+
+#[test]
+fn reduced_motion_freezes_animation() {
+    let mut app = App::new(state(), None, false);
+    app.reduced_motion = true;
+    for _ in 0..10 {
+        app.on_tick();
+    }
+    assert_eq!(app.tick, 0);
 }

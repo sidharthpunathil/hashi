@@ -105,6 +105,8 @@ pub struct TokenForm {
     pub mode: SessionMode,
     /// Selected agents.
     pub agents: AgentChoice,
+    /// Validation message shown under the name field.
+    pub error: Option<String>,
 }
 
 impl TokenForm {
@@ -118,6 +120,7 @@ impl TokenForm {
             role: Role::User,
             mode: SessionMode::Stateless,
             agents: AgentChoice::Both,
+            error: None,
         }
     }
 
@@ -156,6 +159,11 @@ pub enum Popup {
     },
     /// Token creation form.
     NewToken(TokenForm),
+    /// Quit confirmation, shown while requests are still in flight.
+    ConfirmQuit {
+        /// Requests queued or running.
+        pending: u64,
+    },
     /// Revoke confirmation.
     ConfirmRevoke {
         /// Token id.
@@ -224,6 +232,8 @@ pub struct App {
     pub tunnel: TunnelState,
     /// Set when the user asks to quit.
     pub should_quit: bool,
+    /// Freeze spinners and other animation (`HASHI_REDUCED_MOTION=1`).
+    pub reduced_motion: bool,
     last_refresh: Option<Instant>,
 }
 
@@ -257,6 +267,7 @@ impl App {
                 TunnelState::Off
             },
             should_quit: false,
+            reduced_motion: std::env::var("HASHI_REDUCED_MOTION").is_ok_and(|v| v != "0"),
             last_refresh: None,
         };
         app.refresh();
@@ -295,7 +306,9 @@ impl App {
 
     /// Advances animations and refreshes data periodically.
     pub fn on_tick(&mut self) {
-        self.tick = self.tick.wrapping_add(1);
+        if !self.reduced_motion {
+            self.tick = self.tick.wrapping_add(1);
+        }
         if self
             .last_refresh
             .is_none_or(|t| t.elapsed() >= Duration::from_millis(750))
@@ -409,7 +422,15 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') => {
+                // Quitting stops the bridge, so ask first when work would be lost.
+                let pending = self.stats.running + self.stats.queued;
+                if pending > 0 {
+                    self.popup = Some(Popup::ConfirmQuit { pending });
+                } else {
+                    self.should_quit = true;
+                }
+            }
             KeyCode::Char('?') => self.popup = Some(Popup::Help),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.set_tab(self.tab.shift(1)),
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
@@ -465,6 +486,14 @@ impl App {
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => None,
                 _ => Some(Popup::Reveal { title, secret }),
             },
+            Popup::ConfirmQuit { pending } => match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.should_quit = true;
+                    None
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
+                _ => Some(Popup::ConfirmQuit { pending }),
+            },
             Popup::ConfirmRevoke { id, name } => match key.code {
                 KeyCode::Char('y' | 'Y') => {
                     self.revoke(&id, &name);
@@ -485,10 +514,12 @@ impl App {
                     }
                     KeyCode::Backspace if form.field == 0 => {
                         form.name.pop();
+                        form.error = None;
                     }
                     KeyCode::Char(c) if form.field == 0 => {
                         if form.name.chars().count() < 100 && !c.is_control() {
                             form.name.push(c);
+                            form.error = None;
                         }
                     }
                     KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => form.toggle(),
@@ -499,10 +530,11 @@ impl App {
         }
     }
 
-    fn create_token(&mut self, form: TokenForm) -> Option<Popup> {
+    fn create_token(&mut self, mut form: TokenForm) -> Option<Popup> {
         let name = form.name.trim().to_owned();
         if name.is_empty() {
-            self.notify("give the token a name first");
+            form.field = 0;
+            form.error = Some("Name is required, for example ci-bot".to_owned());
             return Some(Popup::NewToken(form));
         }
         let new = NewToken {
@@ -581,6 +613,18 @@ impl App {
         self.requests_table
             .selected()
             .and_then(|i| self.recent.get(i))
+    }
+
+    /// How long the oldest running request for `agent` has been running, in ms.
+    #[must_use]
+    pub fn running_for(&self, agent: AgentKind) -> Option<u64> {
+        let now = now_ms();
+        self.recent
+            .iter()
+            .filter(|r| r.agent == agent && r.status == crate::store::RequestStatus::Running)
+            .filter_map(|r| r.started_at)
+            .min()
+            .and_then(|s| u64::try_from(now - s).ok())
     }
 
     /// Recent completed durations for `agent`, oldest first, for sparklines.

@@ -101,13 +101,13 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             format!("{} ", t::agent_glyph(AgentKind::Claude)),
             t::fg(t::agent_color(AgentKind::Claude)),
         ),
-        Span::styled("Claude Code", t::fg(TEXT)),
+        Span::styled("Claude Code", plain()),
         Span::styled("  ⇄  ", t::fg(t::DUSK)),
         Span::styled(
             format!("{} ", t::agent_glyph(AgentKind::Codex)),
             t::fg(t::agent_color(AgentKind::Codex)),
         ),
-        Span::styled("Codex", t::fg(TEXT)),
+        Span::styled("Codex", plain()),
         Span::styled(format!("   v{}", env!("CARGO_PKG_VERSION")), t::muted()),
     ]));
     frame.render_widget(Paragraph::new(lines), brand);
@@ -146,7 +146,7 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
             format!("{} ", t::agent_glyph(info.agent)),
             t::fg(t::agent_color(info.agent)),
         ));
-        agents.push(Span::styled(format!("{} ", info.agent), t::fg(TEXT)));
+        agents.push(Span::styled(format!("{} ", info.agent), plain()));
         agents.push(Span::styled(format!("{mark}   "), style));
     }
     vec![
@@ -164,7 +164,7 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
         Line::raw(""),
         Line::from(vec![
             Span::styled("local   ", t::muted()),
-            Span::styled(rt.local_url.clone(), t::fg(TEXT)),
+            Span::styled(rt.local_url.clone(), plain()),
         ]),
         Line::from(vec![Span::styled("public  ", t::muted()), public]),
         Line::from(agents),
@@ -188,7 +188,7 @@ fn render_compact_header(app: &App, frame: &mut Frame, area: Rect) {
     ));
     spans.push(Span::styled(
         format!("  {}", app.state.runtime.base_url()),
-        t::fg(TEXT),
+        plain(),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -430,27 +430,41 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
             format!("thinking on {} prompts…", stats.running)
         };
         spans.extend(t::shimmer(&label, accent.lerp(t::DUSK, 0.2), phase));
+        if let Some(ms) = app.running_for(agent) {
+            spans.push(Span::styled(
+                format!("  {}", human_duration(Duration::from_secs(ms / 1000))),
+                t::muted(),
+            ));
+        }
         Line::from(spans)
     } else {
         Line::from(vec![
             Span::styled("● ", t::fg(t::MINT)),
-            Span::styled("ready", t::fg(TEXT)),
+            Span::styled("ready", plain()),
             Span::styled("  idle", t::muted()),
         ])
     };
     frame.render_widget(Paragraph::new(state_line), state);
 
     let counts_line = Line::from(vec![
-        Span::styled(stats.completed.to_string(), t::bold(TEXT)),
+        Span::styled(stats.completed.to_string(), strong()),
         Span::styled(" done   ", t::muted()),
         Span::styled(
             stats.failed.to_string(),
-            t::bold(if stats.failed > 0 { t::ROSE } else { TEXT }),
+            if stats.failed > 0 {
+                t::bold(t::ROSE)
+            } else {
+                strong()
+            },
         ),
         Span::styled(" failed   ", t::muted()),
         Span::styled(
             stats.queued.to_string(),
-            t::bold(if stats.queued > 0 { t::AMBER } else { TEXT }),
+            if stats.queued > 0 {
+                t::bold(t::AMBER)
+            } else {
+                strong()
+            },
         ),
         Span::styled(" queued", t::muted()),
     ]);
@@ -462,9 +476,9 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
             let avg = lat.iter().sum::<u64>() / lat.len() as u64;
             Line::from(vec![
                 Span::styled("avg ", t::muted()),
-                Span::styled(human_duration(Duration::from_millis(avg)), t::fg(TEXT)),
+                Span::styled(human_duration(Duration::from_millis(avg)), plain()),
                 Span::styled("   last ", t::muted()),
-                Span::styled(human_duration(Duration::from_millis(*last)), t::fg(TEXT)),
+                Span::styled(human_duration(Duration::from_millis(*last)), plain()),
             ])
         }
         _ => Line::from(Span::styled("no runs yet", t::muted())),
@@ -511,9 +525,9 @@ fn render_throughput(app: &App, frame: &mut Frame, area: Rect) {
 
 fn feed_line(item: &FeedItem, width: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{:>4} ", human_age(item.at)), t::fg(t::DUSK)),
+        Span::styled(format!("{:>4} ", human_age(item.at)), t::muted()),
         Span::styled(format!("{} ", item.glyph), t::bold(item.color)),
-        Span::styled(truncate(&item.text, width.saturating_sub(8)), t::fg(TEXT)),
+        Span::styled(truncate(&item.text, width.saturating_sub(8)), plain()),
     ])
 }
 
@@ -541,10 +555,7 @@ fn render_activity(app: &App, frame: &mut Frame, area: Rect) {
 fn quickstart(app: &App) -> Vec<Line<'static>> {
     let url = app.state.runtime.base_url();
     vec![
-        Line::from(Span::styled(
-            "Waiting for the first prompt. Try:",
-            t::fg(TEXT),
-        )),
+        Line::from(Span::styled("Waiting for the first prompt. Try:", plain())),
         Line::raw(""),
         Line::from(vec![
             Span::styled("$ ", t::fg(t::DUSK)),
@@ -592,10 +603,7 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
         .recent
         .iter()
         .map(|r| {
-            let took = r.duration_ms().map_or_else(
-                || "-".to_owned(),
-                |d| human_duration(Duration::from_millis(u64::try_from(d).unwrap_or(0))),
-            );
+            let took = elapsed_label(r);
             Row::new(vec![
                 Cell::from(status_span(r.status, app.tick)),
                 Cell::from(Span::styled(
@@ -606,10 +614,10 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
                     format!("{} {}", t::agent_glyph(r.agent), r.agent),
                     t::fg(t::agent_color(r.agent)),
                 )),
-                Cell::from(Span::styled(truncate(&r.token_name, 12), t::fg(TEXT))),
+                Cell::from(Span::styled(truncate(&r.token_name, 12), plain())),
                 Cell::from(Span::styled(human_age(r.created_at), t::muted())),
                 Cell::from(Span::styled(took, t::muted())),
-                Cell::from(Span::styled(one_line(&r.message), t::fg(TEXT))),
+                Cell::from(Span::styled(one_line(&r.message), plain())),
             ])
         })
         .collect();
@@ -628,12 +636,24 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
     )
     .header(header)
     .column_spacing(1)
-    .row_highlight_style(Style::new().bg(SELECT.into()).add_modifier(Modifier::BOLD))
+    .row_highlight_style(
+        Style::new()
+            .fg(TEXT.into())
+            .bg(SELECT.into())
+            .add_modifier(Modifier::BOLD),
+    )
     .highlight_symbol(Span::styled("▌", t::fg(t::PINK)))
     .block(panel("requests", t::VIOLET));
     frame.render_stateful_widget(table, list, &mut app.requests_table);
     if empty {
-        let hint = Paragraph::new(Span::styled("no requests yet", t::muted())).centered();
+        let hint = Paragraph::new(vec![
+            Line::from(Span::styled("No requests yet", strong())).centered(),
+            Line::from(Span::styled(
+                "Send one with POST /v1/ask. Press 1 for a curl example.",
+                t::muted(),
+            ))
+            .centered(),
+        ]);
         frame.render_widget(hint, list.inner(Margin::new(2, 3)));
     }
 
@@ -642,7 +662,11 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     let Some(r) = app.selected_request() else {
-        frame.render_widget(Paragraph::new("").block(panel("detail", t::PINK)), area);
+        let hint = Paragraph::new(Span::styled(
+            "Select a request to see its prompt and answer.",
+            t::muted(),
+        ));
+        frame.render_widget(hint.block(panel("detail", t::PINK)), area);
         return;
     };
     let title = format!("request {}", r.id.get(..8).unwrap_or(&r.id));
@@ -696,41 +720,39 @@ fn detail_text(r: &Request, tick: u64) -> Text<'static> {
                 t::fg(t::agent_color(r.agent)),
             ),
         ),
-        kv("token", Span::styled(r.token_name.clone(), t::fg(TEXT))),
+        kv("token", Span::styled(r.token_name.clone(), plain())),
         kv(
             "model",
             Span::styled(
                 r.model.clone().unwrap_or_else(|| "default".to_owned()),
-                t::fg(TEXT),
+                plain(),
             ),
         ),
         kv(
             "session",
-            Span::styled(
-                if r.stateful { "stateful" } else { "stateless" },
-                t::fg(TEXT),
-            ),
+            Span::styled(if r.stateful { "stateful" } else { "stateless" }, plain()),
         ),
         kv(
             "created",
-            Span::styled(format!("{} ago", human_age(r.created_at)), t::fg(TEXT)),
+            Span::styled(format!("{} ago", human_age(r.created_at)), plain()),
         ),
     ];
-    if let Some(d) = r.duration_ms() {
-        lines.push(kv(
-            "took",
-            Span::styled(
-                human_duration(Duration::from_millis(u64::try_from(d).unwrap_or(0))),
-                t::fg(TEXT),
-            ),
-        ));
+    match r.status {
+        RequestStatus::Running => lines.push(kv(
+            "running",
+            Span::styled(format!("{} so far", elapsed_label(r)), t::fg(t::AMBER)),
+        )),
+        _ if r.duration_ms().is_some() => {
+            lines.push(kv("took", Span::styled(elapsed_label(r), plain())));
+        }
+        _ => {}
     }
     if let Some(u) = r.usage {
         let mut s = format!("{} in · {} out", u.input_tokens, u.output_tokens);
         if let Some(c) = u.cost_usd {
             s.push_str(&format!(" · ${c:.4}"));
         }
-        lines.push(kv("usage", Span::styled(s, t::fg(TEXT))));
+        lines.push(kv("usage", Span::styled(s, plain())));
     }
     let rule = |label: &str| {
         Line::from(vec![
@@ -743,7 +765,7 @@ fn detail_text(r: &Request, tick: u64) -> Text<'static> {
     lines.extend(
         r.message
             .lines()
-            .map(|l| Line::from(Span::styled(l.to_owned(), t::fg(TEXT)))),
+            .map(|l| Line::from(Span::styled(l.to_owned(), plain()))),
     );
     lines.push(Line::raw(""));
     match (&r.response, &r.error) {
@@ -751,7 +773,7 @@ fn detail_text(r: &Request, tick: u64) -> Text<'static> {
             lines.push(rule("response"));
             lines.extend(
                 resp.lines()
-                    .map(|l| Line::from(Span::styled(l.to_owned(), t::fg(TEXT)))),
+                    .map(|l| Line::from(Span::styled(l.to_owned(), plain()))),
             );
         }
         (None, Some(err)) => {
@@ -797,7 +819,7 @@ fn render_tokens(app: &mut App, frame: &mut Frame, area: Rect) {
                         .bg(t::ORCHID.into())
                         .add_modifier(Modifier::BOLD),
                 ),
-                Role::User => Span::styled(" user ", t::fg(TEXT)),
+                Role::User => Span::styled(" user ", plain()),
             };
             let mode = match tk.session_mode {
                 SessionMode::Stateful => Span::styled("stateful", t::fg(t::PINK)),
@@ -825,7 +847,7 @@ fn render_tokens(app: &mut App, frame: &mut Frame, area: Rect) {
                 },
             );
             Row::new(vec![
-                Cell::from(Span::styled(tk.name.clone(), t::bold(TEXT))),
+                Cell::from(Span::styled(tk.name.clone(), strong())),
                 Cell::from(Span::styled(
                     format!("{}…", tk.prefix),
                     t::fg(t::DUSK.lighten(0.3)),
@@ -883,7 +905,10 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
     if app.feed.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled("nothing yet", t::muted())),
+            Paragraph::new(Span::styled(
+                "Events appear here as requests arrive and agents answer.",
+                t::muted(),
+            )),
             inner,
         );
         return;
@@ -947,8 +972,8 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
     let area = frame.area();
     match popup {
         Popup::Help => {
-            let rect = centered(area, 58, 18);
-            let rows: [(&str, &str); 11] = [
+            let rect = centered(area, 58, 19);
+            let rows: [(&str, &str); 12] = [
                 ("1 2 3 4", "jump to a view"),
                 ("tab / ←→", "next / previous view"),
                 ("↑↓ / j k", "move selection"),
@@ -958,7 +983,8 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 ("d", "revoke token (Tokens view)"),
                 ("r", "refresh now"),
                 ("?", "this help"),
-                ("q / esc", "quit and stop the bridge"),
+                ("q", "quit (asks first if work is running)"),
+                ("esc", "close a popup"),
                 ("ctrl-c", "quit immediately"),
             ];
             let mut lines: Vec<Line> = rows
@@ -966,7 +992,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 .map(|(k, v)| {
                     Line::from(vec![
                         Span::styled(format!("{k:<12}"), t::bold(t::ORCHID)),
-                        Span::styled(*v, t::fg(TEXT)),
+                        Span::styled(*v, plain()),
                     ])
                 })
                 .collect();
@@ -984,7 +1010,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
             let lines = vec![
                 Line::from(Span::styled(
                     "Copy it now. Hashi keeps only a hash, so it cannot be shown again.",
-                    t::fg(TEXT),
+                    plain(),
                 )),
                 Line::raw(""),
                 Line::from(Span::styled(
@@ -1018,13 +1044,35 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 rect,
             );
         }
+        Popup::ConfirmQuit { pending } => {
+            let rect = centered(area, 68, 8);
+            let noun = if *pending == 1 {
+                "request is"
+            } else {
+                "requests are"
+            };
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("{pending} {noun} still in flight."),
+                    strong(),
+                )),
+                Line::from(Span::styled(
+                    "Quitting stops the bridge. They resume on the next start.",
+                    t::muted(),
+                )),
+                Line::raw(""),
+                key_hint(&[("y", "quit"), ("n", "keep running")]),
+            ];
+            frame.render_widget(Clear, rect);
+            frame.render_widget(Paragraph::new(lines).block(modal("quit hashi?")), rect);
+        }
         Popup::ConfirmRevoke { name, .. } => {
             let rect = centered(area, 56, 8);
             let lines = vec![
                 Line::from(vec![
-                    Span::styled("Revoke ", t::fg(TEXT)),
+                    Span::styled("Revoke ", plain()),
                     Span::styled(name.clone(), t::bold(t::PINK)),
-                    Span::styled("?", t::fg(TEXT)),
+                    Span::styled("?", plain()),
                 ]),
                 Line::from(Span::styled(
                     "Apps using it will start getting 401s.",
@@ -1041,25 +1089,21 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
 }
 
 fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
-    let rect = centered(area, 60, 13);
+    let rect = centered(area, 60, 14);
     let field = |i: usize, label: &str, value: Vec<Span<'static>>| {
         let focused = form.field == i;
         let mut spans = vec![
             Span::styled(if focused { "› " } else { "  " }, t::bold(t::PINK)),
             Span::styled(
                 format!("{label:<10}"),
-                if focused { t::bold(TEXT) } else { t::muted() },
+                if focused { strong() } else { t::muted() },
             ),
         ];
         spans.extend(value);
         Line::from(spans)
     };
     let toggle = |s: &str, focused: bool| {
-        let style = if focused {
-            t::bold(t::ORCHID)
-        } else {
-            t::fg(TEXT)
-        };
+        let style = if focused { t::bold(t::ORCHID) } else { plain() };
         vec![
             Span::styled("‹ ", t::fg(t::DUSK)),
             Span::styled(s.to_owned(), style),
@@ -1079,9 +1123,16 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
             Span::styled(cursor, t::fg(t::PINK)),
         ]
     };
+    let feedback = match &form.error {
+        Some(err) => Line::from(vec![
+            Span::raw("            "),
+            Span::styled(format!("✗ {err}"), t::fg(t::ROSE)),
+        ]),
+        None => Line::raw(""),
+    };
     let lines = vec![
         field(0, "name", name),
-        Line::raw(""),
+        feedback,
         field(1, "role", toggle(form.role.as_str(), form.field == 1)),
         field(2, "session", toggle(form.mode.as_str(), form.field == 2)),
         field(3, "agents", toggle(form.agents.label(), form.field == 3)),
@@ -1105,6 +1156,27 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
     ];
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(modal("new token")), rect);
+}
+
+/// Body text: inherits the terminal (or popup) foreground so it stays
+/// readable on both light and dark themes.
+fn plain() -> Style {
+    Style::new()
+}
+
+/// Emphasised body text.
+fn strong() -> Style {
+    Style::new().add_modifier(Modifier::BOLD)
+}
+
+/// Run time for finished requests, live elapsed time for running ones.
+fn elapsed_label(r: &Request) -> String {
+    let ms = match (r.status, r.started_at, r.duration_ms()) {
+        (_, _, Some(d)) => d,
+        (RequestStatus::Running, Some(start), None) => crate::util::now_ms() - start,
+        _ => return "-".to_owned(),
+    };
+    human_duration(Duration::from_millis(u64::try_from(ms).unwrap_or(0)))
 }
 
 fn pct(n: u64, d: u64) -> f64 {
