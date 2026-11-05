@@ -169,9 +169,16 @@ impl Worker {
             .get(&self.agent)
             .ok_or("agent is not configured")?;
 
-        // Each token gets a private working directory. Agents key their
-        // session history by cwd, so this also keeps resumes consistent.
-        let workdir = self.cfg.workspace.join(&req.token_id);
+        // Each token gets a private working directory per agent. Agents key
+        // their session history by cwd, so this keeps resumes consistent. It
+        // also stops one agent with write access from planting project config
+        // (for example `.claude/settings.json` or `.gemini/settings.json`,
+        // which can define hooks) that a different agent would then load.
+        let workdir = self
+            .cfg
+            .workspace
+            .join(&req.token_id)
+            .join(self.agent.as_str());
         tokio::fs::create_dir_all(&workdir)
             .await
             .map_err(|e| format!("cannot create workspace: {e}"))?;

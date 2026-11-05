@@ -333,7 +333,7 @@ Anyone holding a token can make your agent run on your computer with your accoun
 - **Least privilege.** Tokens default to the `user` role. Only admins manage tokens, and the last admin cannot be revoked. Requests are visible only to the token that made them, and to admins.
 - **No shell.** Agents are started directly with an argument vector. The prompt always follows `--`, so it can never be read as a flag. Model names and session ids are checked against a strict alphabet and may not start with `-`.
 - **Sandboxed by default.** Codex runs with `sandbox_mode="read-only"`. Claude Code runs in print mode with its normal permission rules and a turn limit. Loosen these deliberately with `--codex-sandbox` and `--claude-permission-mode`.
-- **Isolated workspaces.** Every token gets its own working directory under `~/.hashi/workspaces/`.
+- **Isolated workspaces.** Every token gets its own working directory for each agent, under `~/.hashi/workspaces/<token>/<agent>/`. One agent with write access can never plant project config (such as hook definitions in `.claude/settings.json` or `.gemini/settings.json`) that a different agent would load.
 - **Limits.** Bodies over 64 KB and prompts over 32 KB are refused. Each run is killed after its timeout (default 5 minutes) or once it prints more than 10 MB. There is a per-token rate limit (default 60 requests per minute) and a global queue cap.
 - **Private data.** `~/.hashi` is created `0700` and the database `0600`.
 - **Loopback first.** Binding to a non-loopback address without TLS prints a warning. Tunnels and HTTPS are opt-in.

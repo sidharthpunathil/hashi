@@ -873,3 +873,30 @@ async fn claim_page_has_strict_csp() {
     }
     h.running.shutdown().await;
 }
+
+#[tokio::test]
+async fn each_agent_gets_its_own_workspace() {
+    const PWD_CLAUDE: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "9.9.9 (Fake Claude)"; exit 0; fi
+printf '{"type":"result","is_error":false,"result":"%s"}\n' "$(pwd)"
+"#;
+    const PWD_CODEX: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.0.0-fake"; exit 0; fi
+printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' "$(pwd)"
+"#;
+    let bins = tempfile::tempdir().unwrap();
+    let claude = write_script(bins.path(), "claude", PWD_CLAUDE);
+    let codex = write_script(bins.path(), "codex", PWD_CODEX);
+    let h = harness_with(|c| {
+        c.agents.get_mut(&AgentKind::Claude).unwrap().bin = claude;
+        c.agents.get_mut(&AgentKind::Codex).unwrap().bin = codex;
+    })
+    .await;
+    let token = h.user_token(json!({})).await;
+    let (_, a) = h.post("/v1/ask", &token, json!({"message": "where", "agent": "claude", "wait": 10})).await;
+    let (_, b) = h.post("/v1/ask", &token, json!({"message": "where", "agent": "codex", "wait": 10})).await;
+    let (a, b) = (a["response"].as_str().unwrap().to_owned(), b["response"].as_str().unwrap().to_owned());
+    assert_ne!(a, b, "agents must not share a working directory");
+    assert!(a.ends_with("/claude") && b.ends_with("/codex"), "{a} {b}");
+    h.running.shutdown().await;
+}
