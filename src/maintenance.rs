@@ -82,6 +82,7 @@ mod tests {
                 note: None,
                 limits: Limits::default(),
                 accounts: Default::default(),
+                project: None,
             })
             .unwrap();
         for id in ["old", "new"] {

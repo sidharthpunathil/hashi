@@ -46,6 +46,9 @@ enum Command {
     /// Add, sign in, list, disable and remove agent accounts.
     #[command(subcommand)]
     Account(admin_cli::AccountCommand),
+    /// Add, update, list and remove projects: folders to share.
+    #[command(subcommand)]
+    Project(admin_cli::ProjectCommand),
     /// Show recent sharing and access changes.
     Audit {
         /// How many entries to show.
@@ -427,6 +430,7 @@ async fn main() -> Result<()> {
         Some(Command::Share(args)) => admin_cli::share(&server::open_store(&home)?, args),
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Account(cmd)) => admin_cli::account(&server::open_store(&home)?, &home, cmd),
+        Some(Command::Project(cmd)) => admin_cli::project(&server::open_store(&home)?, &home, cmd),
         Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
         Some(Command::Ask(args)) if args.remote.is_some() => ask_remote(home, args).await,
         Some(Command::Ask(args)) => ask(&home, args).await,

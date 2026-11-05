@@ -189,6 +189,9 @@ pub struct Token {
     pub limits: Limits,
     /// Accounts per agent, in order of preference. Only admins see these.
     pub accounts: crate::accounts::AccountMap,
+    /// The project it is bound to, or `None` for its own workspace. Token
+    /// holders see only this name, never the project's folder or accounts.
+    pub project: Option<String>,
 }
 
 impl Token {

@@ -65,6 +65,14 @@ function setupCommands(origin, code) {
   };
 }
 
+// Only the project's name is ever sent to the people you share with.
+function showProject(name) {
+  if (typeof name === "string" && name) $("project").textContent = `Works in the project ${name}`;
+  const on = typeof name === "string" && name !== "";
+  show("project-label", on);
+  show("project", on);
+}
+
 function claimPage() {
   const code = decodeURIComponent(location.pathname.split("/claim/")[1] || "");
   const fail = (msg) => { show("loading", false); show("preview", false); $("error-text").textContent = msg; show("error"); };
@@ -74,6 +82,7 @@ function claimPage() {
       $("server").textContent = `to ${p.server}`;
       $("label").textContent = p.label;
       $("agents").textContent = agentsText(p.agents);
+      showProject(p.project);
       $("session").textContent = p.sessionMode === "stateful" ? "Remembers your conversation" : "Each prompt starts fresh";
       $("limits").textContent = limitsText(p.limits);
       $("lifetime").textContent = p.tokenExpiresInDays ? `${p.tokenExpiresInDays} day(s) after you claim it` : "Until the owner revokes it";
@@ -128,6 +137,7 @@ function mePage() {
     $("status").textContent = m.status;
     $("status").className = `pill ${m.status}`;
     $("agents").textContent = agentsText(m.agents);
+    showProject(m.project);
     $("session").textContent = m.sessionMode === "stateful" ? "Remembers your conversation" : "Each prompt starts fresh";
     $("expires").textContent = when(m.expiresAt);
     $("pending").textContent = `${m.usage.pending}${m.limits.maxPending != null ? ` of ${m.limits.maxPending}` : ""}`;

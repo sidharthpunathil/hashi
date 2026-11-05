@@ -30,6 +30,8 @@ pub struct NewInvite {
     pub link_hours: u32,
     /// Accounts per agent the created token may use.
     pub accounts: AccountMap,
+    /// The project the created token is bound to.
+    pub project: Option<String>,
 }
 
 /// A stored invite. Never contains the code.
@@ -59,6 +61,9 @@ pub struct Invite {
     /// Accounts per agent the created token may use. Admins only: the claim
     /// page never shows them.
     pub accounts: AccountMap,
+    /// The project the created token is bound to. The claim page shows
+    /// only this name.
+    pub project: Option<String>,
 }
 
 impl Invite {
@@ -106,7 +111,7 @@ pub enum Redeemed {
 
 const INVITE_COLUMNS: &str = "id, label, session_mode, agents, token_expires_in_days, \
      daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd, max_pending, \
-     expires_at, created_at, claimed_at, token_id, accounts";
+     expires_at, created_at, claimed_at, token_id, accounts, project";
 
 impl Store {
     /// Creates an invite and returns it with its one-time code.
@@ -130,13 +135,14 @@ impl Store {
             claimed_at: None,
             token_id: None,
             accounts: new.accounts.clone(),
+            project: new.project.clone(),
         };
         let l = invite.limits;
         self.conn()?.execute(
             "INSERT INTO invites (id, hash, label, session_mode, agents, token_expires_in_days,
                  daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd,
-                 max_pending, expires_at, created_at, accounts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 max_pending, expires_at, created_at, accounts, project)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 invite.id,
                 token::hash(&code),
@@ -152,6 +158,7 @@ impl Store {
                 invite.expires_at,
                 invite.created_at,
                 acct::encode(&invite.accounts),
+                invite.project,
             ],
         )?;
         Ok((invite, code))
@@ -252,6 +259,7 @@ impl Store {
                 )),
                 limits: invite.limits,
                 accounts: invite.accounts.clone(),
+                project: invite.project.clone(),
             },
         )?;
         let changed = tx.execute(
@@ -299,6 +307,7 @@ fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Result<Invite>> {
             claimed_at: r.get(12)?,
             token_id: r.get(13)?,
             accounts: acct::decode(&accounts),
+            project: r.get(15)?,
         })
     };
     Ok(build())
@@ -321,6 +330,7 @@ mod tests {
             },
             link_hours,
             accounts: AccountMap::new(),
+            project: None,
         }
     }
 
@@ -338,6 +348,7 @@ mod tests {
                 note: None,
                 limits: Limits::default(),
                 accounts: AccountMap::new(),
+                project: None,
             })
             .unwrap();
         }

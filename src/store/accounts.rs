@@ -75,6 +75,8 @@ pub struct RemovedAccount {
     pub tokens: usize,
     /// Invites it was taken off.
     pub invites: usize,
+    /// Projects it was taken off.
+    pub projects: usize,
 }
 
 const ACCOUNT_COLUMNS: &str = "agent, name, kind, disabled, limited_until, last_used, created_at";
@@ -173,8 +175,8 @@ impl Store {
         Ok(n == 1)
     }
 
-    /// Deletes an account's row and takes it off every token and invite
-    /// that lists it, and forgets the conversations kept on it, in one
+    /// Deletes an account's row and takes it off every token, invite and
+    /// project that lists it, and forgets the conversations kept on it, in one
     /// transaction.
     ///
     /// # Errors
@@ -191,16 +193,20 @@ impl Store {
             existed,
             ..RemovedAccount::default()
         };
-        for (table, count) in [("tokens", &mut out.tokens), ("invites", &mut out.invites)] {
+        for (table, key, count) in [
+            ("tokens", "id", &mut out.tokens),
+            ("invites", "id", &mut out.invites),
+            ("projects", "name", &mut out.projects),
+        ] {
             let rows: Vec<(String, String)> = {
-                let mut stmt = tx.prepare(&format!("SELECT id, accounts FROM {table}"))?;
+                let mut stmt = tx.prepare(&format!("SELECT {key}, accounts FROM {table}"))?;
                 stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?
             };
             for (id, map) in rows {
                 if let Some(map) = without(acct::decode(&map), agent, name) {
                     tx.execute(
-                        &format!("UPDATE {table} SET accounts = ?1 WHERE id = ?2"),
+                        &format!("UPDATE {table} SET accounts = ?1 WHERE {key} = ?2"),
                         params![acct::encode(&map), id],
                     )?;
                     *count += 1;
@@ -359,6 +365,7 @@ mod tests {
             note: None,
             limits: Limits::default(),
             accounts,
+            project: None,
         })
         .unwrap()
         .0
@@ -475,6 +482,7 @@ mod tests {
             limits: Limits::default(),
             link_hours: 24,
             accounts: map(AgentKind::Claude, &["work"]),
+            project: None,
         })
         .unwrap();
         s.set_account_session(&both.id, AgentKind::Claude, "work", "s1")
@@ -492,7 +500,8 @@ mod tests {
             RemovedAccount {
                 existed: true,
                 tokens: 2,
-                invites: 1
+                invites: 1,
+                projects: 0,
             }
         );
         let get = |id: &str| s.get_token(id).unwrap().unwrap().accounts;

@@ -23,6 +23,13 @@
 //! account. That is not counted as an interruption, and each account is
 //! tried at most once per request. A token with no list for the agent runs
 //! on the default account exactly as before, with no limit tracking.
+//!
+//! A token bound to a project (see [`crate::projects`]) runs with the
+//! project's effective settings: only agents both allow, the account list
+//! [`crate::projects::effective`] picks, and the project folder as the
+//! working directory instead of the token's workspace. Sessions are kept
+//! per token, agent, account and project. Hashi writes nothing into the
+//! project folder: its own per-run state stays in the token's workspace.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -35,10 +42,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::accounts::{self as acct, AccountKind};
+use crate::accounts::{self as acct, AccountKind, AccountMap};
 use crate::agent::{self, AgentConfig, AgentKind, EnvOverride, Invocation, Limits};
 use crate::events::{Bus, Event};
 use crate::guard::ResourceGuard;
+use crate::projects::{self as proj, Cwd, Effective};
 use crate::store::{
     AccountStatus, EXPIRED_BEFORE_START, Request, RequestStatus, Store, StoreError,
 };
@@ -507,11 +515,32 @@ impl Worker {
         }
     }
 
+    /// The settings the token's run gets: its own, or its project's
+    /// effective settings. A token whose project is gone fails, rather
+    /// than falling back to wider settings.
+    fn effective(&self, token: &Token) -> Result<Effective, Halt> {
+        let project = match &token.project {
+            Some(name) => Some(
+                self.store
+                    .get_project(name)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("this token's project no longer exists; ask the owner")?,
+            ),
+            None => None,
+        };
+        Ok(proj::effective(token, project.as_ref()))
+    }
+
     /// The account the token's next run on this agent should use: the first
-    /// in its list that is not in `tried`, still exists, is enabled and is
-    /// not at its limit. A token without a list uses the default account.
-    fn pick_account(&self, token: &Token, tried: &[String]) -> Result<Option<Picked>, Halt> {
-        let Some(list) = token.accounts.get(&self.agent).filter(|l| !l.is_empty()) else {
+    /// in its effective list that is not in `tried`, still exists, is
+    /// enabled and is not at its limit. Without a list it uses the default
+    /// account.
+    fn pick_account(
+        &self,
+        accounts: &AccountMap,
+        tried: &[String],
+    ) -> Result<Option<Picked>, Halt> {
+        let Some(list) = accounts.get(&self.agent).filter(|l| !l.is_empty()) else {
             return Ok(Some(Picked {
                 name: acct::DEFAULT.to_owned(),
                 kind: AccountKind::Default,
@@ -543,9 +572,9 @@ impl Worker {
     }
 
     /// Why no account of the token's list can run this agent now.
-    fn none_left(&self, token: &Token) -> String {
+    fn none_left(&self, accounts: &AccountMap) -> String {
         let now = now_ms();
-        let until = acct::for_agent(&token.accounts, self.agent)
+        let until = acct::for_agent(accounts, self.agent)
             .iter()
             .filter_map(|n| self.store.get_account(self.agent, n).ok().flatten())
             .filter_map(|s| match s.status(now) {
@@ -572,12 +601,21 @@ impl Worker {
             .ok_or("agent is not configured")?;
 
         let token = self.token_gate(req)?;
+        let eff = self.effective(&token)?;
+        if !eff.allows(self.agent) {
+            return Err(Halt::Failed(format!(
+                "this token's project does not allow {}",
+                self.agent.display_name()
+            )));
+        }
 
         // Each token gets a private working directory per agent. Agents key
         // their session history by cwd, so this keeps resumes consistent. It
         // also stops one agent with write access from planting project config
         // (for example `.claude/settings.json` or `.gemini/settings.json`,
         // which can define hooks) that a different agent would then load.
+        // A project-bound run starts in the project folder instead, but its
+        // workspace still holds what Hashi keeps for the run itself.
         //
         // Created synchronously, so a revoke that cancels this run cannot
         // interrupt it half way and then race it with the workspace removal.
@@ -604,8 +642,24 @@ impl Worker {
             return Err(Halt::Revoked);
         }
 
-        let Some(account) = self.pick_account(&token, &req.accounts_tried)? else {
-            return Err(Halt::Failed(self.none_left(&token)));
+        let cwd = match &eff.cwd {
+            Cwd::Workspace => workdir.clone(),
+            Cwd::Project(path) => {
+                // Checked without following a symlink swapped in for it, and
+                // never created: a missing folder is the owner's to fix.
+                if !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+                    return Err(Halt::Failed(
+                        "the project folder is missing; ask the owner to check \
+                         `hashi project list`"
+                            .to_owned(),
+                    ));
+                }
+                path.clone()
+            }
+        };
+
+        let Some(account) = self.pick_account(&eff.accounts, &req.accounts_tried)? else {
+            return Err(Halt::Failed(self.none_left(&eff.accounts)));
         };
         // The owner's credential variables are removed and the account's
         // own set, for every account but the default.
@@ -623,11 +677,12 @@ impl Worker {
             .set_request_account(&req.id, &account.name)
             .map_err(|e| e.to_string())?;
 
-        // Conversations live in the account's own directory, so each
-        // account keeps its own session.
+        // Conversations live in the account's own directory, and agents
+        // keep them per folder, so each account and project has its own
+        // session.
         let resume = if req.stateful {
             self.store
-                .account_session(&req.token_id, self.agent, &account.name)
+                .project_session(&req.token_id, self.agent, &account.name, eff.session_key())
                 .map_err(|e| e.to_string())?
         } else {
             None
@@ -642,10 +697,13 @@ impl Worker {
         let mut limits = self.cfg.limits.clone();
         limits.nice = self.guard.config().nice;
         limits.memory = Some(self.guard.watch());
-        let result = agent::execute_as(self.agent, cfg, inv, &workdir, limits, env.as_ref()).await;
+        let result =
+            agent::execute_in(self.agent, cfg, inv, &cwd, &workdir, limits, env.as_ref()).await;
         let out = match result {
             Ok(out) => out,
-            Err(e) => return Err(self.failed(req, &token, &account, env.as_ref(), &e.to_string())),
+            Err(e) => {
+                return Err(self.failed(req, &eff, &account, env.as_ref(), &e.to_string()));
+            }
         };
         if account.listed
             && let Err(e) = self
@@ -657,9 +715,13 @@ impl Worker {
 
         if req.stateful
             && let Some(session) = out.session_id.as_deref().filter(|s| agent::is_safe_arg(s))
-            && let Err(e) =
-                self.store
-                    .set_account_session(&req.token_id, self.agent, &account.name, session)
+            && let Err(e) = self.store.set_project_session(
+                &req.token_id,
+                self.agent,
+                &account.name,
+                eff.session_key(),
+                session,
+            )
         {
             warn!(error = %e, "failed to persist session");
         }
@@ -674,7 +736,7 @@ impl Worker {
     fn failed(
         &self,
         req: &Request,
-        token: &Token,
+        eff: &Effective,
         account: &Picked,
         env: Option<&EnvOverride>,
         error: &str,
@@ -682,6 +744,10 @@ impl Worker {
         let mut error = error.to_owned();
         for (_, value) in env.map(|e| e.set.as_slice()).unwrap_or_default() {
             error = error.replace(value.as_str(), "<account>");
+        }
+        // Token holders see a project's name, never its folder.
+        if let Cwd::Project(path) = &eff.cwd {
+            error = error.replace(path.to_string_lossy().as_ref(), "<project>");
         }
         if !account.listed {
             return Halt::Failed(error);
@@ -711,12 +777,12 @@ impl Worker {
               until = %crate::util::rfc3339(until).unwrap_or_default(), "account at its limit");
         let mut tried = req.accounts_tried.clone();
         tried.push(account.name.clone());
-        match self.pick_account(token, &tried) {
+        match self.pick_account(&eff.accounts, &tried) {
             Ok(Some(_)) => match self.store.requeue_after_limit(&req.id, &account.name) {
                 Ok(()) => Halt::Failover(account.name.clone()),
                 Err(e) => Halt::Failed(e.to_string()),
             },
-            Ok(None) => Halt::Failed(self.none_left(token)),
+            Ok(None) => Halt::Failed(self.none_left(&eff.accounts)),
             Err(halt) => halt,
         }
     }

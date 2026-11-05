@@ -1691,6 +1691,7 @@ async fn invites_cannot_exceed_the_token_cap() {
                 note: None,
                 limits: hashi::token::Limits::default(),
                 accounts: Default::default(),
+                project: None,
             })
             .unwrap();
     }

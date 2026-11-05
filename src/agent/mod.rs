@@ -313,12 +313,33 @@ pub async fn execute_as(
     limits: Limits,
     account: Option<&EnvOverride>,
 ) -> Result<AgentOutput, AgentError> {
+    execute_in(kind, cfg, inv, workdir, workdir, limits, account).await
+}
+
+/// Like [`execute_as`], starting in `cwd` (for example a project folder)
+/// while anything Hashi itself points the agent at for its own state, such
+/// as Qwen Code's memory store, stays in `state_dir` (the token's
+/// workspace). So a run in a project folder never has Hashi write into it.
+///
+/// # Errors
+///
+/// As for [`execute`].
+pub async fn execute_in(
+    kind: AgentKind,
+    cfg: &AgentConfig,
+    inv: Invocation<'_>,
+    cwd: &Path,
+    state_dir: &Path,
+    limits: Limits,
+    account: Option<&EnvOverride>,
+) -> Result<AgentOutput, AgentError> {
+    let workdir = cwd;
     let (args, mut env): (Vec<OsString>, Vec<(String, String)>) = match kind {
         AgentKind::Claude => (claude::build_args(cfg, inv), claude::env(workdir)),
         AgentKind::Codex => (codex::build_args(cfg, inv), codex::env(workdir)),
         AgentKind::Gemini => (gemini::build_args(cfg, inv), gemini::env(workdir)),
         AgentKind::Opencode => (opencode::build_args(cfg, inv), opencode::env(workdir)),
-        AgentKind::Qwen => (qwen::build_args(cfg, inv), qwen::env(workdir)),
+        AgentKind::Qwen => (qwen::build_args(cfg, inv), qwen::env(state_dir)),
         AgentKind::Cursor => (cursor::build_args(cfg, inv), cursor::env(workdir)),
         // Crush needs checks before and a lookup after the run.
         AgentKind::Crush => return crush::execute(cfg, inv, workdir, limits, account).await,

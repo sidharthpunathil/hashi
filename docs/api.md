@@ -26,6 +26,8 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 | `POST` | `/v1/claim/preview`, `/v1/claim/redeem` | invite code | What an invite grants; use it once |
 | `GET` | `/v1/audit` | admin | Recent sharing and access changes |
 | `GET` | `/v1/accounts` | admin | Accounts per agent, their state and use |
+| `GET` `POST` | `/v1/projects` | admin | List projects with their use, or add one |
+| `PATCH` `DELETE` | `/v1/projects/{name}` | admin | Change or remove a project (never its folder) |
 | `POST` | `/mcp` | token | MCP server (JSON-RPC over streamable HTTP). `GET /mcp` answers 405 |
 | `GET` | `/claim/{code}`, `/me` | | Pages for the people you share with |
 
@@ -120,18 +122,62 @@ With Open WebUI: open **Admin Settings**, then **Connections**, and add an OpenA
 | `note` | string, up to 200 chars | none |
 | `limits` | object, see below | `maxPending: 3` for `user` tokens, none for admins |
 | `accounts` | object, agent to an ordered list of account names | every agent uses `default` |
+| `project` | a project name | none: the token's own workspace |
 
 The response contains the raw `token` exactly once. Only its SHA-256 hash is stored.
+
+A token with a `project` runs in the project's folder. It may use the agents both it and the project allow, and its `accounts` for an agent must be a subset of the project's list for that agent (`default` when the project has none), or the request is refused with `400`. A token without its own list uses the project's. Token listings show `project` to admins, and `/v1/me` shows the token holder only the name.
 
 `accounts` looks like `{"claude": ["work", "personal"], "codex": ["ci"]}`. Each name must be an account added with `hashi account add`, or `default` for your own login; an unknown name is refused with `400`. A run uses the first listed account that is enabled and not at its limit, and fails over to the next one when it hits the agent's limit. Token listings and `PATCH` responses show `accounts` to admins; `/v1/me`, MCP and the claim page never do.
 
 `limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd` and `maxPending`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code and opencode do, so budgets bound only those two.
 
-`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits` and `accounts`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`.
+`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits`, `accounts` and `project`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`. `project` binds the token to a project, and `null` puts it back on its own workspace; the result is checked as on create.
 
 ## `POST /v1/invites`
 
-Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`) and `accounts` (as for tokens). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once.
+Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`), `accounts` and `project` (as for tokens). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once. `POST /v1/claim/preview` shows the project's name, never its folder or accounts.
+
+## Projects
+
+Admin only. A project is a folder with its own agents, accounts and defaults that tokens and invites can be bound to.
+
+`POST /v1/projects` takes:
+
+| Field | Type | Default |
+|---|---|---|
+| `name` | 1 to 32 characters from `a-z`, `0-9` and `-`; `default` is reserved | required |
+| `path` | absolute path of an existing folder, outside the Hashi home | required |
+| `agents` | array of agent names | the installed agents |
+| `accounts` | object, agent to an ordered list of account names | every agent uses `default` |
+| `defaultAgent` | an agent the project allows | the server's default agent |
+| `models` | object, agent to a model name | none |
+| `note` | string, up to 200 chars | none |
+
+The path is resolved through symlinks and stored as the real folder. A missing folder, a file, the file system root, a folder inside the Hashi home, an unknown account and a model with unsafe characters are refused with `400`; a taken name with `409`. At most 100 projects can exist.
+
+`GET /v1/projects` lists them:
+
+```json
+{
+  "projects": [
+    {
+      "name": "api", "path": "/Users/me/code/api", "agents": ["claude", "codex"],
+      "accounts": { "claude": ["work"] }, "defaultAgent": "claude",
+      "models": { "claude": "sonnet" }, "note": null,
+      "createdAt": "2026-11-06T09:00:00Z", "tokens": 2,
+      "stats": {
+        "todayRequests": 4, "monthRequests": 31,
+        "todayCostUsd": 0.12, "monthCostUsd": 1.9, "tokens": 2
+      }
+    }
+  ]
+}
+```
+
+`stats` counts the requests sent by tokens bound to the project and their reported spend, today and this month (UTC). `PATCH /v1/projects/{name}` accepts `path`, `agents`, `accounts`, `defaultAgent` (`null` removes it), `models` and `note`, checked as on create. An edit that would leave a bound token or pending invite with accounts outside the project answers `409 project_in_use`. `DELETE /v1/projects/{name}` answers `409 project_in_use` while tokens or pending invites are bound; `?unbind=true` puts them back on their own workspace first. Neither ever touches the folder.
+
+When a request names no `model`, the project's model for that agent is used, and when it names no `agent`, the project's `defaultAgent`. `GET /v1/ask/{id}` shows the `project` a request ran in.
 
 ## `GET /v1/accounts`
 

@@ -44,6 +44,16 @@ People you share with decide when agents start, so Hashi keeps your computer usa
 - Each token may hold at most 4 long polls open at once; a further wait answers at once with the current state (202).
 - Invalid tokens and invite codes are rate limited per client address, but a valid token or code always works, so someone guessing from your address cannot lock you out.
 
+## Projects
+
+A project only changes where a run starts. It does not change what an agent running as you can read: an agent in a project folder can still read whatever your user can, as it could from its private workspace. Share only folders you trust the people you share with to see, and whose contents you trust.
+
+- Hashi never creates, changes, moves or deletes anything in a project folder. Revoking a token deletes only its own workspace under `~/.hashi/workspaces/`, removing a project deletes only Hashi's record of it, and `hashi uninstall` leaves project folders alone: a project path cannot be inside the Hashi home, so deleting the home cannot reach one. Even the agents' own per-run state that Hashi points them at (such as Qwen Code's memory) stays in the token's workspace.
+- Agent sandboxes are unchanged in a project: Codex stays read-only, opencode keeps its read-only tools, Gemini CLI and Qwen Code keep their default approval modes, and Claude Code keeps your permission settings.
+- Project-level configuration inside the folder may load for agents that read it, such as `.gemini/` for Gemini CLI, Qwen Code's and Cursor's project files. Claude Code stays pinned to your user settings (`--setting-sources user`), and opencode's project config stays off. Crush can run shell code as soon as it loads a project config, so once Hashi supports Crush it will refuse to run it in a project that contains `.crushrc`, `crushrc`, `.crush.json` or `crush.json`.
+- Token holders see only a project's name, in `/v1/me` and on the claim page, never its folder or accounts. A run's error has the folder replaced by `<project>`, though an agent can still mention where it runs in its answer.
+- Binding never widens access: a token's agents are intersected with the project's, and a token account list outside the project's is refused, both when binding and when the project is edited.
+
 ## Withdrawing access
 
 Pause holds queued prompts, expiry fails them, and revoke stops running ones at once (within about 2 seconds when you revoke from another terminal with `hashi token revoke`). Revoking deletes the token's workspace, removing symlinks without following them. Every token and invite change is audited. Hashi shuts down cleanly on Ctrl-C, `SIGTERM`, `SIGHUP` and Windows console close, and a second signal exits at once.

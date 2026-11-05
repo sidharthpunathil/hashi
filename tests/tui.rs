@@ -33,6 +33,7 @@ fn state() -> AppState {
             note: None,
             limits: Default::default(),
             accounts: Default::default(),
+            project: None,
         })
         .unwrap();
     for (i, (agent, msg)) in [
@@ -372,6 +373,7 @@ fn add_user(app: &mut App, name: &str) {
             note: None,
             limits: Default::default(),
             accounts: Default::default(),
+            project: None,
         })
         .unwrap();
     app.refresh();
@@ -549,6 +551,7 @@ fn tokens_table_shows_status_and_usage() {
                 ..Default::default()
             },
             accounts: Default::default(),
+            project: None,
         })
         .unwrap();
     for i in 0..2 {
@@ -1074,4 +1077,99 @@ fn a_deliberate_stop_reads_as_off_not_failed() {
     app.on_event(Event::TunnelDown("the Cloudflare tunnel is stopped".into()));
     let out = draw(&mut app, 140, 40);
     assert!(out.contains("press t to go public"), "{out}");
+}
+
+fn add_project(app: &App, name: &str) {
+    app.state
+        .store
+        .add_project(&hashi::projects::Project {
+            name: name.to_owned(),
+            path: "/srv/never-touched".to_owned(),
+            agents: vec![AgentKind::Claude],
+            accounts: hashi::accounts::AccountMap::new(),
+            default_agent: None,
+            models: hashi::projects::ModelMap::new(),
+            note: None,
+            created_at: 0,
+        })
+        .unwrap();
+}
+
+#[test]
+fn token_and_share_forms_pick_a_project() {
+    let mut app = App::new(state(), None, false);
+    add_project(&app, "api");
+    app.on_key(key(KeyCode::Char('3')));
+
+    app.on_key(key(KeyCode::Char('n')));
+    for c in "bot".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    // The project selector is the last field.
+    app.on_key(key(KeyCode::Up));
+    assert!(draw(&mut app, 140, 40).contains("none (own workspace)"));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Reveal { .. })));
+    app.on_key(key(KeyCode::Esc));
+    let bot = app
+        .state
+        .store
+        .list_tokens()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == "bot")
+        .unwrap();
+    assert_eq!(bot.project.as_deref(), Some("api"));
+    app.refresh();
+    select_token(&mut app, "bot");
+    assert!(draw(&mut app, 140, 40).contains("project api"));
+
+    app.on_key(key(KeyCode::Char('s')));
+    for c in "carol".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::InviteReveal { .. })));
+    let invites = app.state.store.list_invites().unwrap();
+    assert_eq!(invites[0].project.as_deref(), Some("api"));
+}
+
+#[test]
+fn a_binding_outside_the_project_is_refused_in_the_form() {
+    let mut app = App::new(state(), None, false);
+    add_project(&app, "api");
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('n')));
+    for c in "bot".chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+    // Agents: codex only, which the project does not allow.
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Down));
+    }
+    for _ in 0..AgentKind::ALL.len() + 1 {
+        if draw(&mut app, 140, 40).contains("codex only") {
+            break;
+        }
+        app.on_key(key(KeyCode::Right));
+    }
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::NewToken(_))));
+    assert!(draw(&mut app, 140, 40).contains("allows none"));
+    assert!(
+        !app.state
+            .store
+            .list_tokens()
+            .unwrap()
+            .iter()
+            .any(|t| t.name == "bot")
+    );
 }
