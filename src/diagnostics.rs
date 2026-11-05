@@ -479,7 +479,16 @@ pub fn open_log_file(dir: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts.open(dir.join(LOG_FILE))
+    let file = opts.open(dir.join(LOG_FILE))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The mode above applies only when the file is created.
+        if file.metadata()?.is_file() {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(file)
 }
 
 /// `dir/hashi.log`, opened for appending, that rotates itself once it grows
@@ -1231,6 +1240,18 @@ mod tests {
     fn crash_files_are_owner_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_crash(dir.path(), "boom", OffsetDateTime::UNIX_EPOCH).unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_log_is_tightened_on_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOG_FILE);
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_log_file(dir.path()).unwrap());
         assert_eq!(mode(&path), 0o600);
     }
 

@@ -121,7 +121,7 @@ pub async fn start_named(
 /// catch-all `http_status:404`) silently override Hashi's tunnel target.
 fn isolated_config(home: &Path) -> Result<PathBuf, TunnelError> {
     let path = home.join("cloudflared.yml");
-    std::fs::write(
+    crate::diagnostics::write_private(
         &path,
         "# Managed by Hashi. Keeps ~/.cloudflared/config.yml out of Hashi's tunnel.\n",
     )?;
@@ -200,6 +200,16 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         // Only a comment: no tunnel, credentials or ingress rules.
         assert!(body.lines().all(|l| l.starts_with('#')));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_config_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = isolated_config(dir.path()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

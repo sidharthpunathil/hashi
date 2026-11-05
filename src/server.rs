@@ -101,21 +101,49 @@ pub fn prepare_home(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Opens the database in `home`, restricting the file to its owner.
+/// Opens the database in `home`, restricting it and its WAL and SHM files to
+/// their owner.
 ///
 /// # Errors
 ///
-/// Fails if the database cannot be opened.
+/// Fails if the database cannot be opened or secured.
 pub fn open_store(home: &Path) -> Result<Store> {
     prepare_home(home)?;
     let path = home.join("hashi.db");
-    let store = Store::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    // Before SQLite opens it: SQLite creates `-wal` and `-shm` with the mode
+    // of the database file, so they start out 0600 too.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    owner_only_file(&path, true)?;
+    let store = Store::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    // Left over from an earlier run that did not close cleanly.
+    #[cfg(unix)]
+    for suffix in ["-wal", "-shm"] {
+        owner_only_file(&home.join(format!("hashi.db{suffix}")), false)?;
     }
     Ok(store)
+}
+
+/// Sets a regular file's mode to 0600, creating it empty first when `create`
+/// is set. A missing file is skipped otherwise.
+#[cfg(unix)]
+fn owner_only_file(path: &Path, create: bool) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(create)
+        .mode(0o600)
+        .open(path);
+    let file = match file {
+        Ok(f) => f,
+        Err(e) if !create && e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+    };
+    if file.metadata()?.is_file() {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Deletes a revoked token's workspace, `<home>/workspaces/<token_id>/`,
@@ -360,4 +388,47 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
         cancel,
         tasks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_wal_and_shm_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let store = open_store(&home).unwrap();
+        ensure_admin(&store).unwrap();
+        // The connection is still open, so the WAL and SHM files exist.
+        for name in ["hashi.db", "hashi.db-wal", "hashi.db-shm"] {
+            let path = home.join(name);
+            assert!(path.exists(), "{name} missing");
+            assert_eq!(mode(&path), 0o600, "{name}");
+        }
+        assert_eq!(mode(&home), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopening_tightens_an_existing_database() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        drop(open_store(&home).unwrap());
+        let db = home.join("hashi.db");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = open_store(&home).unwrap();
+        ensure_admin(&store).unwrap();
+        for name in ["hashi.db", "hashi.db-wal", "hashi.db-shm"] {
+            assert_eq!(mode(&home.join(name)), 0o600, "{name}");
+        }
+    }
 }
