@@ -57,7 +57,7 @@ serve() { # home port log
 A="$WORK/owner"; B="$WORK/friend"
 echo "owner bridge"
 serve "$A" 7801 "$WORK/a.log"
-ADMIN=$(grep -o 'hashi_[0-9a-f]\{64\}' "$WORK/a.log" | head -1)
+ADMIN=$(grep -o 'hashi_[0-9a-f]\{64\}' "$WORK/a.log" | head -1) || true
 check "admin token printed once" '[ -n "$ADMIN" ]'
 U=http://127.0.0.1:7801
 H="Authorization: Bearer $ADMIN"
@@ -67,7 +67,7 @@ check "status lists claude as installed" \
 check "a second server on the same home is refused" \
   '! HASHI_HOME="$A" "$HASHI" serve --headless --port 7809 --claude-bin "$FAKE" --no-update-check >"$WORK/dup.log" 2>&1'
 
-TOKEN=$(curl -fs $U/v1/tokens -H "$H" -d '{"name":"app","sessionMode":"stateful"}' | grep -o 'hashi_[0-9a-f]\{64\}')
+TOKEN=$(curl -fs $U/v1/tokens -H "$H" -d '{"name":"app","sessionMode":"stateful"}' | grep -o 'hashi_[0-9a-f]\{64\}') || true
 check "token created over the API" '[ -n "$TOKEN" ]'
 T="Authorization: Bearer $TOKEN"
 
@@ -83,7 +83,7 @@ check "/v1/models lists claude" 'curl -fs $U/v1/models -H "$T" | grep -q "\"id\"
 check "/v1/me works and hides accounts" \
   'curl -fs $U/v1/me -H "$T" | grep -q "\"name\":\"app\"" && ! curl -fs $U/v1/me -H "$T" | grep -q accounts'
 
-SLOW=$(curl -fs $U/v1/ask -H "$T" -d '{"message":"slow one"}' | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+SLOW=$(curl -fs $U/v1/ask -H "$T" -d '{"message":"slow one"}' | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) || true
 sleep 1
 check "cancel a running request" \
   'curl -fs -X DELETE $U/v1/ask/$SLOW -H "$T" | grep -q "\"status\":\"failed\""'
@@ -94,7 +94,7 @@ check "unknown Host header refused" \
 check "CLI lists tokens while the server runs" 'HASHI_HOME="$A" "$HASHI" token list | grep -q app'
 
 echo "friend connects with an invite"
-LINK=$(HASHI_HOME="$A" "$HASHI" share friend --public-url "$U" 2>/dev/null | grep -o 'http://[^ ]*/claim/hashi_inv_[0-9a-f]*' | head -1)
+LINK=$(HASHI_HOME="$A" "$HASHI" share friend --public-url "$U" 2>/dev/null | grep -o 'http://[^ ]*/claim/hashi_inv_[0-9a-f]*' | head -1) || true
 check "invite link made" '[ -n "$LINK" ]'
 check "hashi connect redeems it" 'HASHI_HOME="$B" "$HASHI" connect "$LINK" --name owner >/dev/null 2>&1'
 check "ask --remote reaches the owner" \
@@ -105,7 +105,7 @@ echo "friend uses the shared access as an account on their own bridge"
 check "remote account added" \
   'HASHI_HOME="$B" "$HASHI" account add claude via-owner --remote owner >/dev/null 2>&1'
 serve "$B" 7802 "$WORK/b.log"
-BADMIN=$(grep -o 'hashi_[0-9a-f]\{64\}' "$WORK/b.log" | head -1)
+BADMIN=$(grep -o 'hashi_[0-9a-f]\{64\}' "$WORK/b.log" | head -1) || true
 BT=$(curl -fs http://127.0.0.1:7802/v1/tokens -H "Authorization: Bearer $BADMIN" \
   -d '{"name":"b-app","accounts":{"claude":["via-owner"]}}' | grep -o 'hashi_[0-9a-f]\{64\}')
 check "a run on the remote account is forwarded" \
