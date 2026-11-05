@@ -59,9 +59,17 @@ function Install-Hashi {
         $downloaded = $true
         try {
             Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $zip
-            Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset.sha256" -OutFile "$zip.sha256"
         } catch {
             $downloaded = $false
+        }
+        if ($downloaded) {
+            # The archive exists, so never fall back to an unverified build:
+            # a missing or wrong checksum is an error.
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset.sha256" -OutFile "$zip.sha256"
+            } catch {
+                throw "Could not download the checksum for $asset; refusing to install."
+            }
         }
 
         if ($downloaded) {

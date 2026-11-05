@@ -115,7 +115,10 @@ main() {
         fi
 
         step "downloading $asset ($VERSION)"
-        if download "$base/$asset" "$tmp/$asset" && download "$base/$asset.sha256" "$tmp/$asset.sha256"; then
+        if download "$base/$asset" "$tmp/$asset"; then
+            # The archive exists, so never fall back to an unverified build:
+            # a missing or wrong checksum is an error.
+            download "$base/$asset.sha256" "$tmp/$asset.sha256" || fail "could not download the checksum for $asset; refusing to install"
             expected="$(cut -d' ' -f1 < "$tmp/$asset.sha256")"
             actual="$(sha256_of "$tmp/$asset")"
             [ -n "$expected" ] && [ "$expected" = "$actual" ] || fail "checksum mismatch for $asset; refusing to install"
