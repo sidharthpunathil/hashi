@@ -7,6 +7,8 @@
 #   HASHI_VERSION=v0.2.0        install a specific release (default: latest)
 #   HASHI_INSTALL_DIR=~/bin     where to put the binary (default: ~/.local/bin)
 #   HASHI_NO_DOCTOR=1           skip the post-install `hashi doctor` check
+#   HASHI_CONNECT='<invite>'    after installing, run `hashi connect` with this
+#                               invite link (instead of `hashi doctor`)
 #
 # It downloads a prebuilt binary from GitHub Releases, verifies its SHA-256
 # checksum, and installs it for the current user. No sudo is needed. If no
@@ -137,6 +139,16 @@ main() {
 
     ok "installed $("$INSTALL_DIR/hashi" --version) to $INSTALL_DIR"
     path_hint
+
+    if [ -n "${HASHI_CONNECT:-}" ]; then
+        # A friend's setup: redeem the invite link instead of checking for
+        # local agents, which they do not need.
+        step "connecting with your invite link"
+        if ! "$INSTALL_DIR/hashi" connect "$HASHI_CONNECT"; then
+            fail "Hashi is installed, but connecting with the invite link failed (the reason is above). An invite link works once: if it was already used or has expired, ask for a new one, then run: hashi connect '<new link>'"
+        fi
+        return 0
+    fi
 
     if [ -z "${HASHI_NO_DOCTOR:-}" ]; then
         "$INSTALL_DIR/hashi" doctor || true

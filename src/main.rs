@@ -49,8 +49,14 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
-    /// Send one prompt straight to an agent, without the server.
+    /// Send one prompt straight to an agent, without the server, or to a
+    /// saved remote bridge with --remote.
     Ask(AskArgs),
+    /// Redeem an invite link to someone's Hashi and save the token.
+    Connect(ConnectArgs),
+    /// List or remove the bridges saved by `hashi connect`.
+    #[command(subcommand)]
+    Remote(RemoteCommand),
     /// Check that the agents and tunnel are installed.
     Doctor(AgentArgs),
     /// Write a redacted diagnostic report to attach to a bug report.
@@ -252,10 +258,15 @@ struct ServeArgs {
 #[derive(Debug, Args)]
 struct AskArgs {
     /// The prompt.
-    message: String,
-    /// Which agent to ask.
-    #[arg(short, long, default_value = "claude")]
-    agent: AgentKind,
+    #[arg(required_unless_present = "remote")]
+    message: Option<String>,
+    /// Send the prompt to a bridge saved by `hashi connect` instead of a
+    /// local agent. The name can be left out when only one is saved.
+    #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+    remote: Option<String>,
+    /// Which agent to ask. Default: claude, or the server's default with --remote.
+    #[arg(short, long)]
+    agent: Option<AgentKind>,
     /// Model override.
     #[arg(short, long)]
     model: Option<String>,
@@ -264,6 +275,32 @@ struct AskArgs {
     timeout: u64,
     #[command(flatten)]
     agents: AgentArgs,
+}
+
+#[derive(Debug, Args)]
+struct ConnectArgs {
+    /// The invite link, https://<host>/claim/hashi_inv_<code>.
+    url: String,
+    /// Name to save the bridge under. Default: the server's name.
+    #[arg(long)]
+    name: Option<String>,
+    /// Also add the bridge to this tool as an MCP server.
+    #[arg(long, value_parser = ["claude"])]
+    setup: Option<String>,
+    /// Path to the Claude Code executable, for --setup claude.
+    #[arg(long, env = "HASHI_CLAUDE_BIN")]
+    claude_bin: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum RemoteCommand {
+    /// Show saved bridges (names and URLs, never tokens).
+    List,
+    /// Forget a saved bridge.
+    Remove {
+        /// Its name, as `hashi remote list` shows it.
+        name: String,
+    },
 }
 
 /// Accepts `http(s)://host[:port][/path]` and strips a trailing slash.
@@ -306,7 +343,13 @@ async fn main() -> Result<()> {
         Some(Command::Share(args)) => admin_cli::share(&server::open_store(&home)?, args),
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
+        Some(Command::Ask(args)) if args.remote.is_some() => ask_remote(home, args).await,
         Some(Command::Ask(args)) => ask(&home, args).await,
+        Some(Command::Connect(args)) => connect(home, args).await,
+        Some(Command::Remote(RemoteCommand::List)) => hashi::remote::list(&home),
+        Some(Command::Remote(RemoteCommand::Remove { name })) => {
+            hashi::remote::remove(&home, &name)
+        }
         Some(Command::Doctor(args)) => doctor(&home, &args).await,
         Some(Command::Report(args)) => report(&home, args).await,
         Some(Command::Update(args)) => {
@@ -490,12 +533,14 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
     {
         bail!("model contains unsupported characters");
     }
+    let kind = args.agent.unwrap_or(AgentKind::Claude);
+    let message = args.message.context("a prompt is required")?;
     let configs = args.agents.configs();
-    let cfg = configs.get(&args.agent).context("agent not configured")?;
+    let cfg = configs.get(&kind).context("agent not configured")?;
     let workdir = home.join("workspaces").join("cli");
     std::fs::create_dir_all(&workdir)?;
     let inv = Invocation {
-        prompt: &args.message,
+        prompt: &message,
         resume: None,
         model: args.model.as_deref(),
     };
@@ -506,7 +551,7 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
     // The agent runs in its own process group, so the terminal's Ctrl-C does
     // not reach it. Dropping the run on Ctrl-C kills its whole tree instead.
     let out = tokio::select! {
-        out = agent::execute(args.agent, cfg, inv, &workdir, limits) => out?,
+        out = agent::execute(kind, cfg, inv, &workdir, limits) => out?,
         _ = tokio::signal::ctrl_c() => bail!("interrupted"),
     };
     println!("{}", out.text);
@@ -521,6 +566,56 @@ async fn ask(home: &std::path::Path, args: AskArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `hashi ask --remote [<name>] "<prompt>"`. With one value after
+/// `--remote` and no prompt, that value is the prompt.
+async fn ask_remote(home: PathBuf, args: AskArgs) -> Result<()> {
+    let remote = args.remote.unwrap_or_default();
+    let (name, message) = match args.message {
+        Some(m) => ((!remote.is_empty()).then_some(remote), m),
+        None => (None, remote),
+    };
+    if message.trim().is_empty() {
+        bail!("a prompt is required: hashi ask --remote [<name>] \"<prompt>\"");
+    }
+    let opts = hashi::remote::AskOptions {
+        name,
+        message,
+        agent: args.agent.map(|a| a.as_str().to_owned()),
+        model: args.model,
+    };
+    let run = tokio::task::spawn_blocking(move || hashi::remote::ask(&home, &opts));
+    let out = tokio::select! {
+        out = run => out.context("the request thread stopped")??,
+        _ = tokio::signal::ctrl_c() => {
+            // The blocking request cannot be cancelled; leave without
+            // waiting for it. The prompt may still finish on the server.
+            eprintln!("interrupted");
+            std::process::exit(130);
+        }
+    };
+    println!("{}", out.response);
+    if let Some(u) = out.usage {
+        eprintln!("\n{u}");
+    }
+    Ok(())
+}
+
+async fn connect(home: PathBuf, args: ConnectArgs) -> Result<()> {
+    let setup_claude = args.setup.is_some().then(|| {
+        args.claude_bin
+            .clone()
+            .unwrap_or_else(|| AgentConfig::default_for(AgentKind::Claude).bin)
+    });
+    let opts = hashi::remote::ConnectOptions {
+        url: args.url,
+        name: args.name,
+        setup_claude,
+    };
+    tokio::task::spawn_blocking(move || hashi::remote::connect(&home, &opts).map(|_| ()))
+        .await
+        .context("the connect thread stopped")?
 }
 
 /// Writes the redacted diagnostic report. Nothing is uploaded.

@@ -112,6 +112,9 @@ pub fn snippets(base: &str, token: &str) -> Value {
         "claudeCodeMcp": format!(
             "claude mcp add --transport http hashi {base}/mcp --header \"Authorization: Bearer {token}\""
         ),
+        "codexMcp": format!(
+            "export HASHI_TOKEN=\"{token}\"\ncodex mcp add hashi --url {base}/mcp --bearer-token-env-var HASHI_TOKEN\n# Codex reads the token from HASHI_TOKEN each time it starts,\n# so add the export line to your shell profile too."
+        ),
         "mcpJson": serde_json::to_string_pretty(&json!({
             "mcpServers": { "hashi": {
                 "type": "http",
@@ -120,6 +123,69 @@ pub fn snippets(base: &str, token: &str) -> Value {
             }}
         })).unwrap_or_default(),
     })
+}
+
+/// One-click MCP install links for the HTTP MCP server at `<base>/mcp`.
+///
+/// Formats, from each editor's own documentation:
+/// - Cursor (<https://cursor.com/docs/context/mcp/install-links>):
+///   `cursor://anysphere.cursor-deeplink/mcp/install?name=<name>&config=<base64 JSON>`,
+///   where the JSON is the server's `mcp.json` entry without its name.
+/// - VS Code (<https://code.visualstudio.com/api/extension-guides/ai/mcp>):
+///   `vscode:mcp/install?<encodeURIComponent(JSON)>`, where the JSON is the
+///   server configuration with a `name` field.
+#[must_use]
+pub fn install_links(base: &str, token: &str) -> Value {
+    let url = format!("{base}/mcp");
+    let auth = format!("Bearer {token}");
+    let cursor = json!({ "url": url, "headers": { "Authorization": auth } }).to_string();
+    let vscode = json!({
+        "name": "hashi",
+        "type": "http",
+        "url": url,
+        "headers": { "Authorization": auth },
+    })
+    .to_string();
+    json!({
+        "cursor": format!(
+            "cursor://anysphere.cursor-deeplink/mcp/install?name=hashi&config={}",
+            percent_encode(&base64(cursor.as_bytes()))
+        ),
+        "vscode": format!("vscode:mcp/install?{}", percent_encode(&vscode)),
+    })
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let at = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let n = (at(0) << 16) | (at(1) << 8) | at(2);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                let six = (n >> (18 - 6 * i)) & 63;
+                out.push(char::from(ALPHABET[six as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Percent-encodes everything but ASCII letters, digits and `-_.~`.
+fn percent_encode(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 pub(super) async fn create(
@@ -296,6 +362,7 @@ fn redeem_code(state: &AppState, body: ClaimJson) -> ApiResult<(StatusCode, Json
                     "limits": token.limits,
                     "expiresAt": token.expires_at.and_then(rfc3339),
                     "snippets": snippets(&base, &secret.raw),
+                    "installLinks": install_links(&base, &secret.raw),
                 })),
             ))
         }
@@ -336,6 +403,54 @@ mod tests {
             ..body("alice")
         };
         assert!(validate_new_invite(b).is_err());
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        for (input, want) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), want);
+        }
+    }
+
+    #[test]
+    fn percent_encode_keeps_only_unreserved() {
+        assert_eq!(
+            percent_encode("a+b/c=d e\"\u{e9}"),
+            "a%2Bb%2Fc%3Dd%20e%22%C3%A9"
+        );
+        assert_eq!(percent_encode("Az09-_.~"), "Az09-_.~");
+    }
+
+    #[test]
+    fn install_links_follow_the_documented_formats() {
+        let l = install_links("https://h.example", "hashi_abc");
+        let cursor = l["cursor"].as_str().unwrap();
+        let prefix = "cursor://anysphere.cursor-deeplink/mcp/install?name=hashi&config=";
+        let config = cursor.strip_prefix(prefix).unwrap();
+        let want = json!({
+            "url": "https://h.example/mcp",
+            "headers": { "Authorization": "Bearer hashi_abc" },
+        })
+        .to_string();
+        assert_eq!(config, percent_encode(&base64(want.as_bytes())));
+
+        let vscode = l["vscode"].as_str().unwrap();
+        let encoded = vscode.strip_prefix("vscode:mcp/install?").unwrap();
+        let want = json!({
+            "name": "hashi",
+            "type": "http",
+            "url": "https://h.example/mcp",
+            "headers": { "Authorization": "Bearer hashi_abc" },
+        })
+        .to_string();
+        assert_eq!(encoded, percent_encode(&want));
+        assert!(!encoded.contains(['{', '"', ' ', '&', '#']));
     }
 
     #[test]

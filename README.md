@@ -110,7 +110,8 @@ This prints a one-time link like `https://your-host/claim/hashi_inv_…` (for pe
 - **Limits.** Prompts per UTC day or month, reported spend per day or month (Claude Code and opencode report cost), and prompts in flight (3 by default). Over a cap, she gets `429 limit_reached` with the time it resets.
 - **Control.** Pause, extend or revoke from the dashboard (`3`, then `p` or `d`), with `hashi token update`, or over the API. Revoking stops her running prompts at once. Every change is recorded in `hashi audit`.
 - **Self-service.** `/me` is a page where she pastes her token to see her status, limits and today's use.
-- **From her own agent.** Hashi is an MCP server at `/mcp`, so she can add your agents as tools in her Claude Code or Cursor. The claim page shows the exact command.
+- **From her own agent.** Hashi is an MCP server at `/mcp`, so she can add your agents as tools in her Claude Code or Cursor. The claim page shows the exact command, plus one-click Add to Cursor and Add to VS Code buttons.
+- **One command.** Instead of clicking, she can copy the setup command from the claim page: it installs Hashi from GitHub and runs `hashi connect` with her link, so `hashi ask --remote "..."` works straight away. See [connecting to someone else's Hashi](docs/configuration.md#connecting-to-someone-elses-hashi).
 
 ## Supported agents
 

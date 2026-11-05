@@ -61,6 +61,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_setup_is_built_only_from_checked_parts() {
+        // The link goes inside single quotes in sh and PowerShell, so it must
+        // only ever be an origin and a code that cannot contain a quote.
+        assert!(
+            JS.contains("if (!SAFE_ORIGIN.test(origin) || !SAFE_CODE.test(code)) return null;")
+        );
+        assert!(JS.contains(r"const SAFE_CODE = /^hashi_inv_[0-9a-f]{16,118}$/;"));
+        assert!(JS.contains("HASHI_CONNECT='${link}' sh"));
+        assert!(CLAIM_HTML.contains("id=\"setup-sh\"") && CLAIM_HTML.contains("id=\"setup-ps\""));
+    }
+
+    #[test]
     fn pages_have_no_inline_script() {
         for page in [CLAIM_HTML, ME_HTML] {
             assert_eq!(page.matches("<script").count(), 1);

@@ -12,6 +12,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - Update check: on start, Hashi asks GitHub for the latest release at most once a day (cached in `~/.hashi/update-check.json`, failures included) and the dashboard header shows `update vX.Y.Z: hashi update` when one is out. Headless mode logs one line. Turn it off with `--no-update-check` or `HASHI_NO_UPDATE_CHECK=1`.
 - `hashi update [--check] [--version vX.Y.Z] [--yes]` downloads the release archive for your platform, verifies its SHA-256 checksum, checks that the new binary reports the expected version and replaces the running one. It refuses Cargo installs and directories you cannot write to.
 - `hashi doctor` shows the current and latest version and whether an update is available.
+- `hashi connect <invite link>` redeems an invite from the terminal and saves the token in an owner-only `~/.hashi/remotes.json`; `--setup claude` also runs `claude mcp add`. `hashi remote list` and `hashi remote remove` manage saved bridges.
+- `hashi ask --remote [<name>] "<prompt>"` sends a prompt to a saved bridge and waits for the answer.
+- The claim page offers "Set up from a terminal": one command (sh or PowerShell) that installs Hashi and connects it with the invite link. The installers run `hashi connect "$HASHI_CONNECT"` when `HASHI_CONNECT` is set.
+- After claiming, the claim page has Add to Cursor and Add to VS Code buttons and a Codex MCP snippet (`codex mcp add --url ... --bearer-token-env-var`).
 
 ## [0.2.0] - 2026-11-05
 

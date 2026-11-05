@@ -10,6 +10,7 @@ pub mod maintenance;
 pub mod mcp;
 pub mod net;
 pub mod queue;
+pub mod remote;
 pub mod server;
 pub mod shutdown;
 pub mod store;
