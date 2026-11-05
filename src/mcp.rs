@@ -216,7 +216,9 @@ fn tools(state: &AppState, agents: &[AgentKind]) -> Vec<Value> {
     list.push(json!({
         "name": "my_usage",
         "description": "Show this token's access: status, allowed agents, limits, \
-                        usage today and this month, and when limits reset.",
+                        usage today and this month, and when limits reset. When the \
+                        owner shares usage with this token, also the headroom left \
+                        per agent.",
         "inputSchema": { "type": "object", "properties": {}, "required": [] },
     }));
     list.push(json!({

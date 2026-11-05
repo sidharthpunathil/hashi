@@ -61,6 +61,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- A remote account is no longer marked limited for the hour-long cooldown when the friend's bridge answers `too_many_pending` or `rate_limited`, which any one token holder could cause with a burst. Those, and an unreachable bridge, now back the account off for 5 seconds, doubling up to 60, and a success clears it. Only `limit_reached` marks it limited until its reset.
+- A run that fails on a remote account's bridge shows token holders "the run failed" instead of the bridge's error (such as "the bridge answered 413"); the owner sees the detail in the log and the dashboard. A prompt that would pass the friend's 64 KB body limit once forwarded is refused locally with `413 too_large`.
+- The ask-access page no longer forgets the pickup secret when a status check fails on the network or with a server error. It forgets it only on a definite answer (an unknown secret, or a declined, collected or expired request), shows "retrying…" and checks again after 10, 20, 40 and then every 60 seconds.
+- OpenAI-compatible streams on a request that stays queued (a paused token, a machine short of memory) no longer stay open forever: a stream ends with an error chunk and `[DONE]` when its token stops being active, or after twice the run timeout plus 10 seconds, which frees its wait slot.
+- Requests for more from token holders have their own cap of 200 pending, so new-person requests filling the 200 for the ask-access link no longer block them.
+- The docs said the MCP tools carry no usage figures; `my_usage` returns `/v1/me`, so it includes `agentUsage` when the owner turned on `shareUsage`. The docs now say so.
 - The dashboard picked up finished background work only while nothing animated, so a bridge's answer or a connect result waited until its own spinner stopped, which it never did.
 
 ## [0.2.0] - 2026-11-05
