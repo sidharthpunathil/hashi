@@ -5,8 +5,8 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | Flag | Env | Default |
 |---|---|---|
 | `--home` | `HASHI_HOME` | `~/.hashi` |
-| `--bind` | `HASHI_BIND` | `127.0.0.1` |
-| `--port` | `HASHI_PORT` | `7878` |
+| `--bind` | `HASHI_BIND` | `127.0.0.1`, or the one saved from the dashboard in `~/.hashi/settings.json` (see [settings.json](#settingsjson)) |
+| `--port` | `HASHI_PORT` | `7878`, or the one saved from the dashboard in `~/.hashi/settings.json` |
 | `--tunnel` | `HASHI_TUNNEL` | off |
 | `--tailscale serve\|funnel` | `HASHI_TAILSCALE` | off. Go public through Tailscale Serve (your tailnet) or Funnel (the internet); see [remote access](remote-access.md#tailscale-serve-and-funnel). Not with `--tunnel` |
 | `--tailscale-port` | `HASHI_TAILSCALE_PORT` | `443`. HTTPS port for `--tailscale` (Funnel: 443, 8443 or 10000) |
@@ -169,13 +169,17 @@ hashi ask --remote work "Explain main.rs" -a codex
 
 Run `hashi` in a terminal and the dashboard takes over the screen. When stdout is not a terminal, or with `--headless`, Hashi prints plain log lines instead.
 
+Nearly everything the CLI does can be done from the dashboard, through the same library code. The two exceptions are `hashi serve` (the dashboard is the running server, and its flags apply only at start) and `hashi uninstall`. A test walks the command tree and fails when a new subcommand has no place in the dashboard.
+
 | Key | Action |
 |---|---|
 | `1` `2` `3` `4` `5`, `Tab`, `h` `l` | Overview, Requests, Tokens, Logs, Commands |
 | `↑` `↓` / `j` `k` | Move the selection |
 | `PgUp` `PgDn` / `J` `K` | Scroll the request detail |
 | `Enter` | Run the selected row (Commands view) |
+| `a` | Ask an agent: the prompt popup (any view) |
 | `n` / `d` | Create a token (Tokens and Commands views) / revoke one (Tokens view) |
+| `e` | Edit the selected token: name, note, expiry, limits, accounts and project (Tokens view) |
 | `s` | Share: create an invite link (Tokens and Commands views) |
 | `p` | Pause or resume the selected token |
 | `i` / `x` | Switch to pending invites / cancel one |
@@ -188,21 +192,66 @@ Run `hashi` in a terminal and the dashboard takes over the screen. When stdout i
 | `q` | Quit and stop the bridge. Asks first while requests are in flight |
 | `Ctrl-C` | Quit immediately |
 
+No two actions in one view share a key. Forms move between fields with `↑` `↓` or `Tab`, change a choice with `←` `→` or space, save with `Enter` and cancel with `Esc`; a field that fails shows why next to it. Keys and other secrets typed into a form are masked and never reach the log.
+
 ### Commands view
 
 Tab `5` lists everything the owner can do, grouped, one row each with its key (or `enter`), what it does, its state right now and the command that does the same from a terminal:
 
-| Group | Rows |
-|---|---|
-| Go public | Cloudflare quick tunnel (`t`), Tailscale serve, Tailscale funnel, stop going public |
-| Share | new invite (`s`), new token (`n`) |
-| Install | cloudflared, tailscale |
-| Maintenance | check for updates (shows `hashi update` when one is out), copy the API URL (`c`) |
-| Help | all key bindings (`?`) |
+| Group | Rows | Same from a terminal |
+|---|---|---|
+| Go public | Cloudflare quick tunnel (`t`), Tailscale serve, Tailscale funnel, stop going public | `hashi serve --tunnel`, `--tailscale serve`, `--tailscale funnel` |
+| Share | new invite (`s`), new token (`n`) | `hashi share`, `hashi token create` |
+| Ask | ask an agent (`a`) | `hashi ask`, `hashi ask --remote` |
+| Manage | accounts, projects, bridges I use, connect to a bridge | `hashi account`, `hashi project`, `hashi remote`, `hashi connect` |
+| Server | port and bind address, copy the API URL (`c`) | `hashi serve --port --bind` |
+| Install | cloudflared, tailscale, Crush | `hashi install cloudflared\|tailscale\|crush` |
+| Maintenance | check for updates, install the update, doctor, diagnostic report, audit log | `hashi update [--check]`, `hashi doctor`, `hashi report`, `hashi audit` |
+| Help | all key bindings (`?`) | `hashi --help` |
 
-States include "live at <url>", "starting", "approve at <url>", "not installed" and "signed out". In an install popup, `enter` runs the command with the terminal attached and brings the dashboard back afterwards, `c` copies it and `esc` cancels. Ctrl-C while it runs goes to the install, not to Hashi.
+States include "live at <url>", "starting", "approve at <url>", "not installed" and "signed out". In an install popup, `enter` runs the command with the terminal attached and brings the dashboard back afterwards, `c` copies it and `esc` cancels. Ctrl-C while it runs goes to the install, not to Hashi. Signing an account in and installing an update step aside the same way.
 
-Running requests count up their elapsed time, and every status pairs a symbol with its colour (`✓` done, `✗` failed, `◌` queued, a spinner for running). Body text uses your terminal's own foreground colour, so light and dark themes both stay readable.
+### What each popup does
+
+| Popup | Keys | Notes |
+|---|---|---|
+| Ask | `Tab` field, `←` `→` change, `Enter` new line in the prompt, `Ctrl-S` send | Choose this Hashi or a saved bridge, the agent, and (here) the account. A local prompt goes through the normal queue as the oldest active admin token, so limits and the queue apply and it shows in Requests, where its answer appears in the detail. Picking an account runs that prompt on it only. A bridge's answer opens in its own popup |
+| Edit token | `↑` `↓` field, `←` `→` project, `Enter` save | Expiry takes days from now or `never`; empty keeps it. Empty limits mean none. Uses the same update as `hashi token update` and `PATCH /v1/tokens/{id}` |
+| Accounts | `a` add, `l` sign in again, `d` disable, `e` enable, `x` remove | Adding a login account steps aside for the agent's own sign-in, as `hashi account add` does. A key account takes the key in a masked field and stores it owner-only |
+| Projects | `a` add, `e` edit, `x` remove | The same checks as `hashi project add` and `update`. Removing a project with bound tokens puts them back on their own workspace; its folder is never touched |
+| Bridges I use | `c` connect, `a` ask it, `x` forget | Names and URLs only, never tokens. Connect takes a pasted invite link and saves it as `hashi connect` does |
+| Audit log | `↑` `↓`, `PgUp` `PgDn` | The last 500 entries, newest first |
+| Doctor | `u` check for updates, `r` recheck | Agents with versions, Crush, cloudflared, Tailscale and its sign-in state, accounts, the update state, the home and the resource guard |
+| Diagnostic report | `←` `→` change, `Enter` write | `include prompts` is off by default. Saves in the current folder (like `hashi report`) or in `~/.hashi/reports/`, owner-only, and shows the path with `c` to copy it |
+| Install the update | `y` / `n` | Steps aside for `hashi update`, then says to quit and start Hashi again |
+| Port and bind address | `↑` `↓` field, `←` `→` change, `Enter` move | See below |
+
+The invite popup also shows the link as a QR code when the terminal has room, and asks for a larger one otherwise.
+
+### Moving the server
+
+The port and bind address row moves a running server without stopping it. Choose a port (1 to 65535) and a bind address: `127.0.0.1` (this machine), `0.0.0.0` or `::` (all interfaces), or a typed IP such as a Tailscale address.
+
+1. The new address is bound first. If that fails (the port is in use, the address is not on this machine, permission denied), the form says so next to the field and the server keeps serving where it was.
+2. The server serves on the new address with the same TLS settings, connection cap and limits, and the URL in the header changes.
+3. The old address stops taking connections, finishes its open requests within the usual 10 second grace period, and closes.
+
+Queued and running prompts carry on: they live in the queue, not the listener. A Cloudflare quick tunnel or a Tailscale route that is up is restarted on the new port. A named tunnel cannot be retargeted by Hashi: change the port of its hostname in the Cloudflare dashboard too. A bind outside loopback without TLS asks first, with the warning `hashi serve` prints.
+
+### settings.json
+
+With "keep for next start" on (the default), the move is saved in `~/.hashi/settings.json`, readable only by you:
+
+```json
+{
+  "port": 9000,
+  "bind": "127.0.0.1"
+}
+```
+
+At startup each value comes from, in order: its flag (`--port`, `--bind`), its environment variable (`HASHI_PORT`, `HASHI_BIND`), `settings.json`, then the default (`7878`, `127.0.0.1`). When a flag or variable is set, the form says it wins over the saved value at the next start. A file that cannot be read is ignored with a warning in the log. `hashi uninstall` counts `settings.json` and `reports/` as Hashi's own.
+
+Running requests count up their elapsed time, and every status pairs a symbol with its colour (`✓` done, `✗` failed, `◌` queued, a spinner for running). Body text uses your terminal's own foreground colour, so light and dark themes both stay readable, and `HASHI_REDUCED_MOTION=1` freezes the animation.
 
 ## Installer options
 

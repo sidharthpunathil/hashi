@@ -104,6 +104,10 @@ Hashi also speaks the OpenAI chat API at `/v1/chat/completions` and `/v1/models`
   <img src="assets/dashboard.png" alt="Hashi terminal dashboard: agent cards with their state, request counters and a live activity feed" width="900">
 </p>
 
+## The dashboard
+
+Running `hashi` in a terminal opens a live dashboard, and nearly everything the CLI does can be done from it: create, edit, pause and revoke tokens, share invite links (with a QR code), ask an agent (`a`, through the normal queue, or on a bridge you connected to), manage accounts and projects, connect to someone else's Hashi, go public with Cloudflare or Tailscale, move the server to another port or address without stopping it, read the audit log, run the doctor, write a diagnostic report and install an update. Tab `5`, Commands, lists every action with its state and the command that does the same from a terminal, and `?` shows every key. Only `hashi serve` (the dashboard is the server) and `hashi uninstall` stay in the terminal. See [dashboard keys](docs/configuration.md#dashboard-keys).
+
 ## Sharing with people
 
 ### Projects
