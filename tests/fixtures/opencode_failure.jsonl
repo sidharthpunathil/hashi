@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1762336800123,"sessionID":"ses_hashi7f3a9c21","part":{"id":"prt_01JC9A","sessionID":"ses_hashi7f3a9c21","messageID":"msg_01JC9A","type":"step-start"}}
+{"type":"error","timestamp":1762336800500,"sessionID":"ses_hashi7f3a9c21","error":{"type":"api","message":"Invalid API key","status":401}}
