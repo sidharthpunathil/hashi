@@ -47,7 +47,10 @@ fn modal(title: &str) -> Block<'_> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(t::fg(t::PURPLE))
-        .title(Span::styled(format!(" {title} "), t::bold(t::PINK)))
+        .title(Span::styled(
+            format!(" {} ", super::one_line(title)),
+            t::bold(t::PINK),
+        ))
 }
 
 fn state_style(state: &str) -> Style {

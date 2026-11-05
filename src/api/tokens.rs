@@ -133,7 +133,16 @@ where
 
 fn validate_name(name: &str) -> ApiResult<String> {
     let name = name.trim();
-    if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+    // Bidi and other format characters (zero-width spaces, the byte order
+    // mark) are invisible and can make a name display as something else.
+    if name.is_empty()
+        || name.chars().count() > 100
+        || name.chars().any(|c| {
+            c.is_control()
+                || crate::diagnostics::is_bidi_control(c)
+                || crate::diagnostics::is_format_char(c)
+        })
+    {
         return Err(ApiError::BadRequest(
             "name must be 1 to 100 printable characters".to_owned(),
         ));
@@ -509,6 +518,21 @@ mod tests {
             project: None,
             share_usage: None,
         }
+    }
+
+    #[test]
+    fn names_with_bidi_or_format_characters_are_refused() {
+        for bad in [
+            "bob\u{202e}exe.txt",
+            "a\u{2066}b",
+            "zero\u{200b}width",
+            "bom\u{feff}",
+            "rlm\u{200f}",
+            "joiner\u{200d}x",
+        ] {
+            assert!(validate_name(bad).is_err(), "{bad:?} was accepted");
+        }
+        assert_eq!(validate_name("  名前 🇺🇸 ok ").unwrap(), "名前 🇺🇸 ok");
     }
 
     #[test]

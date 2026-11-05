@@ -14,6 +14,7 @@ use ratatui::widgets::{
 use super::app::{
     Action, App, FeedItem, Popup, ShareForm, Tab, TokenForm, TokensFocus, TunnelState,
 };
+use super::one_line;
 use super::theme::{self as t, Rgb};
 use crate::agent::AgentKind;
 use crate::guard::HoldReason;
@@ -21,7 +22,7 @@ use crate::install::Helper;
 use crate::store::{Request, RequestStatus};
 use crate::tailscale::Mode;
 use crate::token::{Role, SessionMode, Token, TokenStatus};
-use crate::util::{human_age, human_bytes, human_duration, one_line, truncate};
+use crate::util::{human_age, human_bytes, human_duration, truncate};
 
 pub(super) const PANEL: Rgb = Rgb(22, 16, 42);
 pub(super) const SELECT: Rgb = Rgb(46, 32, 92);
@@ -58,8 +59,31 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
     render_footer(app, frame, footer);
 
-    if let Some(popup) = app.popup.clone() {
-        render_popup(app, frame, &popup);
+    // Borrowed, not cloned: a form can hold a typed key.
+    if let Some(popup) = app.popup.as_ref() {
+        render_popup(app, frame, popup);
+    }
+    scrub(frame.buffer_mut());
+}
+
+/// Drops control and format characters (bidi controls, zero-width spaces)
+/// from every cell, so nothing a prompt, a name or a remote's answer holds
+/// can reorder or hide text on the owner's terminal, whichever widget drew
+/// it. Cells are checked for being plain ASCII first, which almost all are.
+pub fn scrub(buf: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buf.content {
+        let sym = cell.symbol();
+        if sym.bytes().all(|b| (0x20..0x7f).contains(&b))
+            || !crate::diagnostics::needs_display_cleaning(sym)
+        {
+            continue;
+        }
+        let clean = crate::diagnostics::display_line(sym);
+        if clean.is_empty() {
+            cell.set_symbol(" ");
+        } else {
+            cell.set_symbol(&clean);
+        }
     }
 }
 
@@ -811,7 +835,10 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
                     format!("{} {}", t::agent_glyph(r.agent), r.agent),
                     t::fg(t::agent_color(r.agent)),
                 )),
-                Cell::from(Span::styled(truncate(&r.token_name, 12), plain())),
+                Cell::from(Span::styled(
+                    truncate(&one_line(&r.token_name), 12),
+                    plain(),
+                )),
                 Cell::from(Span::styled(human_age(r.created_at), t::muted())),
                 Cell::from(Span::styled(took, t::muted())),
                 Cell::from(Span::styled(
@@ -1220,7 +1247,7 @@ fn render_invites(app: &mut App, frame: &mut Frame, area: Rect) {
             Row::new(vec![
                 Cell::from(Line::from(vec![
                     Span::styled("◌ ", t::fg(t::ORCHID)),
-                    Span::styled(inv.label.clone(), strong()),
+                    Span::styled(one_line(&inv.label), strong()),
                 ])),
                 Cell::from(Span::styled(human_until(inv.expires_at), plain())),
                 Cell::from(Span::styled(
@@ -1331,7 +1358,7 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
                 },
             );
             Row::new(vec![
-                Cell::from(Span::styled(tk.name.clone(), strong())),
+                Cell::from(Span::styled(one_line(&tk.name), strong())),
                 Cell::from(token_status_span(tk, now)),
                 Cell::from(today_span(app, tk)),
                 Cell::from(Span::styled(
@@ -1711,14 +1738,14 @@ pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-pub(super) fn modal<'a>(title: &'a str) -> Block<'a> {
+pub(super) fn modal(title: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(t::fg(t::PURPLE))
         .style(Style::new().bg(PANEL.into()).fg(TEXT.into()))
         .title(Line::from(vec![
             Span::styled(" ✦ ", t::bold(t::SPARK)),
-            Span::styled(title, t::bold(t::PINK)),
+            Span::styled(one_line(title), t::bold(t::PINK)),
             Span::raw(" "),
         ]))
         .padding(Padding::new(2, 2, 1, 0))

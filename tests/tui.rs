@@ -2523,3 +2523,110 @@ fn a_remote_account_needs_a_saved_bridge_and_a_good_name() {
             .is_none()
     );
 }
+
+// ── hostile text ───────────────────────────────────────────────────────────
+
+/// Every cell symbol that would send a control, bidi or other format
+/// character to the terminal.
+fn invisible_cells(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+    buf.content
+        .iter()
+        .map(|c| c.symbol().to_owned())
+        .filter(|s| {
+            s.chars().any(|c| {
+                c.is_control()
+                    || hashi::diagnostics::is_bidi_control(c)
+                    || hashi::diagnostics::is_format_char(c)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn bidi_and_zero_width_characters_never_reach_the_terminal() {
+    const EVIL: &str = "x \u{202e}cod.exe\u{2066}\u{200b}\u{200d}\u{feff}\u{200f} ok";
+    let st = state();
+    let (tok, _) = st
+        .store
+        .create_token(&NewToken {
+            name: format!("bob{EVIL}"),
+            role: Role::User,
+            session_mode: SessionMode::Stateless,
+            agents: AgentKind::ALL.to_vec(),
+            expires_in_days: None,
+            note: None,
+            limits: Default::default(),
+            accounts: Default::default(),
+            project: None,
+        })
+        .unwrap();
+    st.store
+        .insert_request(NewRequest {
+            id: "99999999-0000-4000-8000-000000000000",
+            token: &tok,
+            agent: AgentKind::Claude,
+            model: None,
+            message: &format!("hi {EVIL}"),
+        })
+        .unwrap();
+    let mut app = App::new(st, None, false);
+    let edit = app
+        .tokens
+        .iter()
+        .find(|t| t.name.starts_with("bob"))
+        .map(|t| Popup::EditToken(Box::new(EditTokenForm::new(t, Vec::new()))))
+        .unwrap();
+    let popups = [
+        Popup::Reveal {
+            title: EVIL.into(),
+            secret: "s".into(),
+        },
+        Popup::InviteReveal {
+            label: EVIL.into(),
+            code: "abc".into(),
+            link_hours: 1,
+        },
+        Popup::RemoteAnswer {
+            remote: EVIL.into(),
+            answer: Some(Ok(EVIL.into())),
+            scroll: 0,
+        },
+        edit,
+    ];
+    let check = |app: &mut App, what: &str| {
+        let mut term = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        term.draw(|f| ui::render(app, f)).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("cod.exe"), "{what}: the text is still shown");
+        let bad = invisible_cells(term.backend().buffer());
+        assert!(
+            bad.is_empty(),
+            "{what}: invisible characters drawn: {bad:?}"
+        );
+    };
+    for tab in ['2', '3'] {
+        app.on_key(key(KeyCode::Char(tab)));
+        check(&mut app, &format!("tab {tab}"));
+    }
+    for popup in popups {
+        let what = format!("{popup:?}");
+        app.popup = Some(popup);
+        check(&mut app, &what);
+    }
+}
+
+#[test]
+fn scrub_removes_format_characters_from_any_widget() {
+    let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 1));
+    buf.set_string(0, 0, "a\u{202e}b\u{200b}c", ratatui::style::Style::new());
+    ui::scrub(&mut buf);
+    assert!(invisible_cells(&buf).is_empty());
+    let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+    assert!(text.starts_with("abc"), "{text:?}");
+}

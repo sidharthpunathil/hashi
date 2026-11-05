@@ -338,6 +338,61 @@ pub fn neutralize_controls(s: &str, keep_lines: bool) -> String {
         .collect()
 }
 
+/// Format characters (Unicode category Cf): bidi controls, zero-width
+/// spaces and joiners, the byte order mark, invisible operators, tags and
+/// the like. None of them draws anything, and several reorder or hide the
+/// text around them.
+#[must_use]
+pub fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
+/// `s` for display on one line of the dashboard: newlines, tabs and carriage
+/// returns become spaces, and every other control character (C0, DEL, C1)
+/// and every format character ([`is_format_char`], which covers the bidi
+/// controls) is dropped. Unlike [`neutralize_controls`] nothing is put in
+/// their place, so the text keeps its width.
+#[must_use]
+pub fn display_line(s: &str) -> String {
+    s.chars()
+        .filter_map(|c| match c {
+            '\n' | '\t' | '\r' => Some(' '),
+            c if c.is_control() || is_format_char(c) || is_bidi_control(c) => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Whether `s` holds anything [`display_line`] would change.
+#[must_use]
+pub fn needs_display_cleaning(s: &str) -> bool {
+    s.chars()
+        .any(|c| c.is_control() || is_format_char(c) || is_bidi_control(c))
+}
+
 /// `s` made safe to print on one terminal line: control and bidi characters
 /// are neutralised, then secrets and the home directory are redacted as in
 /// the log.
@@ -1306,5 +1361,24 @@ mod tests {
         let text = crash_text(&format!("bad {}", token()), "src/x.rs:1:1", "main", "");
         assert!(text.contains("hashi_1a2b…[redacted]"));
         assert!(text.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn display_line_drops_bidi_zero_width_and_controls() {
+        let s = "a\u{202e}b\u{2066}c\u{200b}d\u{200d}e\u{feff}f\u{1b}[2Jg\u{9b}h\u{e0041}i\nj\tk";
+        assert_eq!(display_line(s), "abcdef[2Jghi j k");
+        assert!(needs_display_cleaning(s));
+        assert!(!needs_display_cleaning("plain 名前 🇺🇸 X\u{301}"));
+        assert_eq!(
+            display_line("plain 名前 🇺🇸 X\u{301}"),
+            "plain 名前 🇺🇸 X\u{301}"
+        );
+        for c in [
+            '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}', '\u{200b}', '\u{200f}', '\u{feff}',
+        ] {
+            assert!(is_format_char(c), "{:?}", c);
+        }
+        // The existing helper keeps its placeholder behaviour.
+        assert_eq!(neutralize_controls("a\u{202e}b", false), "a?b");
     }
 }
