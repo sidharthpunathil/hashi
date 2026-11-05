@@ -280,6 +280,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Tab::Requests => &[
             ("↑↓", "select"),
             ("PgUp/PgDn", "scroll"),
+            ("x", "cancel"),
             ("c", "copy url"),
             ("?", "help"),
             ("q", "quit"),
@@ -1403,7 +1404,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 ("p", "pause or resume token (Tokens view)"),
                 ("s", "share: create an invite link (Tokens view)"),
                 ("i", "switch between tokens and invites"),
-                ("x", "cancel pending invite (Tokens view)"),
+                ("x", "cancel invite (Tokens) or request (Requests)"),
                 ("r", "refresh now"),
                 ("?", "this help"),
                 ("q", "quit (asks first if work is running)"),
@@ -1508,6 +1509,24 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
             ];
             frame.render_widget(Clear, rect);
             frame.render_widget(Paragraph::new(lines).block(modal("revoke token")), rect);
+        }
+        Popup::ConfirmCancelRequest { token, .. } => {
+            let rect = centered(area, 56, 8);
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled("Cancel this request from ", plain()),
+                    Span::styled(token.clone(), t::bold(t::PINK)),
+                    Span::styled("?", plain()),
+                ]),
+                Line::from(Span::styled(
+                    "A running agent is stopped. This is audited.",
+                    t::muted(),
+                )),
+                Line::raw(""),
+                key_hint(&[("y", "cancel request"), ("n", "keep")]),
+            ];
+            frame.render_widget(Clear, rect);
+            frame.render_widget(Paragraph::new(lines).block(modal("cancel request")), rect);
         }
         Popup::ConfirmCancelInvite { label, .. } => {
             let rect = centered(area, 56, 8);

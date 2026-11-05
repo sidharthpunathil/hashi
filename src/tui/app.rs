@@ -337,6 +337,13 @@ pub enum Popup {
         /// How long the link stays valid.
         link_hours: u32,
     },
+    /// Request cancellation confirmation.
+    ConfirmCancelRequest {
+        /// Request id.
+        id: String,
+        /// Who sent it.
+        token: String,
+    },
     /// Invite cancellation confirmation.
     ConfirmCancelInvite {
         /// Invite id.
@@ -740,6 +747,16 @@ impl App {
                     });
                 }
             }
+            KeyCode::Char('x') if self.tab == Tab::Requests => match self.selected_request() {
+                Some(r) if !r.status.is_terminal() => {
+                    self.popup = Some(Popup::ConfirmCancelRequest {
+                        id: r.id.clone(),
+                        token: r.token_name.clone(),
+                    });
+                }
+                Some(_) => self.notify("only queued or running requests can be cancelled"),
+                None => {}
+            },
             KeyCode::Char('p')
                 if self.tab == Tab::Tokens && self.tokens_focus == TokensFocus::Tokens =>
             {
@@ -785,6 +802,14 @@ impl App {
                 }
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
                 _ => Some(Popup::ConfirmRevoke { id, name }),
+            },
+            Popup::ConfirmCancelRequest { id, token } => match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.cancel_request(id);
+                    None
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => None,
+                _ => Some(Popup::ConfirmCancelRequest { id, token }),
             },
             Popup::ConfirmCancelInvite { id, label } => match key.code {
                 KeyCode::Char('y' | 'Y') => {
@@ -941,6 +966,27 @@ impl App {
             Err(e) => self.notify(format!("cancel failed: {e}")),
         }
         self.refresh();
+    }
+
+    /// Cancels a request through [`crate::queue::cancel`]. Stopping a run
+    /// waits for its process tree to go, so it runs as a task and reports
+    /// through the event feed.
+    fn cancel_request(&mut self, id: String) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            self.notify("cannot cancel: the server is not running");
+            return;
+        };
+        let state = self.state.clone();
+        rt.spawn(async move {
+            use crate::queue::{CancelBy, CancelOutcome, cancel};
+            match cancel(&state, &id, CancelBy::Other("dashboard")).await {
+                Ok(CancelOutcome::Cancelled(_)) => {}
+                Ok(CancelOutcome::Finished(_)) => state.bus.log("request already finished"),
+                Ok(CancelOutcome::NotFound) => state.bus.log("request no longer exists"),
+                Err(e) => state.bus.log(format!("cancel failed: {e}")),
+            }
+        });
+        self.notify("cancelling request");
     }
 
     fn toggle_pause(&mut self) {

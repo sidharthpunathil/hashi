@@ -1,0 +1,589 @@
+//! OpenAI-compatible endpoints: `POST /v1/chat/completions` and
+//! `GET /v1/models`.
+//!
+//! The same bearer tokens work here, and every prompt goes through
+//! [`submit`], so pause, scope, limits, queue and account rules apply exactly
+//! as they do for `POST /v1/ask`. `model` picks the agent (`claude`) and can
+//! carry the agent's own model after a slash (`claude/opus`).
+//!
+//! Errors use OpenAI's shape, `{"error": {"message", "type", "code"}}`, with
+//! the same status codes as the rest of the API. Tool calling, images and
+//! token-by-token streaming are not supported: `stream: true` sends the whole
+//! answer as one chunk once the run finishes, with comment lines as
+//! keep-alives until then. Unknown fields such as `temperature` and `tools`
+//! are ignored.
+
+use std::convert::Infallible;
+use std::time::Duration;
+
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::sse::{Event as SseEvent, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::sync::broadcast::error::RecvError;
+
+use super::{
+    ApiError, AppState, Auth, MAX_WAIT_SECS, SubmitInput, ask::MAX_WAITS_PER_TOKEN, submit,
+    wait_until_done,
+};
+use crate::agent::{AgentKind, Usage};
+use crate::events::Event;
+use crate::store::{Request, RequestStatus};
+
+/// How often a stream sends a `: queued` or `: running` comment while the
+/// request waits or runs.
+pub const STREAM_KEEPALIVE: Duration = Duration::from_secs(1);
+
+/// The OpenAI-compatible routes, merged into the main router.
+pub(super) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/models", get(models))
+}
+
+// ── errors ─────────────────────────────────────────────────────────────────
+
+/// An [`ApiError`] rendered in OpenAI's error shape.
+#[derive(Debug)]
+pub struct OpenAiError(pub ApiError);
+
+impl From<ApiError> for OpenAiError {
+    fn from(e: ApiError) -> Self {
+        Self(e)
+    }
+}
+
+/// OpenAI's error `type` for a status code.
+fn error_type(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        429 => "rate_limit_error",
+        s if s >= 500 => "server_error",
+        _ => "invalid_request_error",
+    }
+}
+
+fn error_object(status: StatusCode, code: &str, message: &str) -> Value {
+    json!({ "message": message, "type": error_type(status), "param": null, "code": code })
+}
+
+impl IntoResponse for OpenAiError {
+    fn into_response(self) -> Response {
+        let e = self.0;
+        let (status, code) = e.parts();
+        let mut error = error_object(status, code, &e.to_string());
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            let error_id = crate::diagnostics::new_error_id();
+            tracing::error!(error_id = %error_id, error = %e.log_detail(), "internal error");
+            if let Some(obj) = error.as_object_mut() {
+                obj.insert("errorId".to_owned(), json!(error_id));
+            }
+        }
+        if let (
+            ApiError::Coded {
+                extra: Some(Value::Object(extra)),
+                ..
+            },
+            Some(obj),
+        ) = (&e, error.as_object_mut())
+        {
+            obj.extend(extra.clone());
+        }
+        let mut res = (status, Json(json!({ "error": error }))).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            res.headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        res
+    }
+}
+
+type OaResult<T> = Result<T, OpenAiError>;
+
+// ── request ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ChatBody {
+    #[serde(default)]
+    model: Option<String>,
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    stream: Option<bool>,
+    #[serde(default)]
+    stream_options: Option<StreamOptions>,
+    /// Hashi extension: seconds to hold a non-streaming request before
+    /// answering 202 (default and maximum [`MAX_WAIT_SECS`]).
+    #[serde(default)]
+    wait: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamOptions {
+    #[serde(default)]
+    include_usage: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatMessage {
+    role: String,
+    #[serde(default)]
+    content: Value,
+}
+
+/// Splits `model` into the agent and the agent's own model: `claude` or
+/// `claude/opus`. With no model the server's default agent answers.
+fn parse_model(model: Option<&str>) -> Result<(Option<AgentKind>, Option<String>), ApiError> {
+    let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) else {
+        return Ok((None, None));
+    };
+    let (agent, sub) = match model.split_once('/') {
+        Some((agent, sub)) => (agent, Some(sub)),
+        None => (model, None),
+    };
+    let agent: AgentKind = agent.parse().map_err(|_| {
+        ApiError::coded(
+            StatusCode::BAD_REQUEST,
+            "model_not_found",
+            format!(
+                "unknown model `{model}`; use an agent name such as claude, codex, gemini, \
+                 opencode, qwen or cursor, optionally followed by /<model>"
+            ),
+        )
+    })?;
+    match sub {
+        Some("") => Err(ApiError::BadRequest(
+            "model is empty after the slash; use agent or agent/model".to_owned(),
+        )),
+        // `submit` checks the agent's model with `is_safe_arg`.
+        other => Ok((Some(agent), other.map(str::to_owned))),
+    }
+}
+
+fn unsupported_content() -> ApiError {
+    ApiError::coded(
+        StatusCode::BAD_REQUEST,
+        "unsupported_content",
+        "only text content is supported (a string, or parts with type \"text\")",
+    )
+}
+
+/// The text of one message's `content`: a string, or `text` parts.
+fn text_of(content: &Value) -> Result<String, ApiError> {
+    match content {
+        Value::Null => Ok(String::new()),
+        Value::String(s) => Ok(s.clone()),
+        Value::Array(parts) => {
+            let texts = parts
+                .iter()
+                .map(|p| match (p.get("type"), p.get("text")) {
+                    (Some(Value::String(kind)), Some(Value::String(text))) if kind == "text" => {
+                        Ok(text.as_str())
+                    }
+                    _ => Err(unsupported_content()),
+                })
+                .collect::<Result<Vec<&str>, _>>()?;
+            Ok(texts.join("\n"))
+        }
+        _ => Err(unsupported_content()),
+    }
+}
+
+/// Builds one prompt from a chat: system and developer messages first as an
+/// instruction block, then earlier turns as a plain transcript, then the
+/// last user turn. A lone user message is sent as it is.
+fn build_prompt(messages: &[ChatMessage]) -> Result<String, ApiError> {
+    let mut instructions = Vec::new();
+    let mut turns: Vec<(&'static str, String)> = Vec::new();
+    for m in messages {
+        let text = text_of(&m.content)?;
+        match m.role.as_str() {
+            "system" | "developer" => instructions.push(text),
+            "user" => turns.push(("User", text)),
+            "assistant" => turns.push(("Assistant", text)),
+            other => {
+                return Err(ApiError::coded(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported_role",
+                    format!("`{other}` messages are not supported; tool calling is not available"),
+                ));
+            }
+        }
+    }
+    let last = match turns.pop() {
+        Some(("User", text)) => text,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "the last message must be from the user".to_owned(),
+            ));
+        }
+    };
+    let mut prompt = String::new();
+    let instructions: Vec<&str> = instructions
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !instructions.is_empty() {
+        prompt.push_str("Instructions:\n");
+        prompt.push_str(&instructions.join("\n\n"));
+        prompt.push_str("\n\n");
+    }
+    if turns.is_empty() {
+        prompt.push_str(&last);
+    } else {
+        prompt.push_str("Conversation so far:\n\n");
+        for (who, text) in &turns {
+            prompt.push_str(&format!("{who}: {}\n\n", text.trim()));
+        }
+        prompt.push_str(&format!("User: {last}"));
+    }
+    Ok(prompt)
+}
+
+// ── response ───────────────────────────────────────────────────────────────
+
+fn usage_json(usage: Option<Usage>) -> Option<Value> {
+    usage.map(|u| {
+        json!({
+            "prompt_tokens": u.input_tokens,
+            "completion_tokens": u.output_tokens,
+            "total_tokens": u.input_tokens.saturating_add(u.output_tokens),
+        })
+    })
+}
+
+/// Fields every completion and chunk carries.
+#[derive(Debug, Clone)]
+struct Meta {
+    id: String,
+    created: i64,
+    model: String,
+}
+
+impl Meta {
+    fn new(req: &Request, model: String) -> Self {
+        Self {
+            id: format!("chatcmpl-{}", req.id),
+            created: req.created_at / 1000,
+            model,
+        }
+    }
+
+    fn chunk(&self, delta: Value, finish: Option<&str>) -> Value {
+        json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+        })
+    }
+}
+
+fn completion(meta: &Meta, req: &Request) -> Value {
+    let mut v = json!({
+        "id": meta.id,
+        "object": "chat.completion",
+        "created": meta.created,
+        "model": meta.model,
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": req.response.clone().unwrap_or_default() },
+            "finish_reason": "stop",
+        }],
+    });
+    if let (Some(u), Some(obj)) = (usage_json(req.usage), v.as_object_mut()) {
+        obj.insert("usage".to_owned(), u);
+    }
+    v
+}
+
+fn run_failed(req: &Request) -> (StatusCode, Value) {
+    let message = req
+        .error
+        .clone()
+        .unwrap_or_else(|| "the run failed".to_owned());
+    let status = StatusCode::BAD_GATEWAY;
+    (status, error_object(status, "agent_failed", &message))
+}
+
+/// 202 for a request still queued or running when the wait ends.
+fn not_ready(req: &Request) -> Value {
+    json!({
+        "id": req.id,
+        "object": "hashi.request",
+        "status": req.status,
+        "poll": format!("/v1/ask/{}", req.id),
+        "message": format!(
+            "the answer is not ready yet; poll /v1/ask/{} or send \"stream\": true",
+            req.id
+        ),
+    })
+}
+
+fn with_request_id(mut res: Response, id: &str) -> Response {
+    if let Ok(v) = HeaderValue::from_str(id) {
+        res.headers_mut().insert("x-hashi-request-id", v);
+    }
+    res
+}
+
+// ── handlers ───────────────────────────────────────────────────────────────
+
+async fn models(
+    State(state): State<AppState>,
+    auth: Result<Auth, ApiError>,
+) -> OaResult<Json<Value>> {
+    let Auth(token) = auth?;
+    let data: Vec<Value> = AgentKind::ALL
+        .into_iter()
+        .filter(|a| token.allows(*a))
+        .filter(|a| {
+            state
+                .runtime
+                .agents
+                .iter()
+                .any(|i| i.agent == *a && i.available)
+        })
+        .map(|a| json!({ "id": a.as_str(), "object": "model", "created": 0, "owned_by": "hashi" }))
+        .collect();
+    Ok(Json(json!({ "object": "list", "data": data })))
+}
+
+async fn chat_completions(
+    State(state): State<AppState>,
+    auth: Result<Auth, ApiError>,
+    body: Bytes,
+) -> OaResult<Response> {
+    let Auth(token) = auth?;
+    let body: ChatBody = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid request body: {e}")))?;
+    if body.messages.is_empty() {
+        return Err(ApiError::BadRequest("messages must not be empty".to_owned()).into());
+    }
+    let (agent, model) = parse_model(body.model.as_deref())?;
+    let message = build_prompt(&body.messages)?;
+    let shown_model = body
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map_or_else(|| state.default_agent.as_str().to_owned(), str::to_owned);
+    let input = SubmitInput {
+        message,
+        agent: agent.map(|a| a.as_str().to_owned()),
+        model,
+    };
+
+    if body.stream.unwrap_or(false) {
+        // A stream holds a long poll for its whole life; take the slot before
+        // queueing anything, so a refused stream leaves no orphan behind.
+        let Some(slot) = state.waits.try_acquire(&token.id) else {
+            return Err(ApiError::coded(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_waits",
+                format!("this token already holds {MAX_WAITS_PER_TOKEN} open waits or streams"),
+            )
+            .into());
+        };
+        let req = submit(&state, &token, input).await?;
+        let include_usage = body
+            .stream_options
+            .unwrap_or_default()
+            .include_usage
+            .unwrap_or(false);
+        let meta = Meta::new(&req, shown_model);
+        let id = req.id.clone();
+        let (tx, rx) = futures::channel::mpsc::channel::<SseEvent>(16);
+        tokio::spawn(async move {
+            let _slot = slot;
+            stream(&state, &id, &meta, include_usage, tx).await;
+        });
+        let res = Sse::new(rx.map(Ok::<_, Infallible>)).into_response();
+        return Ok(with_request_id(res, &req.id));
+    }
+
+    let req = submit(&state, &token, input).await?;
+    let secs = body.wait.unwrap_or(MAX_WAIT_SECS);
+    let req = wait_until_done(&state, &token.id, &req.id, secs, MAX_WAIT_SECS).await?;
+    let meta = Meta::new(&req, shown_model);
+    let res = match req.status {
+        RequestStatus::Completed => (StatusCode::OK, Json(completion(&meta, &req))).into_response(),
+        RequestStatus::Failed => {
+            let (status, error) = run_failed(&req);
+            (status, Json(json!({ "error": error }))).into_response()
+        }
+        RequestStatus::Queued | RequestStatus::Running => {
+            (StatusCode::ACCEPTED, Json(not_ready(&req))).into_response()
+        }
+    };
+    Ok(with_request_id(res, &req.id))
+}
+
+fn data(v: &Value) -> SseEvent {
+    SseEvent::default().data(v.to_string())
+}
+
+/// Feeds one streamed completion: a role chunk, a comment with the status
+/// every [`STREAM_KEEPALIVE`] until the run ends, then the answer, the
+/// finish chunk and `[DONE]`, or an error event. Stops early if the client
+/// goes away.
+async fn stream(
+    state: &AppState,
+    id: &str,
+    meta: &Meta,
+    include_usage: bool,
+    mut tx: futures::channel::mpsc::Sender<SseEvent>,
+) {
+    // Subscribe before the first read, so a finish in between is not missed.
+    let mut events = state.bus.subscribe();
+    let role = meta.chunk(json!({ "role": "assistant", "content": "" }), None);
+    if tx.send(data(&role)).await.is_err() {
+        return;
+    }
+    let req = loop {
+        let req = match state.store.get_request(id) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                let status = StatusCode::NOT_FOUND;
+                let e = error_object(status, "not_found", "request not found");
+                let _ = tx.send(data(&json!({ "error": e }))).await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(id = %id, error = %e, "stream could not read its request");
+                let status = StatusCode::INTERNAL_SERVER_ERROR;
+                let e = error_object(status, "internal", "internal error");
+                let _ = tx.send(data(&json!({ "error": e }))).await;
+                return;
+            }
+        };
+        if req.status.is_terminal() {
+            break req;
+        }
+        let comment = SseEvent::default().comment(req.status.as_str());
+        if tx.send(comment).await.is_err() {
+            return;
+        }
+        let _ = tokio::time::timeout(STREAM_KEEPALIVE, async {
+            loop {
+                match events.recv().await {
+                    Ok(Event::Started { id: got, .. } | Event::Finished { id: got, .. })
+                        if got == id =>
+                    {
+                        return;
+                    }
+                    // Let the timeout end the wait instead of spinning.
+                    Err(RecvError::Closed) => std::future::pending::<()>().await,
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                }
+            }
+        })
+        .await;
+    };
+    if req.status != RequestStatus::Completed {
+        let (_, e) = run_failed(&req);
+        let _ = tx.send(data(&json!({ "error": e }))).await;
+        return;
+    }
+    let content = meta.chunk(
+        json!({ "content": req.response.clone().unwrap_or_default() }),
+        None,
+    );
+    let finish = meta.chunk(json!({}), Some("stop"));
+    let mut out = vec![data(&content), data(&finish)];
+    if include_usage {
+        out.push(data(&json!({
+            "id": meta.id,
+            "object": "chat.completion.chunk",
+            "created": meta.created,
+            "model": meta.model,
+            "choices": [],
+            "usage": usage_json(req.usage),
+        })));
+    }
+    out.push(SseEvent::default().data("[DONE]"));
+    for ev in out {
+        if tx.send(ev).await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msgs(v: Value) -> Vec<ChatMessage> {
+        serde_json::from_value(v).unwrap_or_default()
+    }
+
+    #[test]
+    fn model_names_pick_the_agent_and_its_model() {
+        assert_eq!(
+            parse_model(Some("claude")).ok(),
+            Some((Some(AgentKind::Claude), None))
+        );
+        assert_eq!(
+            parse_model(Some("claude/opus")).ok(),
+            Some((Some(AgentKind::Claude), Some("opus".to_owned())))
+        );
+        assert_eq!(
+            parse_model(Some("gemini/gemini-2.5-pro")).ok(),
+            Some((Some(AgentKind::Gemini), Some("gemini-2.5-pro".to_owned())))
+        );
+        assert_eq!(parse_model(None).ok(), Some((None, None)));
+        assert!(parse_model(Some("gpt-4o")).is_err());
+        assert!(parse_model(Some("claude/")).is_err());
+    }
+
+    #[test]
+    fn a_lone_user_message_is_the_prompt() {
+        let m = msgs(json!([{ "role": "user", "content": "hello" }]));
+        assert_eq!(build_prompt(&m).ok().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn system_first_then_transcript_then_last_user_turn() {
+        let m = msgs(json!([
+            { "role": "system", "content": "Be brief." },
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": [{ "type": "text", "text": "hello" }] },
+            { "role": "developer", "content": "Use British spelling." },
+            { "role": "user", "content": "colour?" },
+        ]));
+        assert_eq!(
+            build_prompt(&m).ok().as_deref(),
+            Some(
+                "Instructions:\nBe brief.\n\nUse British spelling.\n\n\
+                 Conversation so far:\n\nUser: hi\n\nAssistant: hello\n\nUser: colour?"
+            )
+        );
+    }
+
+    #[test]
+    fn non_text_content_and_tool_turns_are_refused() {
+        let image = msgs(json!([{ "role": "user", "content": [
+            { "type": "image_url", "image_url": { "url": "data:," } }
+        ]}]));
+        assert!(build_prompt(&image).is_err());
+        let tool = msgs(json!([
+            { "role": "user", "content": "hi" },
+            { "role": "tool", "content": "42" },
+        ]));
+        assert!(build_prompt(&tool).is_err());
+        let ends_with_assistant = msgs(json!([
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": "hello" },
+        ]));
+        assert!(build_prompt(&ends_with_assistant).is_err());
+    }
+}

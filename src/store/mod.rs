@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 
 mod audit;
+mod cancel;
 mod invites;
 
 pub use audit::AuditEntry;

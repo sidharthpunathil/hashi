@@ -95,6 +95,10 @@ Other options: download an archive from the [releases page](https://github.com/s
 
    The first call answers with the new token in its `token` field, shown only this once. A `stateful` token picks up its conversation where it left off on every prompt. You can also make tokens from the dashboard (`3`, then `n`) or with `hashi token create my-app --stateful`.
 
+### Use it from OpenAI-compatible apps
+
+Hashi also speaks the OpenAI chat API at `/v1/chat/completions` and `/v1/models`, so the `openai` packages, Open WebUI and other tools built for it work with a Hashi token. Point them at `http://127.0.0.1:7878/v1`, use your `hashi_...` token as the API key, and pick an agent as the model: `claude`, `codex`, or `claude/opus` to choose the agent's own model. `stream: true` works too. See the [API reference](docs/api.md#openai-compatible-api).
+
 <p align="center">
   <img src="assets/dashboard.png" alt="Hashi terminal dashboard: agent cards with their state, request counters and a live activity feed" width="900">
 </p>

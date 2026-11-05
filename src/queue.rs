@@ -29,7 +29,7 @@ use tracing::{info, warn};
 use crate::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
 use crate::events::{Bus, Event};
 use crate::guard::ResourceGuard;
-use crate::store::{EXPIRED_BEFORE_START, Request, Store};
+use crate::store::{EXPIRED_BEFORE_START, Request, RequestStatus, Store, StoreError};
 use crate::token::TokenStatus;
 use crate::util::{now_ms, truncate};
 
@@ -45,6 +45,10 @@ const CANCEL_WAIT: Duration = Duration::from_secs(10);
 
 /// Error reported for a run stopped because its token was revoked.
 pub const REVOKED_ERROR: &str = "stopped: the token was revoked";
+
+/// Error reported for a request cancelled with `DELETE /v1/ask/{id}`, the
+/// MCP `cancel` tool or the dashboard.
+pub const CANCELLED_ERROR: &str = "cancelled";
 
 /// Settings shared by all workers.
 #[derive(Debug, Clone)]
@@ -162,6 +166,26 @@ impl Dispatcher {
             .values()
             .filter(|r| r.token_id == token_id)
             .count()
+    }
+
+    /// Stops the run of request `id`, if one is registered, the same way
+    /// [`Dispatcher::cancel_token_runs`] does. The returned future resolves
+    /// once the run (and its process group) is gone, or after ten seconds.
+    pub fn cancel_run(&self, id: &str) -> Option<impl Future<Output = ()> + Send + 'static> {
+        let done = {
+            let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+            let run = runs.get(id)?;
+            run.cancel.cancel();
+            run.done.clone()
+        };
+        Some(async move {
+            if tokio::time::timeout(CANCEL_WAIT, done.cancelled_owned())
+                .await
+                .is_err()
+            {
+                warn!("a cancelled run did not stop in time");
+            }
+        })
     }
 
     /// Stops every run of `token_id` now: each run is dropped, which kills
@@ -366,13 +390,21 @@ impl Worker {
 
     /// Reports a run that was stopped from outside.
     fn stopped(&self, id: &str, started: i64, why: &str) {
+        // A cancel fails the row before it stops the run, so its reason is
+        // stored; a revoke deletes the row.
+        let why = match self.store.get_request(id) {
+            Ok(Some(r)) if r.status == RequestStatus::Failed => {
+                r.error.unwrap_or_else(|| why.to_owned())
+            }
+            _ => why.to_owned(),
+        };
         info!(id = %id, agent = %self.agent, "run stopped: {why}");
         self.bus.emit(Event::Finished {
             id: id.to_owned(),
             agent: self.agent,
             ok: false,
             duration_ms: u64::try_from(now_ms() - started).unwrap_or(0),
-            error: Some(why.to_owned()),
+            error: Some(why),
         });
     }
 
@@ -511,6 +543,83 @@ impl Worker {
         }
         Ok(out)
     }
+}
+
+/// Who asked for a cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelBy<'a> {
+    /// The token that sent the request.
+    Owner,
+    /// Someone else, such as an admin token or `dashboard`. Audited under
+    /// this name.
+    Other(&'a str),
+}
+
+/// What [`cancel`] did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CancelOutcome {
+    /// The request was queued or running and is now failed with
+    /// [`CANCELLED_ERROR`].
+    Cancelled(Request),
+    /// The request had already finished; it is unchanged.
+    Finished(Request),
+    /// No such request.
+    NotFound,
+}
+
+/// Cancels request `id`. A queued request fails at once. A running one is
+/// failed, then stopped through the run registry (the path revoke uses),
+/// which kills its whole process tree; this waits until it is gone. Callers
+/// check that the asker may cancel it. A cancel by anyone but the owner is
+/// audited.
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub async fn cancel(
+    state: &crate::api::AppState,
+    id: &str,
+    by: CancelBy<'_>,
+) -> Result<CancelOutcome, StoreError> {
+    let store = &state.store;
+    let Some(req) = store.get_request(id)? else {
+        return Ok(CancelOutcome::NotFound);
+    };
+    if req.status.is_terminal() {
+        return Ok(CancelOutcome::Finished(req));
+    }
+    if store.cancel_queued(id, CANCELLED_ERROR)? {
+        state.bus.emit(Event::Finished {
+            id: id.to_owned(),
+            agent: req.agent,
+            ok: false,
+            duration_ms: 0,
+            error: Some(CANCELLED_ERROR.to_owned()),
+        });
+    } else if store.cancel_running(id, CANCELLED_ERROR)? {
+        // A worker registers its run right after claiming it; give one that
+        // is between the two a moment. Without a registration the worker
+        // still sees the failed row within `ROW_CHECK_EVERY`.
+        for _ in 0..20 {
+            if let Some(stopped) = state.dispatcher.cancel_run(id) {
+                stopped.await;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    let Some(req) = store.get_request(id)? else {
+        return Ok(CancelOutcome::NotFound);
+    };
+    // It finished on its own before the cancel took hold.
+    if req.error.as_deref() != Some(CANCELLED_ERROR) || req.status != RequestStatus::Failed {
+        return Ok(CancelOutcome::Finished(req));
+    }
+    if let CancelBy::Other(actor) = by {
+        store.audit(actor, "request.cancel", &req.token_name, id)?;
+    }
+    state.bus.log(format!("request cancelled: {id}"));
+    Ok(CancelOutcome::Cancelled(req))
 }
 
 /// A failed run's error as stored and returned to the token holder: secrets
