@@ -74,4 +74,6 @@ needless_collect = "warn"
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+# Keep the symbol table: crash reports print a backtrace, and with every
+# symbol stripped its frames have no names (see docs/performance.md).
+strip = "debuginfo"
