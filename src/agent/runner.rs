@@ -425,20 +425,32 @@ mod tests {
         if nice_bin().is_none() {
             return;
         }
-        let limits = Limits {
-            nice: 7,
-            ..Limits::default()
+        // `nice -n` is relative to Hashi's own niceness, which is not always
+        // 0 (CI runners can start tests at a negative value), so compare with
+        // a run at the same base.
+        let niceness = |nice| async move {
+            let limits = Limits {
+                nice,
+                ..Limits::default()
+            };
+            let out = run(
+                Path::new("/bin/sh"),
+                &sh("ps -o nice= -p $$"),
+                &[],
+                Path::new("."),
+                limits,
+            )
+            .await
+            .unwrap();
+            out.stdout.trim().parse::<i32>().unwrap()
         };
-        let out = run(
-            Path::new("/bin/sh"),
-            &sh("ps -o nice= -p $$"),
-            &[],
-            Path::new("."),
-            limits,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.stdout.trim(), "7", "{out:?}");
+        let base = niceness(0).await;
+        let lowered = niceness(7).await;
+        assert_eq!(
+            lowered,
+            (base + 7).min(19),
+            "base {base}, lowered {lowered}"
+        );
     }
 
     #[tokio::test]
