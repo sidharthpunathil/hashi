@@ -10,8 +10,41 @@ async function api(path, { method = "GET", body, token } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(path, { method, headers, body: body && JSON.stringify(body), cache: "no-store" });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error?.message || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.code = data?.error?.code;
+    throw err;
+  }
   return data;
+}
+
+// What one pickup-status check got back: either the request's `state`, or
+// an `error` with the HTTP `status` and `code` when the server sent one.
+// A network failure has an error and no status.
+const FINAL_STATES = ["declined", "claimed", "expired"];
+
+// Whether a pickup-status check is a definite answer, so the pickup secret
+// can be forgotten: the server does not know the secret (404
+// request_not_found), or the request was declined, collected or has
+// expired. A network error, a 5xx or a 429 is not: the secret is kept and
+// the check is tried again (see retryDelay). The ask page forgets the
+// secret on its own only through this function.
+function isFinalAnswer(answer) {
+  if (answer.error) return answer.status === 404 && answer.code === "request_not_found";
+  return FINAL_STATES.includes(answer.state);
+}
+
+// Whether a failed pickup-status check is worth trying again: no answer at
+// all, a server error or a rate limit.
+function isRetryable(answer) {
+  return Boolean(answer.error) && (answer.status == null || answer.status >= 500 || answer.status === 429);
+}
+
+// How long to wait before the next check after `failures` failed ones in a
+// row: 10 s, 20 s, 40 s, then 60 s.
+function retryDelay(failures) {
+  return Math.min(10000 * 2 ** Math.max(0, failures - 1), 60000);
 }
 
 function agentsText(agents) {
@@ -161,30 +194,53 @@ function askPage() {
       text.className = "bad";
       text.textContent = "The owner declined this request.";
       if (typeof s.reason === "string" && s.reason) detail.textContent = `Their reason: ${s.reason}`;
-      forget();
     } else if (s.status === "claimed") {
       text.className = "good";
       text.textContent = "This access was already collected.";
-      forget();
     } else {
       text.className = "bad";
       text.textContent = "This request has expired. Ask the owner for a new link.";
-      forget();
     }
     show("loading", false);
     show("ask", false);
     show("status");
   };
 
+  // Shown while a check failed and the next one is waiting. The secret is
+  // kept, so a dropped connection or a restart of the server loses nothing.
+  const retrying = () => {
+    show("loading", false);
+    show("ask", false);
+    if ($("status").hidden) {
+      $("status-text").className = "";
+      $("status-text").textContent = "Checking your request…";
+      show("claim-link", false);
+      show("status");
+    }
+    $("status-detail").textContent = "Could not reach this Hashi; retrying…";
+  };
+
+  let failures = 0;
   const poll = async (pickup) => {
     clearTimeout(timer);
+    let answer;
     try {
       const s = await api("/v1/ask-access/status", { method: "POST", body: { pickup } });
-      render(s);
-      if (s.status === "pending") timer = setTimeout(() => poll(pickup), 10000);
+      answer = { state: s.status, body: s };
     } catch (e) {
-      forget();
-      fail(e.message);
+      answer = { error: e.message, status: e.status, code: e.code };
+    }
+    if (isFinalAnswer(answer)) forget();
+    if (!answer.error) {
+      failures = 0;
+      render(answer.body);
+      if (answer.state === "pending") timer = setTimeout(() => poll(pickup), 10000);
+    } else if (isRetryable(answer)) {
+      failures += 1;
+      retrying();
+      timer = setTimeout(() => poll(pickup), retryDelay(failures));
+    } else {
+      fail(answer.error);
     }
   };
 
