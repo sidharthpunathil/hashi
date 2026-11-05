@@ -4,7 +4,8 @@
 //! `mkcert`, `tailscale cert` or your own CA. Handshakes run on their own
 //! tasks with a timeout, so a slow or silent client cannot hold up others.
 //! The same connection cap as plain HTTP applies: a slot is taken before
-//! `accept` and held by the connection's IO until it closes.
+//! `accept` and held by the connection's IO until it closes, and one remote
+//! client address may hold at most its [`crate::net::per_client_share`].
 
 use std::io;
 use std::net::SocketAddr;
@@ -20,7 +21,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::server::TlsStream;
 
-use crate::net::Limited;
+use crate::net::{ClientShares, Limited};
 
 /// How long a client gets to finish the TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -127,6 +128,7 @@ impl TlsListener {
         let acceptor = TlsAcceptor::from(config);
         let permits = Arc::new(Semaphore::new(MAX_HANDSHAKES));
         let slots = Arc::new(Semaphore::new(max_connections.max(1)));
+        let shares = ClientShares::new(max_connections);
         tokio::spawn(async move {
             loop {
                 // Take a connection slot first, so clients past the cap wait in
@@ -148,6 +150,11 @@ impl TlsListener {
                         continue;
                     }
                 };
+                let Some(share) = shares.claim(peer) else {
+                    // Over its share: close at once and free the slot.
+                    tracing::debug!(%peer, "client holds its share of connections");
+                    continue;
+                };
                 let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
                     return;
                 };
@@ -157,7 +164,7 @@ impl TlsListener {
                     let _permit = permit;
                     match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                         Ok(Ok(tls)) => {
-                            let _ = tx.send((Limited::new(tls, slot), peer)).await;
+                            let _ = tx.send((Limited::with_share(tls, slot, share), peer)).await;
                         }
                         Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
                         Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),

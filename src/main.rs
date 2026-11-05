@@ -205,6 +205,20 @@ struct ServeArgs {
     #[arg(long, default_value_t = 512, env = "HASHI_MAX_CONNECTIONS",
           value_parser = clap::value_parser!(u32).range(1..))]
     max_connections: u32,
+    /// Behind a reverse proxy on this host (Caddy, nginx): key rate limits by
+    /// the last X-Forwarded-For hop of requests from loopback.
+    #[arg(long, env = "HASHI_TRUST_PROXY")]
+    trust_proxy: bool,
+    /// Web origin allowed to call the API from a browser, such as
+    /// https://app.example.com (repeatable). Default: none.
+    #[arg(long = "cors-origin", env = "HASHI_CORS_ORIGINS", value_delimiter = ',',
+          value_parser = hashi::net::parse_origin)]
+    cors_origins: Vec<String>,
+    /// Extra host name this server answers to, besides IP addresses,
+    /// localhost and the public URL's host (repeatable).
+    #[arg(long = "allowed-host", env = "HASHI_ALLOWED_HOSTS", value_delimiter = ',',
+          value_parser = hashi::net::parse_allowed_host)]
+    allowed_hosts: Vec<String>,
     /// Maximum pending requests across all agents.
     #[arg(long, default_value_t = 100, env = "HASHI_QUEUE_LIMIT")]
     queue_limit: u64,
@@ -374,6 +388,9 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
     let events = bus.subscribe();
     let net = hashi::net::NetLimits {
         max_connections,
+        trust_proxy: args.trust_proxy,
+        cors_origins: args.cors_origins.clone(),
+        allowed_hosts: args.allowed_hosts.clone(),
         ..hashi::net::NetLimits::default()
     };
     let running = server::start_with(cfg, net, bus).await?;

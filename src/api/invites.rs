@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Admin, ApiError, ApiResult, AppState};
+use super::{Admin, ApiError, ApiResult, AppState, ClientKey, claim_outcome};
 use crate::agent::AgentKind;
 use crate::store::{Invite, InviteState, NewInvite, Redeemed};
 use crate::token::{Limits, SessionMode};
@@ -199,9 +199,9 @@ pub(super) async fn cancel(
     Ok(Json(json!({ "ok": true })))
 }
 
-fn check_code(_state: &AppState, code: &str) -> ApiResult<()> {
-    // Attempts are rate limited per client address by the router, before
-    // the handler runs (see `claim_limit`).
+fn check_code(code: &str) -> ApiResult<()> {
+    // Failed attempts are rate limited per client address by the handlers
+    // (see `claim_outcome`).
     if !code.starts_with(crate::store::INVITE_PREFIX) || code.len() > 128 {
         return Err(not_found());
     }
@@ -232,12 +232,20 @@ fn expired() -> ApiError {
     )
 }
 
+type ClaimJson = Result<Json<ClaimBody>, axum::extract::rejection::JsonRejection>;
+
 pub(super) async fn preview(
     State(state): State<AppState>,
-    body: Result<Json<ClaimBody>, axum::extract::rejection::JsonRejection>,
+    client: ClientKey,
+    body: ClaimJson,
 ) -> ApiResult<Json<Value>> {
+    let result = preview_code(&state, body);
+    claim_outcome(&state, &client, result)
+}
+
+fn preview_code(state: &AppState, body: ClaimJson) -> ApiResult<Json<Value>> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
-    check_code(&state, &body.code)?;
+    check_code(&body.code)?;
     match state.store.preview_invite(&body.code)? {
         InviteState::Pending(i) => Ok(Json(json!({
             "label": i.label,
@@ -257,10 +265,16 @@ pub(super) async fn preview(
 
 pub(super) async fn redeem(
     State(state): State<AppState>,
-    body: Result<Json<ClaimBody>, axum::extract::rejection::JsonRejection>,
+    client: ClientKey,
+    body: ClaimJson,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    let result = redeem_code(&state, body);
+    claim_outcome(&state, &client, result)
+}
+
+fn redeem_code(state: &AppState, body: ClaimJson) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
-    check_code(&state, &body.code)?;
+    check_code(&body.code)?;
     match state.store.redeem_invite(&body.code)? {
         Redeemed::Token(token, secret) => {
             state
