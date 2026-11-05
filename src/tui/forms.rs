@@ -175,19 +175,23 @@ pub struct EditTokenForm {
     pub accounts: String,
     /// The project the token is bound to.
     pub project: ProjectChoice,
+    /// Whether the token may see its agents' quota headroom.
+    pub share_usage: bool,
     /// The field that failed and why.
     pub error: Option<FieldError>,
 }
 
 impl EditTokenForm {
     /// Number of fields.
-    pub const FIELDS: usize = 10;
+    pub const FIELDS: usize = 11;
     /// Index of the expiry field.
     pub const EXPIRY: usize = 2;
     /// Index of the accounts field.
     pub const ACCOUNTS: usize = 8;
     /// Index of the project selector.
     pub const PROJECT: usize = 9;
+    /// Index of the share usage toggle.
+    pub const SHARE_USAGE: usize = 10;
     /// Labels, in field order.
     pub const LABELS: [&'static str; Self::FIELDS] = [
         "name",
@@ -200,6 +204,7 @@ impl EditTokenForm {
         "max pending",
         "accounts",
         "project",
+        "share usage",
     ];
 
     /// The form for `token`, with `projects` to choose from.
@@ -218,6 +223,7 @@ impl EditTokenForm {
             max_pending: show_count(l.max_pending),
             accounts: bindings_text(&token.accounts),
             project: ProjectChoice::with(projects, token.project.as_deref()),
+            share_usage: token.share_usage,
             token: token.clone(),
             error: None,
         }
@@ -305,6 +311,9 @@ impl EditTokenForm {
         let project = self.project.selected().map(str::to_owned);
         if project != t.project {
             body.project = Some(project);
+        }
+        if self.share_usage != t.share_usage {
+            body.share_usage = Some(self.share_usage);
         }
         Ok(body)
     }

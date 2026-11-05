@@ -16,7 +16,8 @@ use hashi::guard::{GIB, HoldReason, ManualProbe, ResourceGuard, ResourceSettings
 use hashi::queue::Dispatcher;
 use hashi::store::{NewRequest, NewToken, Store};
 use hashi::token::{Role, SessionMode};
-use hashi::tui::app::{Action, App, Popup, Tab};
+use hashi::tui::app::{Action, App, Popup, ShareForm, Tab, TokenForm};
+use hashi::tui::forms::EditTokenForm;
 use hashi::tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -2313,4 +2314,93 @@ fn a_long_token_list_draws_and_reads_only_the_rows_on_screen() {
         app.usage[&last.id],
         app.state.store.token_usage(&last.id, now).unwrap()
     );
+}
+
+/// The token named `name`, read from the store.
+fn stored_token(app: &App, name: &str) -> hashi::token::Token {
+    app.state
+        .store
+        .list_tokens()
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == name)
+        .unwrap()
+}
+
+#[test]
+fn the_token_form_can_share_usage() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('n')));
+    typed(&mut app, "quiet");
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Esc));
+    assert!(!stored_token(&app, "quiet").share_usage);
+
+    app.on_key(key(KeyCode::Char('n')));
+    typed(&mut app, "open");
+    for _ in 0..TokenForm::SHARE_USAGE {
+        app.on_key(key(KeyCode::Down));
+    }
+    assert!(draw(&mut app, 140, 40).contains("not shared"));
+    app.on_key(key(KeyCode::Right));
+    assert!(draw(&mut app, 140, 40).contains("shared: headroom, reset and state"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Reveal { .. })));
+    assert!(stored_token(&app, "open").share_usage);
+}
+
+#[test]
+fn the_share_form_can_share_usage() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('s')));
+    typed(&mut app, "dave");
+    for _ in 0..ShareForm::SHARE_USAGE {
+        app.on_key(key(KeyCode::Down));
+    }
+    app.on_key(key(KeyCode::Char(' ')));
+    assert!(draw(&mut app, 140, 40).contains("shared: headroom, reset and state"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::InviteReveal { .. })));
+    let invite = app.state.store.list_invites().unwrap().remove(0);
+    assert_eq!(invite.label, "dave");
+    assert!(invite.share_usage);
+
+    // Left as it is, the toggle shares nothing.
+    app.on_key(key(KeyCode::Esc));
+    share_invite(&mut app, "erin");
+    let erin = app
+        .state
+        .store
+        .list_invites()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.label == "erin")
+        .unwrap();
+    assert!(!erin.share_usage);
+}
+
+#[test]
+fn the_edit_form_turns_usage_sharing_on_and_off() {
+    let mut app = App::new(state(), None, false);
+    add_user(&mut app, "bob");
+    app.on_key(key(KeyCode::Char('3')));
+    select_token(&mut app, "bob");
+    for (on, change) in [(true, "usage shared"), (false, "usage not shared")] {
+        app.on_key(key(KeyCode::Char('e')));
+        for _ in 0..EditTokenForm::SHARE_USAGE {
+            app.on_key(key(KeyCode::Down));
+        }
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.popup.is_none(), "{:?}", app.popup);
+        assert!(toast(&app).contains(change), "{}", toast(&app));
+        assert_eq!(stored_token(&app, "bob").share_usage, on);
+        select_token(&mut app, "bob");
+    }
+    // Opened and saved untouched, nothing changes.
+    app.on_key(key(KeyCode::Char('e')));
+    app.on_key(key(KeyCode::Enter));
+    assert!(toast(&app).contains("nothing changed"));
 }

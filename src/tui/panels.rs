@@ -377,6 +377,15 @@ fn edit_token(frame: &mut Frame, form: &EditTokenForm, tick: u64) {
             W,
             form_toggle(&form.project.label(), f(9)),
         ),
+        form_field(
+            f(EditTokenForm::SHARE_USAGE),
+            EditTokenForm::LABELS[EditTokenForm::SHARE_USAGE],
+            W,
+            form_toggle(
+                super::ui::share_usage_label(form.share_usage),
+                f(EditTokenForm::SHARE_USAGE),
+            ),
+        ),
     ];
     let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
     lines.push(Line::raw(""));
@@ -386,7 +395,7 @@ fn edit_token(frame: &mut Frame, form: &EditTokenForm, tick: u64) {
     lines.push(Line::raw(""));
     lines.push(key_hint(&[
         ("↑↓", "field"),
-        ("←→", "project"),
+        ("←→", "change"),
         ("enter", "save"),
         ("esc", "cancel"),
     ]));

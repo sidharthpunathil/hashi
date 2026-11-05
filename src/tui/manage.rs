@@ -95,6 +95,7 @@ fn nothing(body: &crate::api::UpdateTokenBody) -> bool {
         && body.limits.is_none()
         && body.accounts.is_none()
         && body.project.is_none()
+        && body.share_usage.is_none()
 }
 
 impl App {
@@ -697,6 +698,12 @@ impl App {
             KeyCode::Left if form.field == EditTokenForm::PROJECT => form.project.shift(-1),
             KeyCode::Right | KeyCode::Char(' ') if form.field == EditTokenForm::PROJECT => {
                 form.project.shift(1);
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if form.field == EditTokenForm::SHARE_USAGE =>
+            {
+                form.share_usage = !form.share_usage;
+                form.error = None;
             }
             _ => {
                 let max = match form.field {

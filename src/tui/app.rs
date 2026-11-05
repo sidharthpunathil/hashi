@@ -388,17 +388,22 @@ pub struct TokenForm {
     pub accounts: String,
     /// The project the token is bound to.
     pub project: ProjectChoice,
+    /// Whether the token may see its agents' quota headroom, as
+    /// `hashi token create --share-usage`.
+    pub share_usage: bool,
     /// Validation message shown under the name field.
     pub error: Option<String>,
 }
 
 impl TokenForm {
     /// Number of fields.
-    pub const FIELDS: usize = 6;
+    pub const FIELDS: usize = 7;
     /// Index of the accounts text field.
     pub const ACCOUNTS: usize = 4;
-    /// Index of the project selector.
-    pub const PROJECT: usize = 5;
+    /// Index of the project selector, the last field.
+    pub const PROJECT: usize = 6;
+    /// Index of the share usage toggle.
+    pub const SHARE_USAGE: usize = 5;
 
     fn new(projects: Vec<String>) -> Self {
         Self {
@@ -409,6 +414,7 @@ impl TokenForm {
             agents: AgentChoice::EVERY,
             accounts: String::new(),
             project: ProjectChoice::new(projects),
+            share_usage: false,
             error: None,
         }
     }
@@ -430,6 +436,7 @@ impl TokenForm {
             }
             3 => self.agents = self.agents.next(),
             Self::PROJECT => self.project.shift(1),
+            Self::SHARE_USAGE => self.share_usage = !self.share_usage,
             _ => {}
         }
     }
@@ -466,17 +473,22 @@ pub struct ShareForm {
     pub accounts: String,
     /// The project the token is bound to.
     pub project: ProjectChoice,
+    /// Whether the invited token may see its agents' quota headroom, as
+    /// `hashi share --share-usage`.
+    pub share_usage: bool,
     /// Validation message shown under the label field.
     pub error: Option<String>,
 }
 
 impl ShareForm {
     /// Number of fields.
-    pub const FIELDS: usize = 9;
+    pub const FIELDS: usize = 10;
     /// Index of the accounts text field.
     pub const ACCOUNTS: usize = 7;
-    /// Index of the project selector.
-    pub const PROJECT: usize = 8;
+    /// Index of the project selector, the last field.
+    pub const PROJECT: usize = 9;
+    /// Index of the share usage toggle.
+    pub const SHARE_USAGE: usize = 8;
 
     fn new(projects: Vec<String>) -> Self {
         Self {
@@ -490,6 +502,7 @@ impl ShareForm {
             link: 1,
             accounts: String::new(),
             project: ProjectChoice::new(projects),
+            share_usage: false,
             error: None,
         }
     }
@@ -508,6 +521,7 @@ impl ShareForm {
             5 => self.lifetime = cycle(self.lifetime, LIFETIME_DAYS.len(), by),
             6 => self.link = cycle(self.link, LINK_HOURS.len(), by),
             Self::PROJECT => self.project.shift(by),
+            Self::SHARE_USAGE => self.share_usage = !self.share_usage,
             _ => {}
         }
     }
@@ -1559,6 +1573,11 @@ impl App {
         }
         match self.state.store.create_token(&new) {
             Ok((token, secret)) => {
+                if form.share_usage
+                    && let Err(e) = self.state.store.set_token_share_usage(&token.id, true)
+                {
+                    self.notify(format!("created, but usage is not shared: {e}"));
+                }
                 self.state
                     .bus
                     .log(format!("token created: {} ({})", token.name, token.prefix));
@@ -1603,6 +1622,11 @@ impl App {
         }
         match self.state.store.create_invite(&new) {
             Ok((invite, code)) => {
+                if form.share_usage
+                    && let Err(e) = self.state.store.set_invite_share_usage(&invite.id, true)
+                {
+                    self.notify(format!("created, but usage is not shared: {e}"));
+                }
                 self.audit("invite.create", &invite.label, link_long(new.link_hours));
                 self.state
                     .bus

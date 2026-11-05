@@ -2216,7 +2216,7 @@ pub(super) fn form_error(error: Option<&String>, indent: usize) -> Line<'static>
 
 fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
     const W: usize = 16;
-    let rect = centered(area, 72, 19);
+    let rect = centered(area, 72, 20);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(
@@ -2264,6 +2264,15 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
             ),
         ),
         form_field(
+            f(ShareForm::SHARE_USAGE),
+            "share usage",
+            W,
+            form_toggle(
+                share_usage_label(form.share_usage),
+                f(ShareForm::SHARE_USAGE),
+            ),
+        ),
+        form_field(
             f(ShareForm::PROJECT),
             "project",
             W,
@@ -2292,7 +2301,7 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
 
 fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
     const W: usize = 10;
-    let rect = centered(area, 60, 16);
+    let rect = centered(area, 60, 17);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(f(0), "name", W, form_text(&form.name, f(0), "my-app", tick)),
@@ -2309,6 +2318,15 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
                 f(TokenForm::ACCOUNTS),
                 "default (or claude=work,personal)",
                 tick,
+            ),
+        ),
+        form_field(
+            f(TokenForm::SHARE_USAGE),
+            "usage",
+            W,
+            form_toggle(
+                share_usage_label(form.share_usage),
+                f(TokenForm::SHARE_USAGE),
             ),
         ),
         form_field(
@@ -2337,6 +2355,16 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
     ];
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(modal("new token")), rect);
+}
+
+/// The share usage toggle: whether the token sees its agents' quota
+/// headroom (`GET /v1/me`), never account names or counts.
+pub(super) const fn share_usage_label(share: bool) -> &'static str {
+    if share {
+        "shared: headroom, reset and state"
+    } else {
+        "not shared"
+    }
 }
 
 /// Body text: inherits the terminal (or popup) foreground so it stays
