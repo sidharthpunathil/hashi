@@ -47,22 +47,54 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Draw only when something changed: input, a bus event, a data refresh
+    // or an animation frame. An idle dashboard costs almost nothing.
+    let mut dirty = true;
     while !app.should_quit {
-        terminal.draw(|frame| ui::render(&mut app, frame))?;
+        if dirty {
+            terminal.draw(|frame| ui::render(&mut app, frame))?;
+            dirty = false;
+        }
         tokio::select! {
             maybe = input.next() => match maybe {
-                Some(Ok(TermEvent::Key(key))) => app.on_key(key),
-                Some(Ok(_)) => {}
+                Some(Ok(TermEvent::Key(key))) => {
+                    app.on_key(key);
+                    dirty = true;
+                }
+                // Resize, focus and paste: redraw to be safe.
+                Some(Ok(_)) => dirty = true,
                 Some(Err(e)) => return Err(e.into()),
                 None => break,
             },
-            msg = events.recv() => match msg {
-                Ok(ev) => app.on_event(ev),
-                Err(RecvError::Lagged(n)) => app.notify(format!("dropped {n} events")),
-                Err(RecvError::Closed) => break,
+            msg = events.recv() => {
+                match msg {
+                    Ok(ev) => app.on_event(ev),
+                    Err(RecvError::Lagged(n)) => app.notify(format!("dropped {n} events")),
+                    Err(RecvError::Closed) => break,
+                }
+                // Fold a burst of events into one frame.
+                if !drain(&mut app, &mut events) {
+                    break;
+                }
+                dirty = true;
             },
-            _ = tick.tick() => app.on_tick(),
+            _ = tick.tick() => dirty |= app.on_tick(),
         }
     }
     Ok(())
+}
+
+/// Applies events that are already waiting, up to a bound so input stays
+/// responsive. Returns `false` once the bus has closed.
+fn drain(app: &mut App, events: &mut tokio::sync::broadcast::Receiver<Event>) -> bool {
+    use tokio::sync::broadcast::error::TryRecvError;
+    for _ in 0..256 {
+        match events.try_recv() {
+            Ok(ev) => app.on_event(ev),
+            Err(TryRecvError::Lagged(n)) => app.notify(format!("dropped {n} events")),
+            Err(TryRecvError::Empty) => return true,
+            Err(TryRecvError::Closed) => return false,
+        }
+    }
+    true
 }

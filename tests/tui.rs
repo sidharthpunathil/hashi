@@ -634,3 +634,105 @@ fn overview_says_when_work_is_held() {
     let out = draw(&mut app, 140, 40);
     assert!(out.contains("held: low memory"), "{out}");
 }
+
+/// Finishes the fixture's running request so nothing is in flight.
+fn finish_running(app: &mut App) {
+    app.state
+        .store
+        .complete_request("00000002-0000-4000-8000-000000000000", "done", None)
+        .unwrap();
+    app.refresh();
+}
+
+#[test]
+fn idle_dashboard_does_not_animate() {
+    let mut app = App::new(state(), None, false);
+    finish_running(&mut app);
+    assert!(!app.animating());
+    // Data was just loaded, so an idle tick asks for no redraw at all.
+    assert!(!app.on_tick());
+    assert_eq!(app.tick, 0);
+
+    app.notify("copied");
+    assert!(app.animating());
+    app.toast = None;
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(app.animating(), "the form cursor blinks");
+}
+
+#[test]
+fn running_request_animates() {
+    // The fixture leaves one request running.
+    let mut app = App::new(state(), None, false);
+    assert!(app.animating());
+    assert!(app.on_tick());
+    assert_eq!(app.tick, 1);
+    // Reduced motion still redraws for the elapsed time, but keeps the
+    // spinners still.
+    app.reduced_motion = true;
+    assert!(app.on_tick());
+    assert_eq!(app.tick, 1);
+}
+
+#[test]
+fn requests_view_handles_many_large_prompts() {
+    let mut app = App::new(state(), None, false);
+    let admin = app.state.store.list_tokens().unwrap().remove(0);
+    for i in 0..300 {
+        // Short lines, one per row in the detail pane, with a narrow
+        // multibyte character near the 200 char cut.
+        let mut prompt = format!("p{i:03} {} café", "abcdefgh ".repeat(21));
+        let mut n = 0;
+        while prompt.len() < 32 * 1024 {
+            prompt.push_str(&format!("\nline {n:04} of prompt {i:03}"));
+            n += 1;
+        }
+        prompt.push_str(&format!("\nEND OF PROMPT {i:03}"));
+        app.state
+            .store
+            .insert_request(NewRequest {
+                id: &format!("{i:08}-2222-4000-8000-000000000000"),
+                token: &admin,
+                agent: AgentKind::Claude,
+                model: None,
+                message: &prompt,
+            })
+            .unwrap();
+    }
+    app.refresh();
+    assert_eq!(app.recent.len(), 300);
+    app.on_key(key(KeyCode::Char('2')));
+    // Move into the middle so the table has to scroll.
+    for _ in 0..150 {
+        app.on_key(key(KeyCode::Down));
+    }
+    let selected = app.selected_request().unwrap().message.clone();
+    let head: String = selected.chars().take(200).collect();
+    let head = head.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(head.ends_with("caf") || head.ends_with("café"), "{head}");
+
+    let (w, h) = (480, 60);
+    let out = draw(&mut app, w, h);
+    // The list takes a little over half the width.
+    let list_w = usize::from(w) * 56 / 100;
+    let list: Vec<String> = out
+        .lines()
+        .map(|l| l.chars().take(list_w).collect())
+        .collect();
+    assert!(
+        list.iter().any(|l| l.contains(&head)),
+        "list row should show the first 200 chars of the prompt"
+    );
+    assert!(
+        !list.iter().any(|l| l.contains("line 0000 of prompt")),
+        "the list cell is cut at 200 chars"
+    );
+    // The detail pane shows the whole prompt when scrolled to the end.
+    app.detail_scroll = u16::MAX;
+    let out = draw(&mut app, w, h);
+    let tag = &selected[1..4];
+    assert!(out.contains(&format!("END OF PROMPT {tag}")), "{out}");
+    // Drawing again reuses the cached detail and gives the same frame.
+    assert_eq!(draw(&mut app, w, h), out);
+}

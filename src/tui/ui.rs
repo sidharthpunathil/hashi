@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Shadow, Sparkline, Table, Tabs, Wrap,
+    ScrollbarOrientation, ScrollbarState, Shadow, Sparkline, Table, TableState, Tabs, Wrap,
 };
 
 use super::app::{App, FeedItem, Popup, ShareForm, Tab, TokenForm, TokensFocus, TunnelState};
@@ -703,9 +703,24 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
             .map(|h| Cell::from(h).style(t::bold(t::MIST))),
     )
     .bottom_margin(0);
+    // Build only the rows that fit, so a long history of large prompts costs
+    // the same per frame as a short one.
+    let visible = usize::from(list.height.saturating_sub(3)).max(1);
+    let selected = app.requests_table.selected();
+    let offset = window_offset(
+        app.requests_table.offset(),
+        selected,
+        visible,
+        app.recent.len(),
+    );
+    *app.requests_table.offset_mut() = offset;
+    let mut window =
+        TableState::default().with_selected(selected.map(|s| s.saturating_sub(offset)));
     let rows: Vec<Row> = app
         .recent
         .iter()
+        .skip(offset)
+        .take(visible)
         .map(|r| {
             let took = elapsed_label(r);
             Row::new(vec![
@@ -721,7 +736,10 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
                 Cell::from(Span::styled(truncate(&r.token_name, 12), plain())),
                 Cell::from(Span::styled(human_age(r.created_at), t::muted())),
                 Cell::from(Span::styled(took, t::muted())),
-                Cell::from(Span::styled(one_line(&r.message), plain())),
+                Cell::from(Span::styled(
+                    one_line(head(&r.message, PROMPT_CELL_CHARS)),
+                    plain(),
+                )),
             ])
         })
         .collect();
@@ -748,7 +766,7 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
     )
     .highlight_symbol(Span::styled("▌", t::fg(t::PINK)))
     .block(panel("requests", t::VIOLET));
-    frame.render_stateful_widget(table, list, &mut app.requests_table);
+    frame.render_stateful_widget(table, list, &mut window);
     if empty {
         let hint = Paragraph::new(vec![
             Line::from(Span::styled("No requests yet", strong())).centered(),
@@ -764,8 +782,89 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
     render_detail(app, frame, detail);
 }
 
-fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
-    let Some(r) = app.selected_request() else {
+/// How many characters of a prompt the requests table looks at. Wider than
+/// any terminal, small enough that a page of 32 KB prompts stays cheap.
+const PROMPT_CELL_CHARS: usize = 200;
+
+/// The first `max` characters of `s`, cut on a char boundary.
+fn head(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
+/// First row to show so the selection stays in a viewport of `visible` rows.
+fn window_offset(offset: usize, selected: Option<usize>, visible: usize, len: usize) -> usize {
+    let mut offset = offset.min(len.saturating_sub(visible));
+    if let Some(sel) = selected {
+        if sel < offset {
+            offset = sel;
+        } else if sel >= offset + visible {
+            offset = sel + 1 - visible;
+        }
+    }
+    offset
+}
+
+/// What the detail pane's body depends on. The prompt never changes, so its
+/// length stands in for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetailKey {
+    id: String,
+    status: RequestStatus,
+    message: usize,
+    response: Option<usize>,
+    error: Option<usize>,
+    completed_at: Option<i64>,
+}
+
+impl DetailKey {
+    fn of(r: &Request) -> Self {
+        Self {
+            id: r.id.clone(),
+            status: r.status,
+            message: r.message.len(),
+            response: r.response.as_ref().map(String::len),
+            error: r.error.as_ref().map(String::len),
+            completed_at: r.completed_at,
+        }
+    }
+}
+
+/// The selected request's prompt and answer as styled lines, with their
+/// wrapped heights, kept until the selection, the request or the pane width
+/// changes. Rebuilding them every frame was most of the dashboard's work.
+#[derive(Debug, Default)]
+pub struct DetailCache {
+    key: Option<DetailKey>,
+    body: Vec<Line<'static>>,
+    width: usize,
+    heights: Vec<usize>,
+}
+
+impl DetailCache {
+    fn update(&mut self, r: &Request, width: usize) {
+        let key = DetailKey::of(r);
+        if self.key.as_ref() != Some(&key) {
+            self.body = detail_body(r);
+            self.key = Some(key);
+            self.width = 0;
+        }
+        if self.width != width {
+            self.heights = self.body.iter().map(|l| wrapped_height(l, width)).collect();
+            self.width = width;
+        }
+    }
+}
+
+fn wrapped_height(line: &Line, width: usize) -> usize {
+    line.width().max(1).div_ceil(width)
+}
+
+fn render_detail(app: &mut App, frame: &mut Frame, area: Rect) {
+    let selected = app.requests_table.selected();
+    let Some(r) = selected.and_then(|i| app.recent.get(i)) else {
         let hint = Paragraph::new(Span::styled(
             "Select a request to see its prompt and answer.",
             t::muted(),
@@ -776,27 +875,61 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     let title = format!("request {}", r.id.get(..8).unwrap_or(&r.id));
     let block = panel(&title, t::PINK);
     let inner = block.inner(area);
-    let text = detail_text(r, app.tick);
     let width = usize::from(inner.width.max(1));
-    let total = u16::try_from(
-        text.lines
-            .iter()
-            .map(|l| l.width().max(1).div_ceil(width))
-            .sum::<usize>(),
-    )
-    .unwrap_or(u16::MAX);
+    let head_lines = detail_head(r, app.tick);
+    let cache = &mut app.detail_cache;
+    cache.update(r, width);
+
+    let head_heights: Vec<usize> = head_lines
+        .iter()
+        .map(|l| wrapped_height(l, width))
+        .collect();
+    let total = head_heights.iter().sum::<usize>() + cache.heights.iter().sum::<usize>();
+    let total = u16::try_from(total).unwrap_or(u16::MAX);
     let max_scroll = total.saturating_sub(inner.height);
-    let scroll = app.detail_scroll.min(max_scroll);
+    let scroll = usize::from(app.detail_scroll.min(max_scroll));
+
+    // Hand the paragraph only the lines around the viewport: skip whole lines
+    // above it and let the paragraph scroll the remainder.
+    let heights = || head_heights.iter().chain(cache.heights.iter()).copied();
+    let mut skip_lines = 0;
+    let mut skipped_rows = 0;
+    for h in heights() {
+        if skipped_rows + h > scroll {
+            break;
+        }
+        skipped_rows += h;
+        skip_lines += 1;
+    }
+    let residual = scroll - skipped_rows;
+    // Twice the viewport, as the width estimate can undercount word wrapping.
+    let budget = residual + 2 * usize::from(inner.height);
+    let mut take = 0;
+    let mut rows = 0;
+    for h in heights().skip(skip_lines) {
+        if rows >= budget {
+            break;
+        }
+        rows += h;
+        take += 1;
+    }
+    let lines: Vec<Line<'static>> = head_lines
+        .iter()
+        .chain(cache.body.iter())
+        .skip(skip_lines)
+        .take(take)
+        .cloned()
+        .collect();
 
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
+            .scroll((u16::try_from(residual).unwrap_or(u16::MAX), 0))
             .block(block),
         area,
     );
     if max_scroll > 0 {
-        let mut state = ScrollbarState::new(usize::from(max_scroll)).position(usize::from(scroll));
+        let mut state = ScrollbarState::new(usize::from(max_scroll)).position(scroll);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .style(t::fg(t::DUSK))
@@ -807,7 +940,8 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
-fn detail_text(r: &Request, tick: u64) -> Text<'static> {
+/// Status, agent, timing and usage: small, and it changes with the clock.
+fn detail_head(r: &Request, tick: u64) -> Vec<Line<'static>> {
     let kv = |k: &str, v: Span<'static>| {
         Line::from(vec![Span::styled(format!("{k:<8}"), t::muted()), v])
     };
@@ -858,14 +992,19 @@ fn detail_text(r: &Request, tick: u64) -> Text<'static> {
         }
         lines.push(kv("usage", Span::styled(s, plain())));
     }
+    lines
+}
+
+/// The full prompt and the answer or error. Large, and fixed once the
+/// request finishes.
+fn detail_body(r: &Request) -> Vec<Line<'static>> {
     let rule = |label: &str| {
         Line::from(vec![
             Span::styled(format!("── {label} "), t::fg(t::ORCHID)),
             Span::styled("─".repeat(40), t::fg(t::DUSK)),
         ])
     };
-    lines.push(Line::raw(""));
-    lines.push(rule("prompt"));
+    let mut lines = vec![Line::raw(""), rule("prompt")];
     lines.extend(
         r.message
             .lines()
@@ -892,7 +1031,7 @@ fn detail_text(r: &Request, tick: u64) -> Text<'static> {
             t::muted(),
         ))),
     }
-    Text::from(lines)
+    lines
 }
 
 // ── tokens ─────────────────────────────────────────────────────────────────
@@ -1590,4 +1729,27 @@ fn pct(n: u64, d: u64) -> f64 {
     #[expect(clippy::cast_precision_loss, reason = "display only")]
     let v = n as f64 * 100.0 / d as f64;
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn head_cuts_on_char_boundaries() {
+        assert_eq!(head("abc", 200), "abc");
+        assert_eq!(head("café au lait", 4), "café");
+        assert_eq!(head("橋橋橋", 2), "橋橋");
+        assert_eq!(head("", 3), "");
+    }
+
+    #[test]
+    fn window_keeps_the_selection_visible() {
+        assert_eq!(window_offset(0, Some(0), 10, 300), 0);
+        assert_eq!(window_offset(0, Some(15), 10, 300), 6);
+        assert_eq!(window_offset(6, Some(9), 10, 300), 6);
+        assert_eq!(window_offset(6, Some(2), 10, 300), 2);
+        // A shrunk list pulls the window back.
+        assert_eq!(window_offset(290, None, 10, 5), 0);
+    }
 }

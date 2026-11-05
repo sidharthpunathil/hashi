@@ -417,6 +417,8 @@ pub struct App {
     pub should_quit: bool,
     /// Freeze spinners and other animation (`HASHI_REDUCED_MOTION=1`).
     pub reduced_motion: bool,
+    /// The request detail pane, kept between frames.
+    pub detail_cache: super::ui::DetailCache,
     last_refresh: Option<Instant>,
 }
 
@@ -456,6 +458,7 @@ impl App {
             },
             should_quit: false,
             reduced_motion: std::env::var("HASHI_REDUCED_MOTION").is_ok_and(|v| v != "0"),
+            detail_cache: super::ui::DetailCache::default(),
             last_refresh: None,
         };
         app.refresh();
@@ -512,16 +515,36 @@ impl App {
         self.last_refresh = Some(Instant::now());
     }
 
-    /// Advances animations and refreshes data periodically.
-    pub fn on_tick(&mut self) {
-        if !self.reduced_motion {
+    /// Whether something on screen changes by itself: a running request
+    /// (spinner and elapsed time), the tunnel spinner, a toast waiting to
+    /// expire or the cursor blink in a form. When this is false the
+    /// dashboard only redraws on input, events and data refreshes.
+    #[must_use]
+    pub fn animating(&self) -> bool {
+        self.stats.running > 0
+            || self
+                .recent
+                .iter()
+                .any(|r| r.status == crate::store::RequestStatus::Running)
+            || matches!(self.tunnel, TunnelState::Starting)
+            || self.toast.is_some()
+            || matches!(self.popup, Some(Popup::Share(_) | Popup::NewToken(_)))
+    }
+
+    /// Advances animations and refreshes data periodically. Returns whether
+    /// the screen needs a redraw.
+    pub fn on_tick(&mut self) -> bool {
+        let animating = self.animating();
+        if animating && !self.reduced_motion {
             self.tick = self.tick.wrapping_add(1);
         }
+        let mut redraw = animating;
         if self
             .last_refresh
             .is_none_or(|t| t.elapsed() >= Duration::from_millis(750))
         {
             self.refresh();
+            redraw = true;
         }
         if self
             .toast
@@ -529,7 +552,9 @@ impl App {
             .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(4))
         {
             self.toast = None;
+            redraw = true;
         }
+        redraw
     }
 
     /// Folds a bus event into the model.
