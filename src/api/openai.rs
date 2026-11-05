@@ -414,9 +414,12 @@ async fn chat_completions(
         return Ok(with_request_id(res, &req.id));
     }
 
-    let req = submit(&state, &token, input).await?;
     let secs = body.wait.unwrap_or(MAX_WAIT_SECS);
-    let req = wait_until_done(&state, &token.id, &req.id, secs, MAX_WAIT_SECS).await?;
+    // Only the id is needed while waiting: the body (the whole transcript)
+    // and the submitted request are not held for the wait.
+    drop(body);
+    let id = submit(&state, &token, input).await?.id;
+    let req = wait_until_done(&state, &token.id, &id, secs, MAX_WAIT_SECS).await?;
     let meta = Meta::new(&req, shown_model);
     let res = match req.status {
         RequestStatus::Completed => (StatusCode::OK, Json(completion(&meta, &req))).into_response(),
@@ -473,6 +476,9 @@ async fn stream(
             break req;
         }
         let comment = SseEvent::default().comment(req.status.as_str());
+        // Read again after the wait; do not hold this copy (and its prompt)
+        // while the stream idles.
+        drop(req);
         if tx.send(comment).await.is_err() {
             return;
         }
