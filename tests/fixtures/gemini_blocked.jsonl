@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-11-05T10:00:00.000Z","session_id":"5d7e9f20-1a3b-4c5d-8e6f-7a8b9c0d1e2f","model":"gemini-2.5-pro"}
+{"type":"message","timestamp":"2026-11-05T10:00:00.010Z","role":"user","content":"hello"}
+{"type":"error","timestamp":"2026-11-05T10:00:00.700Z","severity":"error","message":"The model response was blocked due to safety settings."}
+{"type":"result","timestamp":"2026-11-05T10:00:00.710Z","status":"error","stats":{"total_tokens":120,"input_tokens":120,"output_tokens":0,"cached":0,"input":120,"duration_ms":710,"tool_calls":0,"models":{}}}
