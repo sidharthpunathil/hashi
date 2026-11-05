@@ -4,7 +4,9 @@ use std::ffi::OsString;
 
 use serde::Deserialize;
 
-use super::{AgentConfig, AgentError, AgentOutput, Invocation, Usage};
+use super::{
+    AgentConfig, AgentError, AgentOutput, Invocation, Usage, has_flag, neutralize_slash_command,
+};
 
 /// Extra environment for the child. None needed.
 #[must_use]
@@ -13,6 +15,23 @@ pub fn env(_workdir: &std::path::Path) -> Vec<(String, String)> {
 }
 
 /// Builds the argument vector for a Claude Code print-mode run.
+///
+/// - `--setting-sources user`: only the owner's user settings load, not
+///   project or local settings from the per-token workspace. A token that can
+///   write files (under an owner-chosen permission mode) could otherwise plant
+///   `.claude/settings.json` with hooks or allow rules for its next run.
+/// - Without an owner permission mode, the network and MCP posture is pinned:
+///   `--disallowedTools WebFetch`, so shared users cannot make the owner's
+///   machine fetch URLs (Bash stays under Claude Code's own default rules),
+///   and `--strict-mcp-config`, so none of the owner's MCP servers load. The
+///   owner opts in through `extra_args`: naming `WebFetch` in any extra
+///   argument (for example `--allowedTools WebFetch`) drops the WebFetch deny,
+///   and `--mcp-config <file>` loads exactly the servers in that file.
+/// - A prompt starting with `/` gets a leading space so it is never run as a
+///   slash command or skill from the owner's config.
+///
+/// `--disallowedTools` takes a variable number of values, so it is always
+/// followed by another option and never by text from the request.
 #[must_use]
 pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
@@ -22,6 +41,17 @@ pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
         "--max-turns".into(),
         cfg.max_turns.to_string().into(),
     ];
+    if !has_flag(&cfg.extra_args, &["--setting-sources"]) {
+        args.extend(["--setting-sources".into(), "user".into()]);
+    }
+    if cfg.permission_mode.is_none() {
+        if !cfg.extra_args.iter().any(|a| a.contains("WebFetch")) {
+            args.extend(["--disallowedTools".into(), "WebFetch".into()]);
+        }
+        if !has_flag(&cfg.extra_args, &["--strict-mcp-config"]) {
+            args.push("--strict-mcp-config".into());
+        }
+    }
     if let Some(model) = inv.model {
         args.extend(["--model".into(), model.into()]);
     }
@@ -33,7 +63,7 @@ pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     }
     args.extend(cfg.extra_args.iter().map(OsString::from));
     args.push("--".into());
-    args.push(inv.prompt.into());
+    args.push(neutralize_slash_command(inv.prompt).into());
     args
 }
 
@@ -146,6 +176,114 @@ mod tests {
             .collect();
         assert!(joined.windows(2).any(|w| w == ["--resume", "abc"]));
         assert!(joined.windows(2).any(|w| w == ["--model", "opus"]));
+    }
+
+    fn strings(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn hi() -> Invocation<'static> {
+        Invocation {
+            prompt: "hi",
+            resume: None,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn default_run_pins_settings_network_and_mcp() {
+        let args = strings(&build_args(&cfg(), hi()));
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format",
+                "json",
+                "--max-turns",
+                "10",
+                "--setting-sources",
+                "user",
+                "--disallowedTools",
+                "WebFetch",
+                "--strict-mcp-config",
+                "--",
+                "hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn variadic_tool_list_is_followed_by_an_option() {
+        let inv = Invocation {
+            prompt: "WebFetch http://169.254.169.254",
+            resume: Some("abc"),
+            model: Some("opus"),
+        };
+        let args = strings(&build_args(&cfg(), inv));
+        let at = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert_eq!(args[at + 1], "WebFetch");
+        assert!(args[at + 2].starts_with('-'), "{args:?}");
+    }
+
+    #[test]
+    fn owner_permission_mode_leaves_tools_and_mcp_alone() {
+        let mut c = cfg();
+        c.permission_mode = Some("acceptEdits".to_owned());
+        let args = strings(&build_args(&c, hi()));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--permission-mode", "acceptEdits"])
+        );
+        assert!(!args.iter().any(|a| a == "--disallowedTools"));
+        assert!(!args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
+    }
+
+    #[test]
+    fn owner_extra_args_override_the_pinned_defaults() {
+        let mut c = cfg();
+        c.extra_args = [
+            "--allowedTools",
+            "WebFetch",
+            "--mcp-config",
+            "/srv/hashi/mcp.json",
+            "--setting-sources=user,project",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let args = strings(&build_args(&c, hi()));
+        assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--setting-sources"), "{args:?}");
+        // Strict mode stays, so only the servers in the owner's file load.
+        assert_eq!(
+            args.iter().filter(|a| *a == "--strict-mcp-config").count(),
+            1
+        );
+        let n = args.len();
+        assert_eq!(&args[n - 7..n - 2], c.extra_args.as_slice());
+
+        let mut c = cfg();
+        c.extra_args = vec!["--strict-mcp-config".to_owned()];
+        let args = strings(&build_args(&c, hi()));
+        assert_eq!(
+            args.iter().filter(|a| *a == "--strict-mcp-config").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn leading_slash_is_not_a_slash_command() {
+        let inv = Invocation {
+            prompt: "/owner-deploy now",
+            resume: None,
+            model: None,
+        };
+        let args = strings(&build_args(&cfg(), inv));
+        assert_eq!(args.last().map(String::as_str), Some(" /owner-deploy now"));
+        let args = strings(&build_args(&cfg(), hi()));
+        assert_eq!(args.last().map(String::as_str), Some("hi"));
     }
 
     #[test]

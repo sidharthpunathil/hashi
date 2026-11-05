@@ -16,6 +16,13 @@ pub fn env(_workdir: &std::path::Path) -> Vec<(String, String)> {
 ///
 /// The sandbox is passed as a `-c` override because `codex exec resume` does
 /// not accept `--sandbox`, while both forms accept config overrides.
+///
+/// No MCP override is passed. `-c mcp_servers={}` would not hide the owner's
+/// servers: Codex deep-merges the `-c` layer into the config tables
+/// (`codex-rs/config/src/overrides.rs`, `merge_toml_values`), so an empty
+/// table leaves every configured server in place. Turning servers off needs
+/// their names (`-c mcp_servers.<name>.enabled=false`), which only the owner
+/// knows, so that is left to `extra_args`.
 #[must_use]
 pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["exec".into()];

@@ -10,12 +10,13 @@
 //!    that the volume holding the Hashi home is above its floor. If not, it
 //!    gives the slot back and tries again a few seconds later.
 //! 3. A per-run watchdog (see [`MemoryWatch`]) that samples the run's whole
-//!    process tree and stops it when it grows past its limit.
+//!    process tree, including processes that left it for another process
+//!    group or session (see [`crate::agent::tree`]), and stops it when it
+//!    grows past its limit.
 //!
 //! All measurements go through the [`Probe`] trait, so tests can simulate a
 //! busy machine without touching the real one.
 
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -27,6 +28,7 @@ use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 
+pub use crate::agent::tree::RunScope;
 use crate::events::{Bus, Event};
 use crate::util::human_bytes;
 
@@ -202,6 +204,16 @@ pub trait Probe: Send + Sync + fmt::Debug {
     /// Resident memory of process `pid` plus all of its descendants (and,
     /// on Unix, every member of its process group).
     fn tree_memory(&self, pid: u32) -> Option<u64>;
+
+    /// Resident memory of the run led by `pid`: like
+    /// [`tree_memory`](Probe::tree_memory), plus (on Unix) every process in
+    /// a group or session recorded in `scope`, and the groups and sessions of
+    /// every process found are added to `scope` (see
+    /// [`crate::agent::tree`]). The default ignores `scope`.
+    fn run_memory(&self, pid: u32, scope: &mut RunScope) -> Option<u64> {
+        let _ = scope;
+        self.tree_memory(pid)
+    }
 }
 
 /// Measures the real machine through `sysinfo`.
@@ -279,35 +291,22 @@ impl Probe for SystemProbe {
     }
 
     fn tree_memory(&self, pid: u32) -> Option<u64> {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
+        self.run_memory(pid, &mut RunScope::new(pid))
+    }
+
+    fn run_memory(&self, pid: u32, scope: &mut RunScope) -> Option<u64> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
 
         let mut sys = self.sys.lock().ok()?;
+        // Threads are not listed as processes of their own, or a
+        // multithreaded agent's memory would be counted once per thread.
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
-            ProcessRefreshKind::nothing().with_memory(),
+            ProcessRefreshKind::nothing().with_memory().without_tasks(),
         );
         let procs = sys.processes();
-        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-        for (p, proc_) in procs {
-            if let Some(parent) = proc_.parent() {
-                children.entry(parent).or_default().push(*p);
-            }
-        }
-        let root = Pid::from_u32(pid);
-        let mut stack = vec![root];
-        // Descendants that double-forked away from the tree are still in the
-        // run's process group, so count those too.
-        #[cfg(unix)]
-        stack.extend(procs.keys().copied().filter(|p| same_group(*p, pid)));
-        let mut seen = HashSet::new();
-        while let Some(p) = stack.pop() {
-            if seen.insert(p)
-                && let Some(kids) = children.get(&p)
-            {
-                stack.extend(kids.iter().copied());
-            }
-        }
+        let seen = crate::agent::tree::members(procs, pid, true, scope);
         let mut found = false;
         let mut total = 0u64;
         for p in &seen {
@@ -318,15 +317,6 @@ impl Probe for SystemProbe {
         }
         found.then_some(total)
     }
-}
-
-#[cfg(unix)]
-fn same_group(p: sysinfo::Pid, group: u32) -> bool {
-    use nix::unistd::{Pid, getpgid};
-    let (Ok(p), Ok(g)) = (i32::try_from(p.as_u32()), i32::try_from(group)) else {
-        return false;
-    };
-    getpgid(Some(Pid::from_raw(p))).is_ok_and(|pg| pg == Pid::from_raw(g))
 }
 
 /// A probe that reports fixed, adjustable figures. For tests and demos.

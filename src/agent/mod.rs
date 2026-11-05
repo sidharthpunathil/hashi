@@ -15,6 +15,7 @@ pub mod gemini;
 pub mod opencode;
 pub mod qwen;
 pub mod runner;
+pub mod tree;
 
 use std::ffi::OsString;
 use std::fmt;
@@ -300,6 +301,32 @@ pub fn is_safe_arg(s: &str) -> bool {
         && s.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '@' | '[' | ']')
         })
+}
+
+/// Whether `args` (the owner's `extra_args`) set any of the options `names`,
+/// either as a separate element or in `--name=value` form.
+#[must_use]
+pub fn has_flag(args: &[String], names: &[&str]) -> bool {
+    args.iter().any(|a| {
+        let name = a.split_once('=').map_or(a.as_str(), |(name, _)| name);
+        names.contains(&name)
+    })
+}
+
+/// Keeps a prompt from being read as a slash command.
+///
+/// Gemini CLI and Claude Code run a prompt that starts with `/` as one of
+/// their own commands (built in, or a custom command or skill from the
+/// owner's config), which a shared user must not be able to trigger. Gemini
+/// only checks `startsWith('/')` without trimming, so a leading space makes
+/// it an ordinary prompt; the same space is used for Claude Code.
+#[must_use]
+pub fn neutralize_slash_command(prompt: &str) -> String {
+    if prompt.starts_with('/') {
+        format!(" {prompt}")
+    } else {
+        prompt.to_owned()
+    }
 }
 
 /// Finds an executable on `PATH` or in the usual per-user install locations.
