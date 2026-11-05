@@ -110,6 +110,21 @@ struct ServeArgs {
     /// Name shown to people you share with.
     #[arg(long, default_value = "Hashi", env = "HASHI_NAME")]
     name: String,
+    /// Serve HTTPS with this PEM certificate chain (needs --tls-key).
+    #[arg(long, env = "HASHI_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// Private key for --tls-cert, in PEM.
+    #[arg(long, env = "HASHI_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+    /// Run a named Cloudflare tunnel with this token, for a stable hostname.
+    /// Set --public-url to that hostname.
+    #[arg(
+        long,
+        env = "HASHI_TUNNEL_TOKEN",
+        requires = "public_url",
+        hide_env_values = true
+    )]
+    tunnel_token: Option<String>,
     /// Plain logs instead of the dashboard (also used when stdout is not a terminal).
     #[arg(long)]
     headless: bool,
@@ -222,10 +237,18 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
     init_logging(home, tui)?;
 
     if !args.bind.is_loopback() {
-        eprintln!(
-            "warning: listening on {} exposes the API to your network; prefer 127.0.0.1 with --tunnel",
-            args.bind
-        );
+        if args.tls_cert.is_some() {
+            eprintln!(
+                "note: serving HTTPS on {}, reachable from your network",
+                args.bind
+            );
+        } else {
+            eprintln!(
+                "warning: listening on {} without TLS exposes the API to your network in plain text; \
+                 add --tls-cert/--tls-key, or keep 127.0.0.1 and use --tunnel",
+                args.bind
+            );
+        }
     }
 
     let cfg = ServerConfig {
@@ -244,6 +267,14 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         tunnel: args.tunnel,
         public_url: args.public_url.clone(),
         name: args.name.clone(),
+        tls: match (&args.tls_cert, &args.tls_key) {
+            (Some(cert), Some(key)) => Some(hashi::tls::TlsFiles {
+                cert: cert.clone(),
+                key: key.clone(),
+            }),
+            _ => None,
+        },
+        tunnel_token: args.tunnel_token.clone(),
     };
 
     let bus = Bus::default();

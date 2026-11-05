@@ -45,6 +45,10 @@ pub struct ServerConfig {
     pub public_url: Option<String>,
     /// Name shown to people you share with.
     pub name: String,
+    /// Serve HTTPS with these files instead of plain HTTP.
+    pub tls: Option<crate::tls::TlsFiles>,
+    /// Run a named Cloudflare tunnel with this token (needs `public_url`).
+    pub tunnel_token: Option<String>,
 }
 
 /// A running server.
@@ -65,6 +69,14 @@ impl Running {
         self.cancel.cancel();
         while self.tasks.join_next().await.is_some() {}
     }
+}
+
+async fn hsts(mut res: axum::response::Response) -> axum::response::Response {
+    res.headers_mut().insert(
+        axum::http::header::STRICT_TRANSPORT_SECURITY,
+        axum::http::HeaderValue::from_static("max-age=31536000"),
+    );
+    res
 }
 
 /// Creates the data directory with owner-only permissions.
@@ -168,14 +180,24 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         }
     }
 
+    // Load certificates before binding, so a bad file fails fast and clearly.
+    let tls_config = cfg.tls.as_ref().map(crate::tls::load).transpose()?;
+    if cfg.tunnel_token.is_some() && cfg.public_url.is_none() {
+        anyhow::bail!("a named tunnel needs --public-url set to its hostname");
+    }
     let listener = tokio::net::TcpListener::bind(cfg.bind)
         .await
         .with_context(|| format!("binding {}", cfg.bind))?;
     let local = listener.local_addr()?;
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
 
     let runtime = Arc::new(Runtime {
         started: Instant::now(),
-        local_url: format!("http://{local}"),
+        local_url: format!("{scheme}://{local}"),
         public_url: RwLock::new(cfg.public_url.clone()),
         agents,
         name: cfg.name.clone(),
@@ -207,23 +229,48 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         cancel.clone(),
     );
 
-    let app = api::router(state.clone());
+    let mut app = api::router(state.clone());
     let shutdown = cancel.clone();
-    tasks.spawn(async move {
-        let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
-        if let Err(e) = serve.await {
-            warn!(error = %e, "http server stopped");
+    let local_tls = tls_config.is_some();
+    match tls_config {
+        Some(config) => {
+            // Browsers should keep using HTTPS for this host from now on.
+            app = app.layer(axum::middleware::map_response(hsts));
+            let listener = crate::tls::TlsListener::new(listener, config)?;
+            tasks.spawn(async move {
+                let serve =
+                    axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+                if let Err(e) = serve.await {
+                    warn!(error = %e, "https server stopped");
+                }
+            });
         }
-    });
-    bus.log(format!("listening on http://{local}"));
+        None => {
+            tasks.spawn(async move {
+                let serve =
+                    axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+                if let Err(e) = serve.await {
+                    warn!(error = %e, "http server stopped");
+                }
+            });
+        }
+    }
+    bus.log(format!("listening on {scheme}://{local}"));
 
-    if cfg.tunnel {
+    if cfg.tunnel || cfg.tunnel_token.is_some() {
         let bus = bus.clone();
         let runtime = Arc::clone(&runtime);
         let cancel = cancel.clone();
         let port = local.port();
+        let tunnel_token = cfg.tunnel_token.clone();
+        let home = cfg.home.clone();
+        let named_url = cfg.public_url.clone();
         tasks.spawn(async move {
-            match crate::tunnel::start(port).await {
+            let started = match (&tunnel_token, &named_url) {
+                (Some(token), Some(url)) => crate::tunnel::start_named(token, url, &home).await,
+                _ => crate::tunnel::start(port, local_tls, &home).await,
+            };
+            match started {
                 Ok(mut tunnel) => {
                     // A configured public URL wins: invite links must not change.
                     if let Ok(mut url) = runtime.public_url.write()
