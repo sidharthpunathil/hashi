@@ -189,6 +189,7 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         limiter: Arc::new(RateLimiter::new(cfg.rate_limit)),
         default_agent: cfg.default_agent,
         queue_limit: cfg.queue_limit,
+        run_timeout_secs: cfg.limits.timeout.as_secs(),
     };
 
     let cancel = CancellationToken::new();

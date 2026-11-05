@@ -20,6 +20,7 @@
 //! | `POST`   | `/v1/claim/preview`   | code  | What an invite would grant         |
 //! | `POST`   | `/v1/claim/redeem`    | code  | Use an invite, get a token once    |
 //! | `GET`    | `/claim/{code}`, `/me`|       | Pages for people you share with    |
+//! | `POST`   | `/mcp`                | token | MCP server for agent clients       |
 //!
 //! "any" accepts paused and expired tokens, so they can see why they stopped.
 
@@ -125,6 +126,8 @@ pub struct AppState {
     pub default_agent: AgentKind,
     /// Maximum pending requests across all agents.
     pub queue_limit: u64,
+    /// Per-run time limit, in seconds. MCP calls wait this long for an answer.
+    pub run_timeout_secs: u64,
 }
 
 /// Builds the router.
@@ -159,6 +162,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/claim/preview", post(invites::preview))
         .route("/v1/claim/redeem", post(invites::redeem))
         .merge(crate::web::routes())
+        .route(
+            "/mcp",
+            post(crate::mcp::handle).get(crate::mcp::get_not_allowed),
+        )
         .fallback(|| async { ApiError::NotFound("no such route") })
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .layer(cors)
