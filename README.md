@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
-    <img src="assets/logo-light.png" alt="Hashi the Bridge" width="420">
+    <img src="assets/logo-light.png" alt="Hashi the Bridge" width="560">
   </picture>
 </p>
 
