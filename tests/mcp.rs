@@ -408,3 +408,25 @@ async fn missing_token_is_401() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     h.running.shutdown().await;
 }
+
+/// `my_usage` is `/v1/me`: the per-agent `agentUsage` headroom only when
+/// the owner turned on `shareUsage` for the token, and nothing of it
+/// otherwise.
+#[tokio::test]
+async fn my_usage_shares_headroom_only_with_share_usage() {
+    let h = harness().await;
+    let private = h.user_token(json!({"name": "private"})).await;
+    let r = h.tool(&private, "my_usage", json!({})).await;
+    assert_eq!(r["isError"], false, "{r}");
+    let me: Value = serde_json::from_str(text(&r)).unwrap();
+    assert!(me.get("agentUsage").is_none(), "{me}");
+    assert!(!text(&r).contains("headroom"), "{me}");
+
+    let shared = h
+        .user_token(json!({"name": "shared", "shareUsage": true}))
+        .await;
+    let r = h.tool(&shared, "my_usage", json!({})).await;
+    let me: Value = serde_json::from_str(text(&r)).unwrap();
+    assert!(me["agentUsage"].is_object(), "{me}");
+    h.running.shutdown().await;
+}

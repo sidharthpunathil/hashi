@@ -80,7 +80,7 @@ A token can cancel its own requests; an admin token can cancel any. Another toke
 - **`model`** picks the agent: `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor`. Add the agent's own model after a slash, for example `claude/opus` or `gemini/gemini-2.5-pro`. Without `model` the server's default agent answers.
 - **`messages`.** System and developer messages go first as an instruction block, earlier user and assistant turns follow as a plain transcript, and the last message, which must be from the user, ends the prompt. Only text is accepted: a string, or parts with `type: "text"`. Images, audio and `tool` messages answer `400`.
 - **Response.** A standard `chat.completion` with `finish_reason: "stop"`. `usage` maps the tokens the agent reports (`prompt_tokens`, `completion_tokens`, `total_tokens`) and is left out when the agent reports none. The `X-Hashi-Request-Id` header carries the Hashi request id.
-- **`stream: true`** answers with server-sent events: a role chunk, then `: queued` or `: running` comment lines every second while the request waits or runs, then one chunk with the whole answer, a final chunk with `finish_reason`, and `data: [DONE]`. Agents do not stream token by token. With `stream_options.include_usage` a usage chunk comes before `[DONE]`. A failed run sends `data: {"error": {...}}` and closes the stream. A stream counts as one of the token's 4 open long polls; a fifth answers `429 too_many_waits`.
+- **`stream: true`** answers with server-sent events: a role chunk, then `: queued` or `: running` comment lines every second while the request waits or runs, then one chunk with the whole answer, a final chunk with `finish_reason`, and `data: [DONE]`. Agents do not stream token by token. With `stream_options.include_usage` a usage chunk comes before `[DONE]`. A failed run sends `data: {"error": {...}}` and closes the stream. A stream also ends, with an error chunk and `data: [DONE]`, when its token is paused (`token_paused`), revoked or expires (`unauthorized`), or when it has been open for twice the run timeout plus 10 seconds (`504 stream_timeout`). The request keeps its place in the queue: read it later with `GET /v1/ask/{id}`. A stream counts as one of the token's 4 open long polls; a fifth answers `429 too_many_waits`.
 - **Time limit.** Without streaming the request is held for up to 120 seconds (set a shorter `wait`, in seconds, if you like). If the answer is not ready by then you get `202` with the Hashi request `id` and a `poll` path: read it with `GET /v1/ask/{id}`, or send `stream: true` next time. A token that already holds 4 long polls gets the `202` at once.
 - **Ignored.** `temperature`, `max_tokens`, `tools` and other unknown fields are accepted and ignored. Tool calling is not supported.
 - **`GET /v1/models`** lists the agents this token may use that are installed on this machine.
@@ -269,7 +269,7 @@ Admin only. Lists every account with its state, use and quota; keys, access toke
 
 `usage` has one entry per quota window, with `source` `poll` (a read of the live quota), `run` (a Claude Code run's `rate_limit_event`), `error` (a run that failed at the limit, counted as fully used until `resetsAt`) or `remote` (a remote account's `/v1/me`: the shared headroom as window `remote`, and the remote token's caps as `daily_requests`, `monthly_requests`, `daily_budget` and `monthly_budget`). In `summary`, `headroom` is 100 minus the highest `usedPercent` (whole percent, `null` when nothing is known), `binding` names that window, and `state` is `ok`, `warning` (at or above the server's `rotateAt`), `limited` (until `limitedUntil`) or `unknown`. `note` says why there are no figures, such as "unknown, refreshes on its next run". `costToday` and `tokensToday` are what this account's runs reported today (UTC).
 
-None of this is shown to token holders: the MCP tools and the OpenAI-compatible responses have no usage fields, and `/v1/me` has only the per-agent `agentUsage` summary, and only for a token with `shareUsage`.
+None of this is shown to token holders: the OpenAI-compatible responses have no usage fields, and `/v1/me` and the MCP `my_usage` tool have only the per-agent `agentUsage` summary, and only for a token with `shareUsage`.
 
 ## `POST /v1/accounts/{agent}/{name}/refresh`
 
@@ -279,7 +279,7 @@ Admin only. Reads a Claude Code or Codex sign-in's quota now (the default accoun
 
 ## MCP
 
-`POST /mcp` is an MCP server. It offers one `ask_<agent>` tool for every agent the token may use (for example `ask_claude`, `ask_gemini`), `get_result` for long runs, `cancel` to stop a queued or running request by id (the token's own, or any for an admin), `my_usage`, and `request_more`, which asks the owner for more with the fields of `POST /v1/me/requests`. Limits and pause apply exactly as they do over HTTP. To add it to Claude Code:
+`POST /mcp` is an MCP server. It offers one `ask_<agent>` tool for every agent the token may use (for example `ask_claude`, `ask_gemini`), `get_result` for long runs, `cancel` to stop a queued or running request by id (the token's own, or any for an admin), `my_usage` (the `/v1/me` document, so with `agentUsage` only when the owner turned on `shareUsage` for the token), and `request_more`, which asks the owner for more with the fields of `POST /v1/me/requests`. Limits and pause apply exactly as they do over HTTP. To add it to Claude Code:
 
 ```bash
 claude mcp add --transport http hashi https://your-host/mcp --header "Authorization: Bearer hashi_…"
@@ -303,6 +303,7 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 409 | `already_claimed` | The invite link was already used |
 | 410 | `invite_expired` | The invite link is past its expiry |
 | 413 | | Body larger than 64 KB |
+| 413 | `too_large` | A token that may run on a remote account sent a prompt that would pass 64 KB once forwarded |
 | 421 | `unknown_host` | Plain HTTP request with a `Host` Hashi does not serve (see `--allowed-host`) |
 | 429 | `limit_reached` | A daily or monthly cap was hit; `limit` and `resetAt` say which and until when |
 | 429 | `too_many_pending` | The token already has `maxPending` prompts in flight |
@@ -311,6 +312,7 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 500 | `internal` | A bug in Hashi. The error also carries an `errorId` to quote in a bug report |
 | 502 | `agent_failed` | OpenAI endpoint: the agent run failed or was cancelled; `message` says why |
 | 503 | `unavailable` | That agent is not installed on this machine |
+| 504 | `stream_timeout` | OpenAI endpoint: a stream passed its deadline before the answer was ready |
 | 508 | `hop_limit` | A forwarded prompt has passed through more than 2 bridges |
 | 508 | `loop` | A forwarded prompt came from this same bridge |
 

@@ -20,8 +20,12 @@ pub const LINK_PREFIX: &str = "hashi_ask_";
 pub const PICKUP_PREFIX: &str = "hashi_pick_";
 /// Pending requests one link may hold.
 pub const MAX_PENDING_PER_LINK: usize = 50;
-/// Pending requests the server holds in total.
+/// Pending new-person requests the server holds in total.
 pub const MAX_PENDING_TOTAL: usize = 200;
+/// Pending "more" requests from token holders the server holds in total.
+/// Counted apart from new-person requests, so anonymous requesters filling
+/// [`MAX_PENDING_TOTAL`] never stop a token holder from asking for more.
+pub const MAX_PENDING_MORE: usize = 200;
 /// Open requests one token may hold.
 pub const MAX_OPEN_PER_TOKEN: usize = 3;
 /// A token may open one new request per this many milliseconds.
@@ -210,7 +214,8 @@ pub enum AccessAdmission {
     Created(Box<AccessRequest>, Option<String>),
     /// The link already holds [`MAX_PENDING_PER_LINK`] pending requests.
     LinkFull,
-    /// The server already holds [`MAX_PENDING_TOTAL`] pending requests.
+    /// The server already holds [`MAX_PENDING_TOTAL`] pending new-person
+    /// requests, or [`MAX_PENDING_MORE`] pending "more" requests.
     TotalFull,
     /// The token already has [`MAX_OPEN_PER_TOKEN`] open requests.
     TokenBusy,
@@ -391,12 +396,17 @@ impl Store {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let pending = "status = 'pending' AND expires_at > ?1";
+        // New-person and "more" requests have caps of their own.
+        let cap = match new.kind {
+            AccessKind::New => MAX_PENDING_TOTAL,
+            AccessKind::More => MAX_PENDING_MORE,
+        };
         let total = count(
             &tx,
-            &format!("SELECT COUNT(*) FROM access_requests WHERE {pending}"),
-            [now],
+            &format!("SELECT COUNT(*) FROM access_requests WHERE kind = ?2 AND {pending}"),
+            params![now, new.kind.as_str()],
         )?;
-        if total >= MAX_PENDING_TOTAL {
+        if total >= cap {
             return Ok(AccessAdmission::TotalFull);
         }
         if let Some(link) = &new.link_id {
@@ -727,6 +737,64 @@ mod tests {
         assert!(matches!(
             s.insert_access_request(&new_person("a", "fresh")).unwrap(),
             AccessAdmission::Created(..)
+        ));
+    }
+
+    /// A request for more from a new token of its own.
+    fn more_from(s: &Store) -> NewAccessRequest {
+        let (token, _) = s
+            .create_token(&super::super::NewToken {
+                name: "t".into(),
+                role: crate::token::Role::User,
+                session_mode: crate::token::SessionMode::Stateful,
+                agents: vec![AgentKind::Claude],
+                expires_in_days: None,
+                note: None,
+                limits: crate::token::Limits::default(),
+                accounts: crate::accounts::AccountMap::default(),
+                project: None,
+            })
+            .unwrap();
+        NewAccessRequest {
+            kind: AccessKind::More,
+            link_id: None,
+            token_id: Some(token.id),
+            name: "t".to_owned(),
+            message: String::new(),
+            agents: Vec::new(),
+            project: None,
+            asked: MoreAsk::default(),
+        }
+    }
+
+    #[test]
+    fn a_flood_of_new_person_requests_never_blocks_a_request_for_more() {
+        let s = Store::open_in_memory().unwrap();
+        for link in 0..MAX_PENDING_TOTAL / MAX_PENDING_PER_LINK {
+            for i in 0..MAX_PENDING_PER_LINK {
+                s.insert_access_request(&new_person(&format!("l{link}"), &format!("p{i}")))
+                    .unwrap();
+            }
+        }
+        assert!(matches!(
+            s.insert_access_request(&new_person("other", "late"))
+                .unwrap(),
+            AccessAdmission::TotalFull
+        ));
+        assert!(matches!(
+            s.insert_access_request(&more_from(&s)).unwrap(),
+            AccessAdmission::Created(_, None)
+        ));
+        // And "more" requests have a cap of their own.
+        for _ in 1..MAX_PENDING_MORE {
+            assert!(matches!(
+                s.insert_access_request(&more_from(&s)).unwrap(),
+                AccessAdmission::Created(..)
+            ));
+        }
+        assert!(matches!(
+            s.insert_access_request(&more_from(&s)).unwrap(),
+            AccessAdmission::TotalFull
         ));
     }
 

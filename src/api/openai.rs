@@ -35,10 +35,23 @@ use super::{
 use crate::agent::{AgentKind, Usage};
 use crate::events::Event;
 use crate::store::{Request, RequestStatus};
+use crate::token::TokenStatus;
 
 /// How often a stream sends a `: queued` or `: running` comment while the
 /// request waits or runs.
 pub const STREAM_KEEPALIVE: Duration = Duration::from_secs(1);
+
+/// Time a stream allows past its queue wait and run timeout.
+pub const STREAM_GRACE: Duration = Duration::from_secs(10);
+
+/// Longest a stream stays open: as long again as the run timeout for the
+/// queue wait, then the run timeout, then [`STREAM_GRACE`]. A request held
+/// longer (its token paused, or the machine short of memory) keeps its
+/// place in the queue, but the stream ends and frees its wait slot.
+#[must_use]
+pub fn stream_deadline(run_timeout_secs: u64) -> Duration {
+    Duration::from_secs(run_timeout_secs.saturating_mul(2)).saturating_add(STREAM_GRACE)
+}
 
 /// The OpenAI-compatible routes, merged into the main router.
 pub(super) fn routes() -> Router<AppState> {
@@ -438,10 +451,46 @@ fn data(v: &Value) -> SseEvent {
     SseEvent::default().data(v.to_string())
 }
 
+/// Why a stream whose request is still queued or running ends now: its
+/// token is no longer active, or the stream is past its deadline (see
+/// [`stream_deadline`]). The request itself is left as it is.
+fn stream_cut(state: &AppState, req: &Request, past_deadline: bool) -> Option<Value> {
+    let token = match state.store.get_token(&req.token_id) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(id = %req.id, error = %e, "stream could not read its token");
+            None
+        }
+    };
+    let (status, code, message) = match token.map(|t| t.status(crate::util::now_ms())) {
+        Some(TokenStatus::Active) if !past_deadline => return None,
+        Some(TokenStatus::Active) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "stream_timeout",
+            format!(
+                "the answer is not ready yet; poll /v1/ask/{} for it",
+                req.id
+            ),
+        ),
+        Some(TokenStatus::Paused) => (
+            StatusCode::FORBIDDEN,
+            "token_paused",
+            "this token is paused by the owner".to_owned(),
+        ),
+        Some(TokenStatus::Expired) | None => (
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "invalid or expired token".to_owned(),
+        ),
+    };
+    Some(json!({ "error": error_object(status, code, &message) }))
+}
+
 /// Feeds one streamed completion: a role chunk, a comment with the status
 /// every [`STREAM_KEEPALIVE`] until the run ends, then the answer, the
 /// finish chunk and `[DONE]`, or an error event. Stops early if the client
-/// goes away.
+/// goes away, and ends with an error event and `[DONE]` once the token is
+/// no longer active or the stream passes [`stream_deadline`].
 async fn stream(
     state: &AppState,
     id: &str,
@@ -451,6 +500,7 @@ async fn stream(
 ) {
     // Subscribe before the first read, so a finish in between is not missed.
     let mut events = state.bus.subscribe();
+    let deadline = tokio::time::Instant::now().checked_add(stream_deadline(state.run_timeout_secs));
     let role = meta.chunk(json!({ "role": "assistant", "content": "" }), None);
     if tx.send(data(&role)).await.is_err() {
         return;
@@ -474,6 +524,15 @@ async fn stream(
         };
         if req.status.is_terminal() {
             break req;
+        }
+        let late = deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+        if let Some(error) = stream_cut(state, &req, late) {
+            for ev in [data(&error), SseEvent::default().data("[DONE]")] {
+                if tx.send(ev).await.is_err() {
+                    return;
+                }
+            }
+            return;
         }
         let comment = SseEvent::default().comment(req.status.as_str());
         // Read again after the wait; do not hold this copy (and its prompt)
@@ -533,6 +592,13 @@ mod tests {
 
     fn msgs(v: Value) -> Vec<ChatMessage> {
         serde_json::from_value(v).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_stream_lasts_a_queue_wait_and_a_run_timeout() {
+        assert_eq!(stream_deadline(600), Duration::from_secs(1_210));
+        assert_eq!(stream_deadline(1), Duration::from_secs(12));
+        assert_eq!(stream_deadline(u64::MAX), Duration::MAX);
     }
 
     #[test]

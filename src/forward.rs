@@ -11,7 +11,8 @@
 //! The bridge's refusals map onto what the queue already understands (see
 //! [`Failure`]): limits mark the account limited, a paused, revoked or
 //! forbidden token disables it with the reason shown to the owner, and a
-//! network failure fails over to the next account.
+//! network failure or a transient refusal (`too_many_pending`,
+//! `rate_limited`) fails over to the next account after a short back-off.
 //!
 //! **Loops.** Every forwarded prompt carries [`HOPS_HEADER`], one more than
 //! the hops the prompt arrived with, and [`FROM_HEADER`], this bridge's
@@ -231,17 +232,24 @@ fn message(status: u16, body: &Value) -> String {
 }
 
 /// What a refusal from the bridge means for the account.
+///
+/// Only `limit_reached`, a daily or monthly cap of the remote token, marks
+/// the account limited. `too_many_pending`, `rate_limited` and any other
+/// `429` are transient and say nothing about the account: one token holder
+/// here can cause them by sending a burst, so they are [`Failure::Retryable`]
+/// and the queue backs off the account for seconds, not the cooldown.
 #[must_use]
 pub fn classify(status: u16, body: &Value) -> Failure {
     let code = body["error"]["code"].as_str().unwrap_or_default();
     let text = message(status, body);
     match (status, code) {
-        (_, "limit_reached" | "too_many_pending" | "rate_limited") | (429, _) => Failure::Limited {
+        (_, "limit_reached") => Failure::Limited {
             reset_at: body["error"]["resetAt"]
                 .as_str()
                 .and_then(crate::util::parse_rfc3339),
             message: text,
         },
+        (_, "too_many_pending" | "rate_limited") | (429, _) => Failure::Retryable(text),
         (_, "token_paused") => Failure::Disabled(format!("the bridge owner paused it: {text}")),
         (401, _) | (_, "unauthorized") => Failure::Disabled(format!(
             "the bridge no longer accepts its token (revoked or expired): {text}"
@@ -283,6 +291,34 @@ fn usage_of(v: &Value) -> Option<Usage> {
     })
 }
 
+/// The body of the `POST /v1/ask` that forwards a prompt.
+fn submit_body(message: &str, model: Option<&str>, agent: AgentKind) -> Value {
+    let mut body = json!({
+        "message": message,
+        "agent": agent,
+    });
+    if let Some(m) = model {
+        body["model"] = json!(m);
+    }
+    body
+}
+
+/// Whether a prompt, forwarded to a remote bridge for any agent, fits that
+/// bridge's [`crate::api::MAX_BODY_BYTES`]. A prompt that fits here can
+/// still grow past it once re-encoded with the agent's name, so a token
+/// that may run on a remote account is refused such a prompt up front with
+/// the usual `413`, rather than sending it and failing there.
+#[must_use]
+pub fn fits_remote(message: &str, model: Option<&str>) -> bool {
+    let longest = AgentKind::ALL
+        .iter()
+        .copied()
+        .max_by_key(|a| a.as_str().len())
+        .unwrap_or(AgentKind::Claude);
+    serde_json::to_vec(&submit_body(message, model, longest))
+        .is_ok_and(|b| b.len() <= crate::api::MAX_BODY_BYTES)
+}
+
 fn remaining(deadline: Instant) -> Option<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -306,13 +342,7 @@ pub fn forward(target: &Target, call: &Call<'_>, handle: &Handle) -> Result<Repl
     }
     // No wait on the submit: the request id comes back at once, so a
     // cancel from here on can reach the bridge.
-    let mut body = json!({
-        "message": call.message,
-        "agent": target.agent,
-    });
-    if let Some(m) = call.model {
-        body["model"] = json!(m);
-    }
+    let body = submit_body(call.message, call.model, target.agent);
     let agent = http(Duration::from_secs(30));
     let res = agent
         .post(&target.url("/v1/ask"))
@@ -600,13 +630,20 @@ mod tests {
             }
         ));
         assert!(matches!(
-            classify(429, &body("too_many_pending")),
+            classify(429, &body("limit_reached")),
             Failure::Limited { reset_at: None, .. }
+        ));
+        // Transient refusals one holder can cause never mark the account
+        // limited for the cooldown.
+        assert!(matches!(
+            classify(429, &body("too_many_pending")),
+            Failure::Retryable(_)
         ));
         assert!(matches!(
             classify(429, &body("rate_limited")),
-            Failure::Limited { .. }
+            Failure::Retryable(_)
         ));
+        assert!(matches!(classify(429, &json!({})), Failure::Retryable(_)));
         assert!(matches!(
             classify(403, &body("token_paused")),
             Failure::Disabled(_)
@@ -632,6 +669,17 @@ mod tests {
             classify(400, &body("bad_request")),
             Failure::Failed(_)
         ));
+    }
+
+    #[test]
+    fn only_prompts_whose_forwarded_body_fits_the_far_cap_fit() {
+        assert!(fits_remote("hello", Some("opus")));
+        // Fits a 64 KB body here as `{"message":"..."}`, not once the agent
+        // is added on the way out.
+        let quotes = "\"".repeat(32_760);
+        let here = serde_json::to_vec(&json!({ "message": quotes })).unwrap();
+        assert!(here.len() <= crate::api::MAX_BODY_BYTES);
+        assert!(!fits_remote(&quotes, None));
     }
 
     #[test]

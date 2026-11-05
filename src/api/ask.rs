@@ -280,6 +280,18 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
                 .is_some_and(|a| a.kind == crate::accounts::AccountKind::Remote && !a.disabled)
         })
     });
+    // Refused here, as any body over the cap is, rather than failing on
+    // the friend's bridge with an error that would reveal it.
+    if remote && !crate::forward::fits_remote(&message, model.as_deref()) {
+        return Err(ApiError::coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            format!(
+                "the request is larger than {} KB",
+                super::MAX_BODY_BYTES / 1024
+            ),
+        ));
+    }
     if !remote
         && !state
             .runtime

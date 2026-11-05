@@ -533,6 +533,93 @@ async fn pending_caps_per_link_and_in_total() {
 }
 
 #[tokio::test]
+async fn a_flood_of_new_person_requests_does_not_block_request_more() {
+    let h = harness().await;
+    let (token, _) = h.user_token(json!({ "agents": ["claude"] })).await;
+    let store = &h.running.state.store;
+    for link in 0..hashi::store::MAX_PENDING_TOTAL / hashi::store::MAX_PENDING_PER_LINK {
+        for i in 0..hashi::store::MAX_PENDING_PER_LINK {
+            store
+                .insert_access_request(&NewAccessRequest {
+                    kind: AccessKind::New,
+                    link_id: Some(format!("flood-{link}")),
+                    token_id: None,
+                    name: format!("p{i}"),
+                    message: String::new(),
+                    agents: vec![AgentKind::Claude],
+                    project: None,
+                    asked: MoreAsk::default(),
+                })
+                .unwrap();
+        }
+    }
+    let code = h.open_link(json!({})).await;
+    let (status, v) = h.ask(&code, "late").await;
+    assert_eq!(
+        (status, v["error"]["code"].as_str()),
+        (StatusCode::CONFLICT, Some("requests_full"))
+    );
+    // A token holder's request for more has a cap of its own.
+    let (status, r) = h
+        .post(
+            "/v1/me/requests",
+            Some(&token),
+            json!({ "dailyRequests": 100, "message": "more please" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{r}");
+    h.running.shutdown().await;
+}
+
+/// The ask-access page's script, as served.
+const PAGE_JS: &str = include_str!("../src/web/hashi.js");
+
+/// The source of the ask page's code, from `function askPage()` to the
+/// next top-level function.
+fn ask_page_js() -> &'static str {
+    let start = PAGE_JS.find("function askPage()").unwrap();
+    let rest = &PAGE_JS[start..];
+    let end = rest[1..].find("\nfunction ").map_or(rest.len(), |i| i + 1);
+    &rest[..end]
+}
+
+/// There is no JS test runner, so this checks the shape of the code: the
+/// ask page forgets the pickup secret on its own only when
+/// `isFinalAnswer` says the answer is definite, never from a catch block,
+/// and a failed check is retried with a growing delay.
+#[test]
+fn ask_page_forgets_the_pickup_only_on_a_final_answer() {
+    let page = ask_page_js();
+    let mut calls = 0;
+    for (i, _) in page.match_indices("forget()") {
+        let line_start = page[..i].rfind('\n').map_or(0, |n| n + 1);
+        let line_end = page[i..].find('\n').map_or(page.len(), |n| i + n);
+        let line = page[line_start..line_end].trim();
+        calls += 1;
+        assert!(
+            line == "if (isFinalAnswer(answer)) forget();"
+                // The visitor's own "Forget this request" button.
+                || line.starts_with("$(\"forget\").addEventListener(\"click\""),
+            "the ask page forgets the pickup outside isFinalAnswer: {line}"
+        );
+    }
+    assert_eq!(calls, 2, "{page}");
+    for (i, _) in page.match_indices("catch (e) {") {
+        let block = &page[i..];
+        let block = &block[..block.find('}').unwrap()];
+        assert!(!block.contains("forget"), "a catch block forgets: {block}");
+    }
+    // The decision itself: a 404 request_not_found or a finished request.
+    assert!(PAGE_JS.contains(
+        "if (answer.error) return answer.status === 404 && answer.code === \"request_not_found\";"
+    ));
+    assert!(PAGE_JS.contains("const FINAL_STATES = [\"declined\", \"claimed\", \"expired\"];"));
+    assert!(PAGE_JS.contains("return Math.min(10000 * 2 ** Math.max(0, failures - 1), 60000);"));
+    assert!(page.contains("timer = setTimeout(() => poll(pickup), retryDelay(failures));"));
+    assert!(page.contains("retrying…"));
+}
+
+#[tokio::test]
 async fn fields_are_limited_and_stripped_of_control_and_bidi_characters() {
     let h = harness().await;
     let code = h
