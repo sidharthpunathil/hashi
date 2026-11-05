@@ -10,7 +10,9 @@
 //!   login and token refreshes in there. Hashi never reads, copies or
 //!   refreshes those credentials.
 //! - **key**: an API key in `<home>/accounts/<agent>/<name>/key` (mode
-//!   0600), passed in the agent's API-key variable.
+//!   0600), passed in the agent's API-key variable. The account variable
+//!   points at the same directory, so the owner's own config for the agent
+//!   (which could pick another sign-in or supply another key) never loads.
 //! - **remote**: access a friend shared with the owner. A run sends the
 //!   prompt to the saved remote's bridge (see [`crate::remote`] and
 //!   [`crate::forward`]) instead of starting a process. The remote's token
@@ -200,34 +202,118 @@ pub const fn key_var(agent: AgentKind, kind: AccountKind) -> Option<&'static str
 }
 
 /// The credential variables of `agent` that a run on a non-default account
-/// removes from the environment inherited from the owner.
+/// removes from the environment inherited from the owner. Besides keys and
+/// tokens this covers everything that picks another provider or endpoint
+/// (a cloud provider switch, a base URL, a cloud project), since any of
+/// them would send the account's run to the owner's cloud account. A
+/// trailing `*` matches a prefix (see [`crate::agent::runner::env_name_matches`]).
 #[must_use]
 pub const fn credential_vars(agent: AgentKind) -> &'static [&'static str] {
     match agent {
+        // Claude Code's provider settings: "Amazon Bedrock", "Google Vertex
+        // AI" and "Microsoft Foundry" in its third-party integration docs,
+        // and the AWS SDK and Google Cloud variables they read.
         AgentKind::Claude => &[
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_CUSTOM_HEADERS",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
             "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
             "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+            "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+            "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+            "ANTHROPIC_BEDROCK_*",
+            "ANTHROPIC_VERTEX_*",
+            "ANTHROPIC_FOUNDRY_*",
+            "AWS_*",
+            "GOOGLE_CLOUD_*",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GCLOUD_PROJECT",
+            "CLOUD_ML_REGION",
+            "VERTEX_REGION_*",
         ],
-        AgentKind::Codex => &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME"],
+        // codex-rs: `login/src/auth/manager.rs` (OPENAI_API_KEY,
+        // CODEX_API_KEY, CODEX_ACCESS_TOKEN), `model-provider-info/src/lib.rs`
+        // (OPENAI_BASE_URL, and OPENAI_ORGANIZATION and OPENAI_PROJECT sent
+        // as headers), `protocol/src/shell_environment.rs` (workload
+        // identity) and the auth and refresh URL overrides.
+        AgentKind::Codex => &[
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "CODEX_HOME",
+            "CODEX_SQLITE_HOME",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORGANIZATION",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+            "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+            "OPENAI_FEDERATION_RULE_ID",
+            "CODEX_AUTHAPI_BASE_URL",
+            "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+            "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
+        ],
+        // gemini-cli: `core/src/core/contentGenerator.ts` (auth type from
+        // the environment), `cli/src/config/settings.ts` (system settings
+        // paths, Cloud Shell) and `core/src/utils/trust.ts` (workspace trust,
+        // which also decides whether `.gemini/.env` files load).
         AgentKind::Gemini => &[
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
             "GOOGLE_GENAI_USE_GCA",
             "GOOGLE_GENAI_USE_VERTEXAI",
             "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_*",
+            "GOOGLE_GEMINI_BASE_URL",
+            "GOOGLE_VERTEX_BASE_URL",
             "GEMINI_CLI_HOME",
             "GEMINI_FORCE_ENCRYPTED_FILE_STORAGE",
+            "GEMINI_CLI_USE_COMPUTE_ADC",
+            "GEMINI_DEFAULT_AUTH_TYPE",
+            "GEMINI_CLI_AUTH_OVERRIDE",
+            "GEMINI_CLI_TRUST_WORKSPACE",
+            "GEMINI_CLI_TRUSTED_FOLDERS_PATH",
+            "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+            "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+            "GEMINI_CLI_IDE_*",
+            "CLOUD_SHELL",
         ],
         AgentKind::Cursor => &["CURSOR_API_KEY"],
+        // qwen-code: `core/src/models/constants.ts` `AUTH_ENV_MAPPINGS` and
+        // the `envKey` of each provider in `core/src/providers/presets/`.
         AgentKind::Qwen => &[
             "QWEN_HOME",
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GOOGLE_CLOUD_*",
+            "DASHSCOPE_API_KEY",
             "BAILIAN_CODING_PLAN_API_KEY",
+            "BAILIAN_TOKEN_PLAN_API_KEY",
+            "QWENCLOUD_API_KEY",
+            "QWENCLOUD_TOKEN_PLAN_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "IDEALAB_API_KEY",
+            "ZAI_API_KEY",
+            "REQUESTY_API_KEY",
+            "MODELSCOPE_API_KEY",
+            "MOONSHOT_API_KEY",
+            "MINIMAX_API_KEY",
+            "XAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPENCODE_GO_API_KEY",
         ],
         AgentKind::Opencode => &["XDG_DATA_HOME", "OPENCODE_DB"],
         AgentKind::Crush => &crate::agent::crush::PROVIDER_VARS,
@@ -474,11 +560,28 @@ pub fn run_env(
                     "the account directory is missing",
                 ));
             }
+            if agent == AgentKind::Gemini {
+                crate::agent::gemini::prepare_account_home(&dir, false)?;
+            }
             account_vars(agent, &dir)
         }
         AccountKind::ApiKey | AccountKind::OauthToken => {
             let var = key_var(agent, kind).ok_or_else(|| unsupported(agent, kind))?;
-            vec![(var.to_owned(), read_key(home, agent, name)?)]
+            let key = read_key(home, agent, name)?;
+            // The account's own directory too, so the owner's config (Claude
+            // Code's `apiKeyHelper` or `env`, Gemini CLI's chosen sign-in)
+            // cannot outrank the key.
+            let mut set = if dir_var(agent).is_some() {
+                let dir = create_dir(home, agent, name)?;
+                if agent == AgentKind::Gemini {
+                    crate::agent::gemini::prepare_account_home(&dir, true)?;
+                }
+                account_vars(agent, &dir)
+            } else {
+                Vec::new()
+            };
+            set.push((var.to_owned(), key));
+            set
         }
         // A remote account never starts a process.
         AccountKind::Remote => return Err(unsupported(agent, kind)),
@@ -713,9 +816,13 @@ mod tests {
         let env = run_env(home.path(), AgentKind::Codex, "ci", AccountKind::ApiKey)
             .unwrap()
             .unwrap();
+        let ci = account_dir(home.path(), AgentKind::Codex, "ci");
         assert_eq!(
             env.set,
-            [("CODEX_API_KEY".to_owned(), "sk-test-1".to_owned())]
+            [
+                ("CODEX_HOME".to_owned(), ci.to_string_lossy().into_owned()),
+                ("CODEX_API_KEY".to_owned(), "sk-test-1".to_owned())
+            ]
         );
         assert!(env.remove.contains(&"OPENAI_API_KEY"));
         assert!(!format!("{env:?}").contains("sk-test-1"));
@@ -733,20 +840,27 @@ mod tests {
 
     /// The owner's Claude credential variables, set in a re-run of this
     /// test binary (the environment cannot be changed in process).
-    const OWNER_VARS: [(&str, &str); 6] = [
+    const OWNER_VARS: [(&str, &str); 11] = [
         ("ANTHROPIC_API_KEY", "owner-api-key"),
         ("ANTHROPIC_AUTH_TOKEN", "owner-auth-token"),
         ("CLAUDE_CODE_OAUTH_TOKEN", "owner-oauth"),
         ("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "7"),
         ("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "8"),
         ("CLAUDE_CONFIG_DIR", "/owner/.claude"),
+        ("CLAUDE_CODE_USE_BEDROCK", "1"),
+        ("AWS_BEARER_TOKEN_BEDROCK", "owner-bedrock"),
+        ("ANTHROPIC_BASE_URL", "https://owner.example"),
+        ("GOOGLE_CLOUD_PROJECT", "owner-project"),
+        ("CLOUD_ML_REGION", "us-east5"),
     ];
 
     /// Prints the Claude credential variables it sees, as Claude's JSON result.
     const ENV_PROBE: &str = r#"#!/bin/sh
 seen=""
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN \
-         CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR CLAUDE_CONFIG_DIR; do
+         CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR CLAUDE_CONFIG_DIR \
+         CLAUDE_CODE_USE_BEDROCK AWS_BEARER_TOKEN_BEDROCK ANTHROPIC_BASE_URL GOOGLE_CLOUD_PROJECT \
+         CLOUD_ML_REGION; do
   eval "val=\${$v+set:\$$v}"
   if [ -n "$val" ]; then seen="$seen $v=${val#set:}"; fi
 done
@@ -808,6 +922,8 @@ printf '{"type":"result","is_error":false,"result":"env:%s","session_id":"s"}\n'
                 println!("{label}:[{}]", out.text);
             }
             println!("login-dir:[{}]", login.display());
+            let key_dir = account_dir(home.path(), AgentKind::Claude, "ci");
+            println!("key-dir:[{}]", key_dir.display());
             return;
         }
         let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
@@ -828,7 +944,15 @@ printf '{"type":"result","is_error":false,"result":"env:%s","session_id":"s"}\n'
             let start = stdout.find(&format!("{label}:[")).unwrap() + label.len() + 2;
             stdout[start..].split(']').next().unwrap().to_owned()
         };
-        assert_eq!(line("key"), "env: ANTHROPIC_API_KEY=sk-account-key");
+        // The key account has its own config directory too, so the owner's
+        // `~/.claude` settings (an `apiKeyHelper`, say) never load.
+        assert_eq!(
+            line("key"),
+            format!(
+                "env: ANTHROPIC_API_KEY=sk-account-key CLAUDE_CONFIG_DIR={}",
+                line("key-dir")
+            )
+        );
         assert_eq!(
             line("login"),
             format!("env: CLAUDE_CONFIG_DIR={}", line("login-dir"))
@@ -837,6 +961,180 @@ printf '{"type":"result","is_error":false,"result":"env:%s","session_id":"s"}\n'
         for (k, v) in OWNER_VARS {
             assert!(default.contains(&format!("{k}={v}")), "{default}");
         }
+    }
+
+    /// Whether a run with `env` drops the inherited variable `name`.
+    fn strips(env: &EnvOverride, name: &str) -> bool {
+        env.remove
+            .iter()
+            .any(|r| crate::agent::runner::env_name_matches(r, name))
+    }
+
+    #[test]
+    fn cloud_provider_and_endpoint_variables_never_reach_an_account() {
+        let home = tempfile::tempdir().unwrap();
+        let cases: [(AgentKind, &[&str]); 4] = [
+            (
+                AgentKind::Claude,
+                &[
+                    "CLAUDE_CODE_USE_BEDROCK",
+                    "CLAUDE_CODE_USE_VERTEX",
+                    "CLAUDE_CODE_USE_FOUNDRY",
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    "AWS_ACCESS_KEY_ID",
+                    "AWS_SECRET_ACCESS_KEY",
+                    "AWS_SESSION_TOKEN",
+                    "AWS_PROFILE",
+                    "AWS_REGION",
+                    "ANTHROPIC_FOUNDRY_API_KEY",
+                    "ANTHROPIC_VERTEX_PROJECT_ID",
+                    "ANTHROPIC_BASE_URL",
+                    "GOOGLE_CLOUD_PROJECT",
+                    "GOOGLE_APPLICATION_CREDENTIALS",
+                    "CLOUD_ML_REGION",
+                ],
+            ),
+            (
+                AgentKind::Codex,
+                &[
+                    "OPENAI_BASE_URL",
+                    "OPENAI_ORGANIZATION",
+                    "OPENAI_PROJECT",
+                    "CODEX_ACCESS_TOKEN",
+                ],
+            ),
+            (
+                AgentKind::Gemini,
+                &[
+                    "GOOGLE_CLOUD_PROJECT",
+                    "GOOGLE_CLOUD_LOCATION",
+                    "GOOGLE_GEMINI_BASE_URL",
+                    "GEMINI_CLI_TRUST_WORKSPACE",
+                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+                ],
+            ),
+            (
+                AgentKind::Qwen,
+                &[
+                    "ANTHROPIC_BASE_URL",
+                    "DASHSCOPE_API_KEY",
+                    "GOOGLE_CLOUD_PROJECT",
+                    "OPENROUTER_API_KEY",
+                ],
+            ),
+        ];
+        for (agent, vars) in cases {
+            create_dir(home.path(), agent, "work").unwrap();
+            let env = run_env(home.path(), agent, "work", AccountKind::Login)
+                .unwrap()
+                .unwrap();
+            for var in vars {
+                assert!(strips(&env, var), "{agent} keeps {var}");
+            }
+            // Unrelated variables stay.
+            assert!(!strips(&env, "PATH"), "{agent}");
+        }
+        write_key(home.path(), AgentKind::Claude, "ci", "sk-1").unwrap();
+        let env = run_env(home.path(), AgentKind::Claude, "ci", AccountKind::ApiKey)
+            .unwrap()
+            .unwrap();
+        assert!(strips(&env, "CLAUDE_CODE_USE_BEDROCK"));
+        assert!(strips(&env, "AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_accounts_get_their_own_private_config_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        for (agent, kind, dir_var, key_var) in [
+            (
+                AgentKind::Claude,
+                AccountKind::ApiKey,
+                "CLAUDE_CONFIG_DIR",
+                "ANTHROPIC_API_KEY",
+            ),
+            (
+                AgentKind::Claude,
+                AccountKind::OauthToken,
+                "CLAUDE_CONFIG_DIR",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ),
+            (
+                AgentKind::Codex,
+                AccountKind::ApiKey,
+                "CODEX_HOME",
+                "CODEX_API_KEY",
+            ),
+            (
+                AgentKind::Gemini,
+                AccountKind::ApiKey,
+                "GEMINI_CLI_HOME",
+                "GEMINI_API_KEY",
+            ),
+        ] {
+            let name = format!("k-{}", kind.as_str());
+            write_key(home.path(), agent, &name, "sk-xyz").unwrap();
+            let dir = account_dir(home.path(), agent, &name);
+            // A directory left with loose permissions is made private again.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let env = run_env(home.path(), agent, &name, kind).unwrap().unwrap();
+            let get = |k: &str| env.set.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            assert_eq!(
+                get(dir_var),
+                Some(dir.to_string_lossy().into_owned()),
+                "{agent}"
+            );
+            assert_eq!(get(key_var).as_deref(), Some("sk-xyz"), "{agent}");
+            assert_eq!(mode(&dir), 0o700, "{agent}");
+            assert!(strips(&env, dir_var), "the owner's {dir_var} is dropped");
+        }
+        // Cursor has no directory variable: only the key.
+        write_key(home.path(), AgentKind::Cursor, "c", "sk-c").unwrap();
+        let env = run_env(home.path(), AgentKind::Cursor, "c", AccountKind::ApiKey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(env.set, [("CURSOR_API_KEY".to_owned(), "sk-c".to_owned())]);
+    }
+
+    #[test]
+    fn gemini_accounts_pick_their_sign_in_and_skip_dotenv_files() {
+        let home = tempfile::tempdir().unwrap();
+        let settings = |name: &str| -> serde_json::Value {
+            let path = account_dir(home.path(), AgentKind::Gemini, name)
+                .join(".gemini")
+                .join("settings.json");
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+        };
+        write_key(home.path(), AgentKind::Gemini, "ci", "AIza-test").unwrap();
+        run_env(home.path(), AgentKind::Gemini, "ci", AccountKind::ApiKey).unwrap();
+        let s = settings("ci");
+        assert_eq!(s["security"]["auth"]["selectedType"], "gemini-api-key");
+        assert_eq!(s["advanced"]["ignoreLocalEnv"], true);
+
+        // A login keeps the sign-in Gemini CLI chose and its other settings.
+        let dir = create_dir(home.path(), AgentKind::Gemini, "work").unwrap();
+        std::fs::create_dir_all(dir.join(".gemini")).unwrap();
+        std::fs::write(
+            dir.join(".gemini").join("settings.json"),
+            r#"{"security":{"auth":{"selectedType":"oauth-personal"}},"ui":{"theme":"x"},"advanced":{"ignoreLocalEnv":false}}"#,
+        )
+        .unwrap();
+        run_env(home.path(), AgentKind::Gemini, "work", AccountKind::Login).unwrap();
+        let s = settings("work");
+        assert_eq!(s["security"]["auth"]["selectedType"], "oauth-personal");
+        assert_eq!(s["ui"]["theme"], "x");
+        assert_eq!(s["advanced"]["ignoreLocalEnv"], true);
+
+        // Settings Hashi cannot read refuse the run.
+        std::fs::write(
+            dir.join(".gemini").join("settings.json"),
+            "{ // a comment\n \"ui\": {} }",
+        )
+        .unwrap();
+        let err = run_env(home.path(), AgentKind::Gemini, "work", AccountKind::Login).unwrap_err();
+        assert!(err.to_string().contains(".env"), "{err}");
     }
 
     #[cfg(unix)]
