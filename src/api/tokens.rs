@@ -55,9 +55,55 @@ pub struct UpdateTokenBody {
     /// New lifetime counted from now; `0` removes the expiry.
     #[serde(default)]
     pub expires_in_days: Option<u32>,
-    /// Replaces the whole set of limits. Omit a field inside for "unlimited".
+    /// Replaces the request and budget caps; a field left out of it is
+    /// unlimited. `maxPending` is the exception: left out, it keeps its
+    /// current value, and only an explicit `null` removes it.
     #[serde(default)]
-    pub limits: Option<Limits>,
+    pub limits: Option<LimitsPatch>,
+}
+
+/// The `limits` object of `PATCH /v1/tokens/{id}`.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LimitsPatch {
+    /// Prompts per UTC day; left out means unlimited.
+    #[serde(default)]
+    pub daily_requests: Option<u32>,
+    /// Prompts per UTC month; left out means unlimited.
+    #[serde(default)]
+    pub monthly_requests: Option<u32>,
+    /// Spend per UTC day; left out means unlimited.
+    #[serde(default)]
+    pub daily_budget_usd: Option<f64>,
+    /// Spend per UTC month; left out means unlimited.
+    #[serde(default)]
+    pub monthly_budget_usd: Option<f64>,
+    /// Prompts in flight: left out keeps the current cap, `null` removes it.
+    #[serde(default, deserialize_with = "present")]
+    pub max_pending: Option<Option<u32>>,
+}
+
+impl LimitsPatch {
+    /// The limits that result from applying this patch to `current`.
+    #[must_use]
+    pub fn apply(self, current: Limits) -> Limits {
+        Limits {
+            daily_requests: self.daily_requests,
+            monthly_requests: self.monthly_requests,
+            daily_budget_usd: self.daily_budget_usd,
+            monthly_budget_usd: self.monthly_budget_usd,
+            max_pending: self.max_pending.unwrap_or(current.max_pending),
+        }
+    }
+}
+
+/// Tells a field that is present (even as `null`) from one left out.
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 fn validate_name(name: &str) -> ApiResult<String> {
@@ -224,8 +270,8 @@ pub(super) async fn update(
             format!("expires in {days}d")
         });
     }
-    if let Some(limits) = body.limits {
-        token.limits = validate_limits(limits)?;
+    if let Some(patch) = body.limits {
+        token.limits = validate_limits(patch.apply(token.limits))?;
         changes.push("limits".to_owned());
     }
     if changes.is_empty() {
@@ -233,6 +279,10 @@ pub(super) async fn update(
     }
 
     state.store.save_token_policy(&token)?;
+    if body.paused == Some(false) {
+        // Its queued prompts can run again.
+        state.dispatcher.wake_all();
+    }
     let detail = changes.join(", ");
     state
         .store
@@ -259,6 +309,14 @@ pub(super) async fn revoke(
                 .store
                 .audit(&admin.name, "token.revoke", &target, "")?;
             state.bus.log(format!("token revoked: {target}"));
+            // Stop its runs (killing their process groups) before deleting
+            // the directory they run in.
+            let stopped = state.dispatcher.cancel_token_runs(&token_id).await;
+            if stopped > 0 {
+                state
+                    .bus
+                    .log(format!("stopped {stopped} running prompt(s) of {target}"));
+            }
             if let Some(home) = state.store.data_dir() {
                 let removed = tokio::task::spawn_blocking(move || {
                     crate::server::remove_workspace(&home, &token_id)

@@ -14,7 +14,7 @@ use tokio::sync::broadcast::error::RecvError;
 use super::{AnyToken, ApiError, ApiResult, AppState, Auth, MAX_MESSAGE_BYTES, MAX_WAIT_SECS};
 use crate::agent::{self, AgentKind, Usage};
 use crate::events::Event;
-use crate::store::{Admission, NewRequest, Request, RequestStatus, Store, admin_reserve};
+use crate::store::{Admission, Cap, NewRequest, Request, RequestStatus, Store, admin_reserve};
 use crate::token::{Token, TokenStatus};
 use crate::util::{next_day_utc, next_month_utc, now_ms, rfc3339};
 
@@ -183,9 +183,10 @@ fn limit_error(limit: &'static str, message: String, reset_at: i64) -> ApiError 
 /// Validates a prompt against the token's policy and queues it.
 ///
 /// Checks run in this order: pause, input, agent scope and availability,
-/// request caps, budget caps, then the in-flight cap and the global queue
-/// limit, which are checked in the same transaction as the insert. Non-admin
-/// tokens cannot take the last [`admin_reserve`] queue slots.
+/// then request caps, budget caps, the in-flight cap and the global queue
+/// limit, all in the same transaction as the insert so a concurrent burst
+/// cannot overshoot them. Non-admin tokens cannot take the last
+/// [`admin_reserve`] queue slots.
 ///
 /// # Errors
 ///
@@ -248,45 +249,6 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         )));
     }
 
-    let usage = state.store.token_usage(&token.id, now)?;
-    let l = token.limits;
-    if let Some(max) = l.daily_requests
-        && usage.today_requests >= u64::from(max)
-    {
-        return Err(limit_error(
-            "dailyRequests",
-            format!("daily limit of {max} prompts reached"),
-            next_day_utc(now),
-        ));
-    }
-    if let Some(max) = l.monthly_requests
-        && usage.month_requests >= u64::from(max)
-    {
-        return Err(limit_error(
-            "monthlyRequests",
-            format!("monthly limit of {max} prompts reached"),
-            next_month_utc(now),
-        ));
-    }
-    if let Some(max) = l.daily_budget_usd
-        && usage.today_cost_usd >= max
-    {
-        return Err(limit_error(
-            "dailyBudgetUsd",
-            format!("daily budget of ${max:.2} reached"),
-            next_day_utc(now),
-        ));
-    }
-    if let Some(max) = l.monthly_budget_usd
-        && usage.month_cost_usd >= max
-    {
-        return Err(limit_error(
-            "monthlyBudgetUsd",
-            format!("monthly budget of ${max:.2} reached"),
-            next_month_utc(now),
-        ));
-    }
-
     let id = uuid::Uuid::new_v4().to_string();
     let admission = state.store.insert_request_checked(
         NewRequest {
@@ -296,12 +258,49 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             model: input.model.as_deref(),
             message: &message,
         },
-        l.max_pending,
+        &token.limits,
         state.queue_limit,
         admin_reserve(state.queue_limit),
     )?;
+    let l = token.limits;
     match admission {
         Admission::Accepted => {}
+        Admission::LimitReached(cap) => {
+            return Err(match cap {
+                Cap::DailyRequests => limit_error(
+                    "dailyRequests",
+                    format!(
+                        "daily limit of {} prompts reached",
+                        l.daily_requests.unwrap_or(0)
+                    ),
+                    next_day_utc(now),
+                ),
+                Cap::MonthlyRequests => limit_error(
+                    "monthlyRequests",
+                    format!(
+                        "monthly limit of {} prompts reached",
+                        l.monthly_requests.unwrap_or(0)
+                    ),
+                    next_month_utc(now),
+                ),
+                Cap::DailyBudgetUsd => limit_error(
+                    "dailyBudgetUsd",
+                    format!(
+                        "daily budget of ${:.2} reached",
+                        l.daily_budget_usd.unwrap_or(0.0)
+                    ),
+                    next_day_utc(now),
+                ),
+                Cap::MonthlyBudgetUsd => limit_error(
+                    "monthlyBudgetUsd",
+                    format!(
+                        "monthly budget of ${:.2} reached",
+                        l.monthly_budget_usd.unwrap_or(0.0)
+                    ),
+                    next_month_utc(now),
+                ),
+            });
+        }
         Admission::TokenBusy { pending, max } => {
             return Err(ApiError::coded(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -397,6 +396,14 @@ pub(super) async fn ask(
     Ok((code, Json(v)))
 }
 
+/// Whether `token` may read requests that other tokens sent: only an admin
+/// token that is active. A paused admin has lost its admin powers, as the
+/// `Admin` extractor treats it, so it reads only its own requests.
+#[must_use]
+pub fn reads_any_request(token: &Token) -> bool {
+    token.is_admin() && token.status(now_ms()) == TokenStatus::Active
+}
+
 pub(super) async fn poll(
     State(state): State<AppState>,
     Auth(token): Auth,
@@ -407,7 +414,7 @@ pub(super) async fn poll(
         .store
         .get_request(&id)?
         .ok_or(ApiError::NotFound("request not found"))?;
-    if req.token_id != token.id && !token.is_admin() {
+    if req.token_id != token.id && !reads_any_request(&token) {
         // Same answer as a missing id, so ids cannot be probed across tokens.
         return Err(ApiError::NotFound("request not found"));
     }

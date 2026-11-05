@@ -948,6 +948,9 @@ impl App {
         let detail = if tk.paused { "paused" } else { "resumed" };
         match self.state.store.save_token_policy(&tk) {
             Ok(()) => {
+                if !tk.paused {
+                    self.state.dispatcher.wake_all();
+                }
                 self.audit("token.update", &tk.name, detail);
                 self.state.bus.log(format!("token {detail}: {}", tk.name));
                 self.notify(format!("{detail} {}", tk.name));
@@ -982,12 +985,29 @@ impl App {
             Ok(Revoke::Revoked(token_id)) => {
                 self.state.bus.log(format!("token revoked: {name}"));
                 self.notify(format!("revoked {name}"));
-                if let Some(home) = self.state.store.data_dir()
-                    && let Err(e) = crate::server::remove_workspace(&home, &token_id)
-                {
-                    self.state
-                        .bus
-                        .log(format!("could not delete the workspace of {name}: {e}"));
+                // Stop its runs first, then delete the workspace once they
+                // are gone. The dashboard must not block, so the wait runs
+                // as a task.
+                let stopped = self.state.dispatcher.cancel_token_runs(&token_id);
+                let home = self.state.store.data_dir();
+                let bus = self.state.bus.clone();
+                let name = name.to_owned();
+                let cleanup = move || {
+                    if let Some(home) = home
+                        && let Err(e) = crate::server::remove_workspace(&home, &token_id)
+                    {
+                        bus.log(format!("could not delete the workspace of {name}: {e}"));
+                    }
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(rt) => {
+                        rt.spawn(async move {
+                            stopped.await;
+                            let _ = tokio::task::spawn_blocking(cleanup).await;
+                        });
+                    }
+                    // No runtime means no workers either, so nothing runs.
+                    Err(_) => cleanup(),
                 }
             }
             Ok(Revoke::LastAdmin) => self.notify("cannot revoke the last admin token"),

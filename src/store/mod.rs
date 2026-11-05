@@ -146,6 +146,12 @@ pub struct NewToken {
     pub limits: Limits,
 }
 
+/// Upper bound on stored tokens, enforced by the API and by invite redemption.
+pub const MAX_TOKENS: usize = 100;
+
+/// Error stored on a queued request whose token expired before it started.
+pub const EXPIRED_BEFORE_START: &str = "the token expired before this request started";
+
 /// `maxPending` given to non-admin tokens created without any limits.
 pub const DEFAULT_MAX_PENDING: u32 = 3;
 
@@ -174,11 +180,26 @@ pub const fn admin_reserve(queue_limit: u64) -> u64 {
     if reserve < half { reserve } else { half }
 }
 
+/// A per-token cap that refused a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cap {
+    /// `dailyRequests`.
+    DailyRequests,
+    /// `monthlyRequests`.
+    MonthlyRequests,
+    /// `dailyBudgetUsd`.
+    DailyBudgetUsd,
+    /// `monthlyBudgetUsd`.
+    MonthlyBudgetUsd,
+}
+
 /// Result of [`Store::insert_request_checked`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     /// Queued.
     Accepted,
+    /// A request or budget cap for the current UTC day or month is used up.
+    LimitReached(Cap),
     /// The token already has `pending` prompts in flight, at its cap of `max`.
     TokenBusy {
         /// Prompts queued or running for this token.
@@ -539,27 +560,7 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn token_usage(&self, token_id: &str, now_ms: i64) -> Result<TokenUsage> {
-        let day = crate::util::day_start_utc(now_ms);
-        let month = month_start_utc(now_ms);
-        let row = self
-            .conn()?
-            .query_row(TOKEN_USAGE_SQL, params![token_id, day, month], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, f64>(2)?,
-                    r.get::<_, f64>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })?;
-        let n = |v: i64| u64::try_from(v).unwrap_or(0);
-        Ok(TokenUsage {
-            today_requests: n(row.0),
-            month_requests: n(row.1),
-            today_cost_usd: row.2,
-            month_cost_usd: row.3,
-            pending: n(row.4),
-        })
+        usage_in(&*self.conn()?, token_id, now_ms)
     }
 
     /// Lists all tokens, newest first.
@@ -633,11 +634,18 @@ impl Store {
         insert_request_row(&*self.conn()?, new)
     }
 
-    /// Enqueues a request only if the token is under `max_pending` and the
-    /// queue has room. Non-admin tokens may fill the queue up to
-    /// `queue_limit - admin_reserve`; admins may use all of it. The counts
-    /// and the insert run in one transaction, so concurrent submits cannot
-    /// overshoot either cap.
+    /// Enqueues a request only if every cap allows it: the token's request
+    /// and budget caps for the current UTC day and month, its `maxPending`,
+    /// and the queue limit. Non-admin tokens may fill the queue up to
+    /// `queue_limit - admin_reserve`; admins may use all of it. The usage
+    /// read and the insert run in one IMMEDIATE transaction, so concurrent
+    /// submits cannot overshoot any cap. Caps are checked in the order the
+    /// variants of [`Cap`] are listed, then `maxPending`, then the queue.
+    ///
+    /// Budget caps compare the cost already reported by finished requests.
+    /// Queued and running prompts have no cost yet and nothing is reserved
+    /// for them, so a token can still go over a budget by what its
+    /// in-flight prompts (bounded by `maxPending`) end up costing.
     ///
     /// # Errors
     ///
@@ -645,23 +653,37 @@ impl Store {
     pub fn insert_request_checked(
         &self,
         new: NewRequest<'_>,
-        max_pending: Option<u32>,
+        limits: &Limits,
         queue_limit: u64,
         admin_reserve: u64,
     ) -> Result<Admission> {
+        let now = now_ms();
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(max) = max_pending {
-            let pending: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM requests
-                 WHERE token_id = ?1 AND status IN ('queued', 'running')",
-                [&new.token.id],
-                |r| r.get(0),
-            )?;
-            let pending = u64::try_from(pending).unwrap_or(0);
-            if pending >= u64::from(max) {
-                return Ok(Admission::TokenBusy { pending, max });
-            }
+        let usage = usage_in(&tx, &new.token.id, now)?;
+        let over = |max: Option<u32>, used: u64| max.is_some_and(|m| used >= u64::from(m));
+        let spent = |max: Option<f64>, used: f64| max.is_some_and(|m| used >= m);
+        let cap = if over(limits.daily_requests, usage.today_requests) {
+            Some(Cap::DailyRequests)
+        } else if over(limits.monthly_requests, usage.month_requests) {
+            Some(Cap::MonthlyRequests)
+        } else if spent(limits.daily_budget_usd, usage.today_cost_usd) {
+            Some(Cap::DailyBudgetUsd)
+        } else if spent(limits.monthly_budget_usd, usage.month_cost_usd) {
+            Some(Cap::MonthlyBudgetUsd)
+        } else {
+            None
+        };
+        if let Some(cap) = cap {
+            return Ok(Admission::LimitReached(cap));
+        }
+        if let Some(max) = limits.max_pending
+            && usage.pending >= u64::from(max)
+        {
+            return Ok(Admission::TokenBusy {
+                pending: usage.pending,
+                max,
+            });
         }
         let total: i64 = tx.query_row(
             "SELECT COUNT(*) FROM requests WHERE status IN ('queued', 'running')",
@@ -681,20 +703,49 @@ impl Store {
         Ok(Admission::Accepted)
     }
 
-    /// Whether `agent` has any queued request.
+    /// Whether `agent` has a queued request a worker should look at: one
+    /// whose token is not paused, or whose token has expired (so it can be
+    /// failed). A paused token's prompts wait in the queue until it resumes.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn has_queued(&self, agent: AgentKind) -> Result<bool> {
         Ok(self.conn()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM requests WHERE status = 'queued' AND agent = ?1)",
-            [agent.as_str()],
+            "SELECT EXISTS(
+                 SELECT 1 FROM requests r JOIN tokens t ON t.id = r.token_id
+                 WHERE r.status = 'queued' AND r.agent = ?1
+                   AND (t.paused = 0 OR (t.expires_at IS NOT NULL AND t.expires_at <= ?2)))",
+            params![agent.as_str(), now_ms()],
             |r| r.get(0),
         )?)
     }
 
+    /// Fails every queued request for `agent` whose token has expired, with
+    /// [`EXPIRED_BEFORE_START`], and returns their ids. Such a prompt never
+    /// runs, even if the expiry is extended later.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn fail_expired_queued(&self, agent: AgentKind) -> Result<Vec<String>> {
+        let now = now_ms();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "UPDATE requests SET status = 'failed', error = ?1, completed_at = ?2
+             WHERE status = 'queued' AND agent = ?3 AND token_id IN
+                 (SELECT id FROM tokens WHERE expires_at IS NOT NULL AND expires_at <= ?2)
+             RETURNING id",
+        )?;
+        let rows = stmt.query_map(params![EXPIRED_BEFORE_START, now, agent.as_str()], |r| {
+            r.get(0)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Atomically moves the oldest queued request for `agent` to `running`.
+    /// Requests whose token is paused or expired are skipped and stay
+    /// queued; [`Store::fail_expired_queued`] ends the expired ones.
     ///
     /// # Errors
     ///
@@ -702,14 +753,45 @@ impl Store {
     pub fn claim_next(&self, agent: AgentKind) -> Result<Option<Request>> {
         let sql = format!(
             "UPDATE requests SET status = 'running', started_at = ?1
-             WHERE id = (SELECT id FROM requests WHERE status = 'queued' AND agent = ?2
-                         ORDER BY created_at, rowid LIMIT 1)
+             WHERE id = (SELECT r.id FROM requests r JOIN tokens t ON t.id = r.token_id
+                         WHERE r.status = 'queued' AND r.agent = ?2 AND t.paused = 0
+                           AND (t.expires_at IS NULL OR t.expires_at > ?1)
+                         ORDER BY r.created_at, r.rowid LIMIT 1)
              RETURNING {REQUEST_COLUMNS}"
         );
         self.conn()?
             .query_row(&sql, params![now_ms(), agent.as_str()], row_to_request)
             .optional()?
             .transpose()
+    }
+
+    /// Whether request `id` still exists and is running. Workers poll this,
+    /// so a revoke from another process (which deletes the row) stops the
+    /// run.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn is_running(&self, id: &str) -> Result<bool> {
+        Ok(self.conn()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM requests WHERE id = ?1 AND status = 'running')",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Requests of `token_id` that are running now.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn running_for_token(&self, token_id: &str) -> Result<u64> {
+        let n: i64 = self.conn()?.query_row(
+            "SELECT COUNT(*) FROM requests WHERE token_id = ?1 AND status = 'running'",
+            [token_id],
+            |r| r.get(0),
+        )?;
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 
     /// Marks a request as completed.
@@ -1083,6 +1165,30 @@ impl Store {
     }
 }
 
+/// A token's use in the UTC day and month containing `now_ms`, read on an
+/// existing connection or transaction.
+fn usage_in(conn: &Connection, token_id: &str, now_ms: i64) -> Result<TokenUsage> {
+    let day = crate::util::day_start_utc(now_ms);
+    let month = month_start_utc(now_ms);
+    let row = conn.query_row(TOKEN_USAGE_SQL, params![token_id, day, month], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, f64>(2)?,
+            r.get::<_, f64>(3)?,
+            r.get::<_, i64>(4)?,
+        ))
+    })?;
+    let n = |v: i64| u64::try_from(v).unwrap_or(0);
+    Ok(TokenUsage {
+        today_requests: n(row.0),
+        month_requests: n(row.1),
+        today_cost_usd: row.2,
+        month_cost_usd: row.3,
+        pending: n(row.4),
+    })
+}
+
 /// Applies pending migrations and returns the version the database was at.
 fn migrate(conn: &mut Connection) -> Result<i64> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -1367,6 +1473,14 @@ mod tests {
     }
 
     fn checked(s: &Store, t: &Token, max: Option<u32>, limit: u64) -> Admission {
+        let limits = Limits {
+            max_pending: max,
+            ..Limits::default()
+        };
+        checked_with(s, t, &limits, limit)
+    }
+
+    fn checked_with(s: &Store, t: &Token, limits: &Limits, limit: u64) -> Admission {
         let id = uuid::Uuid::new_v4().to_string();
         s.insert_request_checked(
             NewRequest {
@@ -1376,7 +1490,7 @@ mod tests {
                 model: None,
                 message: "hi",
             },
-            max,
+            limits,
             limit,
             admin_reserve(limit),
         )
@@ -1616,6 +1730,121 @@ mod tests {
         let claimed = s.claim_next(AgentKind::Claude).unwrap().unwrap();
         assert_eq!(claimed.id, first);
         assert_eq!(claimed.status, RequestStatus::Running);
+    }
+
+    #[test]
+    fn claim_next_skips_paused_and_expired_tokens() {
+        let s = store();
+        let (mut paused, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let (mut expired, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let (active, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let held = enqueue(&s, &paused, AgentKind::Claude);
+        let stale = enqueue(&s, &expired, AgentKind::Claude);
+        let fresh = enqueue(&s, &active, AgentKind::Claude);
+        paused.paused = true;
+        s.save_token_policy(&paused).unwrap();
+        expired.expires_at = Some(1);
+        s.save_token_policy(&expired).unwrap();
+
+        assert_eq!(s.claim_next(AgentKind::Claude).unwrap().unwrap().id, fresh);
+        assert!(s.claim_next(AgentKind::Claude).unwrap().is_none());
+        // The expired token's prompt is still worth a look, to fail it.
+        assert!(s.has_queued(AgentKind::Claude).unwrap());
+        assert_eq!(
+            s.fail_expired_queued(AgentKind::Claude).unwrap(),
+            std::slice::from_ref(&stale)
+        );
+        let failed = s.get_request(&stale).unwrap().unwrap();
+        assert_eq!(
+            (failed.status, failed.error.as_deref()),
+            (RequestStatus::Failed, Some(EXPIRED_BEFORE_START))
+        );
+        // Only the paused prompt is left, and it waits.
+        assert!(!s.has_queued(AgentKind::Claude).unwrap());
+        assert_eq!(
+            s.get_request(&held).unwrap().unwrap().status,
+            RequestStatus::Queued
+        );
+        paused.paused = false;
+        s.save_token_policy(&paused).unwrap();
+        assert_eq!(s.claim_next(AgentKind::Claude).unwrap().unwrap().id, held);
+    }
+
+    #[test]
+    fn checked_insert_enforces_request_caps_in_order() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let daily = Limits {
+            daily_requests: Some(1),
+            monthly_requests: Some(1),
+            ..Limits::default()
+        };
+        assert_eq!(checked_with(&s, &t, &daily, 100), Admission::Accepted);
+        assert_eq!(
+            checked_with(&s, &t, &daily, 100),
+            Admission::LimitReached(Cap::DailyRequests)
+        );
+        let monthly = Limits {
+            monthly_requests: Some(1),
+            ..Limits::default()
+        };
+        assert_eq!(
+            checked_with(&s, &t, &monthly, 100),
+            Admission::LimitReached(Cap::MonthlyRequests)
+        );
+    }
+
+    #[test]
+    fn checked_insert_enforces_budget_caps() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let id = enqueue(&s, &t, AgentKind::Claude);
+        s.claim_next(AgentKind::Claude).unwrap();
+        s.complete_request(
+            &id,
+            "ok",
+            Some(Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cost_usd: Some(0.5),
+            }),
+        )
+        .unwrap();
+        let day = Limits {
+            daily_budget_usd: Some(0.5),
+            ..Limits::default()
+        };
+        assert_eq!(
+            checked_with(&s, &t, &day, 100),
+            Admission::LimitReached(Cap::DailyBudgetUsd)
+        );
+        let month = Limits {
+            monthly_budget_usd: Some(0.25),
+            ..Limits::default()
+        };
+        assert_eq!(
+            checked_with(&s, &t, &month, 100),
+            Admission::LimitReached(Cap::MonthlyBudgetUsd)
+        );
+        let roomy = Limits {
+            monthly_budget_usd: Some(1.0),
+            ..Limits::default()
+        };
+        assert_eq!(checked_with(&s, &t, &roomy, 100), Admission::Accepted);
+    }
+
+    #[test]
+    fn is_running_tracks_the_row() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let id = enqueue(&s, &t, AgentKind::Claude);
+        assert!(!s.is_running(&id).unwrap());
+        s.claim_next(AgentKind::Claude).unwrap();
+        assert!(s.is_running(&id).unwrap());
+        assert_eq!(s.running_for_token(&t.id).unwrap(), 1);
+        s.revoke_token(&t.id).unwrap();
+        assert!(!s.is_running(&id).unwrap());
+        assert_eq!(s.running_for_token(&t.id).unwrap(), 0);
     }
 
     #[test]

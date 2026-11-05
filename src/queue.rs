@@ -7,10 +7,18 @@
 //! Before claiming anything, a worker takes a slot from the shared
 //! [`ResourceGuard`] and checks memory and disk. Held work stays `queued`, so
 //! it keeps its place in line and runs once the machine has room.
+//!
+//! A paused token's prompts stay `queued` until it is resumed; an expired
+//! token's queued prompts fail without running. Every claimed run is
+//! registered with the [`Dispatcher`], so revoking a token can stop its runs
+//! (killing their process groups) before its workspace is deleted. A revoke
+//! from another process, such as `hashi token revoke`, deletes the request
+//! row; workers notice that within [`ROW_CHECK_EVERY`] and stop the run too.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -21,12 +29,22 @@ use tracing::{info, warn};
 use crate::agent::{self, AgentConfig, AgentKind, Invocation, Limits};
 use crate::events::{Bus, Event};
 use crate::guard::ResourceGuard;
-use crate::store::{Request, Store};
+use crate::store::{EXPIRED_BEFORE_START, Request, Store};
+use crate::token::TokenStatus;
 use crate::util::{now_ms, truncate};
 
 /// Characters of an agent's error written to the log. The database row keeps
 /// the full text, so a noisy failure cannot grow the log quickly.
 pub const LOG_ERROR_CHARS: usize = 500;
+
+/// How often a running worker checks that its request row still exists.
+pub const ROW_CHECK_EVERY: Duration = Duration::from_secs(2);
+
+/// Longest [`Dispatcher::cancel_token_runs`] waits for runs to stop.
+const CANCEL_WAIT: Duration = Duration::from_secs(10);
+
+/// Error reported for a run stopped because its token was revoked.
+pub const REVOKED_ERROR: &str = "stopped: the token was revoked";
 
 /// Settings shared by all workers.
 #[derive(Debug, Clone)]
@@ -41,10 +59,43 @@ pub struct QueueConfig {
     pub workspace: PathBuf,
 }
 
-/// Wakes workers when new work arrives.
+/// One claimed run, as seen by [`Dispatcher::cancel_token_runs`].
+#[derive(Debug)]
+struct RunEntry {
+    token_id: String,
+    /// Fired to stop the run.
+    cancel: CancellationToken,
+    /// Fired by the worker once the run (and its process group) is gone.
+    done: CancellationToken,
+}
+
+type Runs = Arc<Mutex<HashMap<String, RunEntry>>>;
+
+/// Wakes workers when new work arrives, and tracks the runs in flight so
+/// they can be stopped per token.
 #[derive(Debug, Clone, Default)]
 pub struct Dispatcher {
     notify: Arc<HashMap<AgentKind, Arc<Notify>>>,
+    runs: Runs,
+}
+
+/// Registration of one run. Dropping it marks the run as finished.
+#[derive(Debug)]
+struct RunGuard {
+    runs: Runs,
+    id: String,
+    cancel: CancellationToken,
+    done: CancellationToken,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
+        self.done.cancel();
+    }
 }
 
 impl Dispatcher {
@@ -57,6 +108,7 @@ impl Dispatcher {
             .collect();
         Self {
             notify: Arc::new(map),
+            runs: Runs::default(),
         }
     }
 
@@ -67,8 +119,82 @@ impl Dispatcher {
         }
     }
 
+    /// Signals every agent, for example after a token is resumed.
+    pub fn wake_all(&self) {
+        for n in self.notify.values() {
+            n.notify_waiters();
+            n.notify_one();
+        }
+    }
+
     fn handle(&self, agent: AgentKind) -> Arc<Notify> {
         self.notify.get(&agent).cloned().unwrap_or_default()
+    }
+
+    fn register(&self, id: &str, token_id: &str) -> RunGuard {
+        let cancel = CancellationToken::new();
+        let done = CancellationToken::new();
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                id.to_owned(),
+                RunEntry {
+                    token_id: token_id.to_owned(),
+                    cancel: cancel.clone(),
+                    done: done.clone(),
+                },
+            );
+        RunGuard {
+            runs: Arc::clone(&self.runs),
+            id: id.to_owned(),
+            cancel,
+            done,
+        }
+    }
+
+    /// Runs in flight for `token_id`.
+    #[must_use]
+    pub fn running_for(&self, token_id: &str) -> usize {
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|r| r.token_id == token_id)
+            .count()
+    }
+
+    /// Stops every run of `token_id` now: each run is dropped, which kills
+    /// its process group, and is not re-queued. The returned future resolves
+    /// with the number of runs stopped once all of them are gone (or after
+    /// ten seconds), so a caller can then delete the workspace safely.
+    ///
+    /// Call it after the token row is deleted: a worker that claims one of
+    /// its requests afterwards checks the token before it creates the
+    /// workspace or spawns anything, and so cannot slip past.
+    pub fn cancel_token_runs(
+        &self,
+        token_id: &str,
+    ) -> impl Future<Output = usize> + Send + 'static {
+        let done: Vec<CancellationToken> = self
+            .runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|r| r.token_id == token_id)
+            .map(|r| {
+                r.cancel.cancel();
+                r.done.clone()
+            })
+            .collect();
+        async move {
+            let n = done.len();
+            let all = futures::future::join_all(done.iter().map(CancellationToken::cancelled));
+            if tokio::time::timeout(CANCEL_WAIT, all).await.is_err() {
+                warn!("a revoked token's run did not stop in time");
+            }
+            n
+        }
     }
 }
 
@@ -92,6 +218,7 @@ pub fn spawn_workers(
                 cfg: Arc::clone(&cfg),
                 guard: Arc::clone(&guard),
                 notify: dispatcher.handle(agent),
+                dispatcher: dispatcher.clone(),
             };
             set.spawn(worker.run(cancel.clone()));
         }
@@ -106,11 +233,35 @@ struct Worker {
     cfg: Arc<QueueConfig>,
     guard: Arc<ResourceGuard>,
     notify: Arc<Notify>,
+    dispatcher: Dispatcher,
+}
+
+/// Why a claimed run did not produce an answer or an agent error.
+enum Halt {
+    /// Failed with this message.
+    Failed(String),
+    /// Put back in the queue (its token is paused).
+    Requeued,
+    /// Its token is gone.
+    Revoked,
+}
+
+impl From<String> for Halt {
+    fn from(msg: String) -> Self {
+        Self::Failed(msg)
+    }
+}
+
+impl From<&str> for Halt {
+    fn from(msg: &str) -> Self {
+        Self::Failed(msg.to_owned())
+    }
 }
 
 impl Worker {
     async fn run(self, cancel: CancellationToken) {
         loop {
+            self.fail_expired();
             let has_work = self.store.has_queued(self.agent).unwrap_or_else(|e| {
                 warn!(agent = %self.agent, error = %e, "failed to check the queue");
                 false
@@ -135,8 +286,15 @@ impl Worker {
                     match self.store.claim_next(self.agent) {
                         Ok(Some(req)) => {
                             self.guard.start(&mut permit);
+                            // Registered before the first await, so a revoke
+                            // that has already deleted the token either sees
+                            // this run or is seen by the token check in
+                            // `execute`.
+                            let run = self.dispatcher.register(&req.id, &req.token_id);
                             let id = req.id.clone();
+                            let started = now_ms();
                             tokio::select! {
+                                biased;
                                 () = cancel.cancelled() => {
                                     // Dropping the run kills its process tree. A clean
                                     // stop is not the prompt's fault, so put it back
@@ -147,8 +305,17 @@ impl Worker {
                                     }
                                     return;
                                 }
+                                () = run.cancel.cancelled() => {
+                                    self.stopped(&id, started, REVOKED_ERROR);
+                                }
+                                () = self.watch_row(&id) => {
+                                    self.stopped(&id, started, REVOKED_ERROR);
+                                }
                                 () = self.process(req) => {}
                             }
+                            // The run future is gone now; tell any revoke
+                            // waiting on it.
+                            drop(run);
                             continue;
                         }
                         // Another worker for this agent got there first.
@@ -163,6 +330,50 @@ impl Worker {
                 () = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
+    }
+
+    /// Fails this agent's queued prompts whose token has expired.
+    fn fail_expired(&self) {
+        match self.store.fail_expired_queued(self.agent) {
+            Ok(ids) => {
+                for id in ids {
+                    info!(id = %id, agent = %self.agent, "token expired before the request started");
+                    self.bus.emit(Event::Finished {
+                        id,
+                        agent: self.agent,
+                        ok: false,
+                        duration_ms: 0,
+                        error: Some(EXPIRED_BEFORE_START.to_owned()),
+                    });
+                }
+            }
+            Err(e) => warn!(agent = %self.agent, error = %e, "failed to expire queued work"),
+        }
+    }
+
+    /// Resolves once request `id` no longer exists or is no longer running,
+    /// for example after a revoke from another process.
+    async fn watch_row(&self, id: &str) {
+        loop {
+            tokio::time::sleep(ROW_CHECK_EVERY).await;
+            match self.store.is_running(id) {
+                Ok(false) => return,
+                Ok(true) => {}
+                Err(e) => warn!(id = %id, error = %e, "failed to check a running request"),
+            }
+        }
+    }
+
+    /// Reports a run that was stopped from outside.
+    fn stopped(&self, id: &str, started: i64, why: &str) {
+        info!(id = %id, agent = %self.agent, "run stopped: {why}");
+        self.bus.emit(Event::Finished {
+            id: id.to_owned(),
+            agent: self.agent,
+            ok: false,
+            duration_ms: u64::try_from(now_ms() - started).unwrap_or(0),
+            error: Some(why.to_owned()),
+        });
     }
 
     async fn process(&self, req: Request) {
@@ -181,7 +392,12 @@ impl Worker {
                 }
                 (true, None)
             }
-            Err(err) => {
+            Err(Halt::Requeued) => {
+                info!(id = %req.id, agent = %self.agent, "token paused, request left in the queue");
+                return;
+            }
+            Err(Halt::Revoked) => (false, Some(REVOKED_ERROR.to_owned())),
+            Err(Halt::Failed(err)) => {
                 let msg = client_error(&err);
                 let error_id = crate::diagnostics::new_error_id();
                 warn!(
@@ -207,26 +423,64 @@ impl Worker {
         });
     }
 
-    async fn execute(&self, req: &Request) -> Result<agent::AgentOutput, String> {
+    /// Re-reads the request's token right before the run. A paused token
+    /// puts the request back, an expired one fails it, and a missing one
+    /// (revoked) drops it.
+    fn token_gate(&self, req: &Request) -> Result<(), Halt> {
+        let token = self
+            .store
+            .get_token(&req.token_id)
+            .map_err(|e| e.to_string())?;
+        match token.map(|t| t.status(now_ms())) {
+            None => Err(Halt::Revoked),
+            Some(TokenStatus::Active) => Ok(()),
+            Some(TokenStatus::Paused) => {
+                self.store.requeue(&req.id).map_err(|e| e.to_string())?;
+                Err(Halt::Requeued)
+            }
+            Some(TokenStatus::Expired) => Err(EXPIRED_BEFORE_START.into()),
+        }
+    }
+
+    async fn execute(&self, req: &Request) -> Result<agent::AgentOutput, Halt> {
         let cfg = self
             .cfg
             .agents
             .get(&self.agent)
             .ok_or("agent is not configured")?;
 
+        self.token_gate(req)?;
+
         // Each token gets a private working directory per agent. Agents key
         // their session history by cwd, so this keeps resumes consistent. It
         // also stops one agent with write access from planting project config
         // (for example `.claude/settings.json` or `.gemini/settings.json`,
         // which can define hooks) that a different agent would then load.
+        //
+        // Created synchronously, so a revoke that cancels this run cannot
+        // interrupt it half way and then race it with the workspace removal.
         let workdir = self
             .cfg
             .workspace
             .join(&req.token_id)
             .join(self.agent.as_str());
-        tokio::fs::create_dir_all(&workdir)
-            .await
-            .map_err(|e| format!("cannot create workspace: {e}"))?;
+        std::fs::create_dir_all(&workdir).map_err(|e| format!("cannot create workspace: {e}"))?;
+        // A revoke from another process may have deleted the token, and its
+        // workspace, between the check above and the line above. If so, the
+        // directory just created is removed again and nothing runs.
+        if self
+            .store
+            .get_token(&req.token_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            if let Err(e) =
+                crate::server::remove_token_workspace(&self.cfg.workspace, &req.token_id)
+            {
+                warn!(error = %e, "could not delete a revoked token's workspace");
+            }
+            return Err(Halt::Revoked);
+        }
 
         let resume = if req.stateful {
             self.store
@@ -300,5 +554,24 @@ mod tests {
         let long = "x".repeat(4_000);
         assert_eq!(log_excerpt(&long).chars().count(), LOG_ERROR_CHARS);
         assert_eq!(log_excerpt("please sign in again"), "please sign in again");
+    }
+
+    #[tokio::test]
+    async fn cancel_token_runs_stops_only_that_token_and_waits() {
+        let d = Dispatcher::new();
+        let a = d.register("r1", "tok-a");
+        let b = d.register("r2", "tok-b");
+        assert_eq!(d.running_for("tok-a"), 1);
+        let wait = d.cancel_token_runs("tok-a");
+        assert!(a.cancel.is_cancelled());
+        assert!(!b.cancel.is_cancelled());
+        let waiter = tokio::spawn(wait);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "returned before the run was gone");
+        drop(a);
+        assert_eq!(waiter.await.unwrap(), 1);
+        assert_eq!(d.running_for("tok-a"), 0);
+        assert_eq!(d.running_for("tok-b"), 1);
+        assert_eq!(d.cancel_token_runs("nobody").await, 0);
     }
 }

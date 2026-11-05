@@ -306,12 +306,26 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             println!("updated {}: {detail}", t.name);
         }
         TokenCommand::Revoke { id } => {
-            let name = find_token(store, &id).map(|t| t.name).ok();
+            let found = find_token(store, &id).ok();
+            let running = match &found {
+                Some(t) => store.running_for_token(&t.id)?,
+                None => 0,
+            };
+            let name = found.map(|t| t.name);
             match store.revoke_token(&id)? {
                 Revoke::Revoked(token_id) => {
                     let target = name.unwrap_or_else(|| id.clone());
                     store.audit("cli", "token.revoke", &target, "")?;
                     println!("revoked {target}");
+                    if running > 0 {
+                        // A running server notices the deleted request rows
+                        // within a couple of seconds and kills the runs; give
+                        // it that long before deleting their workspace.
+                        println!("waiting for its {running} running prompt(s) to stop");
+                        std::thread::sleep(
+                            hashi::queue::ROW_CHECK_EVERY + std::time::Duration::from_secs(1),
+                        );
+                    }
                     if let Some(home) = store.data_dir()
                         && let Err(e) = hashi::server::remove_workspace(&home, &token_id)
                     {

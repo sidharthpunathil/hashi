@@ -302,6 +302,9 @@ fn redeem_code(state: &AppState, body: ClaimJson) -> ApiResult<(StatusCode, Json
         Redeemed::Claimed => Err(claimed()),
         Redeemed::Expired => Err(expired()),
         Redeemed::NotFound => Err(not_found()),
+        Redeemed::TokenLimit => Err(ApiError::Conflict(
+            "this server has reached its token limit; ask the owner to free a slot",
+        )),
     }
 }
 
