@@ -727,6 +727,19 @@ pub fn account_json_with(
     now: i64,
     rotate_at: u8,
 ) -> ApiResult<serde_json::Value> {
+    let tokens = store.tokens_using_account(a.agent, &a.name)?;
+    account_json_counted(store, a, now, rotate_at, tokens)
+}
+
+/// [`account_json_with`] given the number of tokens that list the account,
+/// so a list reads the tokens once rather than once per account.
+fn account_json_counted(
+    store: &Store,
+    a: &crate::store::AccountState,
+    now: i64,
+    rotate_at: u8,
+    tokens: usize,
+) -> ApiResult<serde_json::Value> {
     let status = a.status(now);
     let (today, total) = store.account_runs(a.agent, &a.name, now)?;
     let windows = store.usage_windows(a.agent, &a.name)?;
@@ -767,7 +780,7 @@ pub fn account_json_with(
         "createdAt": crate::util::rfc3339(a.created_at),
         "runsToday": today,
         "runs": total,
-        "tokens": store.tokens_using_account(a.agent, &a.name)?,
+        "tokens": tokens,
     }))
 }
 
@@ -811,9 +824,17 @@ async fn accounts(
     let now = now_ms();
     let rotate_at = state.dispatcher.usage().policy().rotate_at;
     let all = accounts_with_usage(&state.store)?;
+    let counts = state.store.account_token_counts()?;
     let mut list = Vec::with_capacity(all.len());
     for a in &all {
-        list.push(account_json_with(&state.store, a, now, rotate_at)?);
+        let tokens = counts.get(&(a.agent, a.name.clone())).copied().unwrap_or(0);
+        list.push(account_json_counted(
+            &state.store,
+            a,
+            now,
+            rotate_at,
+            tokens,
+        )?);
     }
     let per_agent: serde_json::Map<String, serde_json::Value> = AgentKind::ALL
         .iter()

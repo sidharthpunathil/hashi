@@ -2,6 +2,8 @@
 //! limit, and which tokens and invites use them. The credentials themselves
 //! never touch the database (see [`crate::accounts`]).
 
+use std::collections::{BTreeSet, HashMap};
+
 use rusqlite::{OptionalExtension, Row, params};
 use serde::Serialize;
 
@@ -198,7 +200,8 @@ impl Store {
     pub fn get_account(&self, agent: AgentKind, name: &str) -> Result<Option<AccountState>> {
         let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE agent = ?1 AND name = ?2");
         self.conn()?
-            .query_row(&sql, params![agent.as_str(), name], row_to_account)
+            .prepare_cached(&sql)?
+            .query_row(params![agent.as_str(), name], row_to_account)
             .optional()?
             .transpose()
     }
@@ -211,7 +214,7 @@ impl Store {
     pub fn list_accounts(&self) -> Result<Vec<AccountState>> {
         let conn = self.conn()?;
         let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY agent, name");
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], row_to_account)?;
         rows.map(|r| r.map_err(StoreError::from).and_then(|a| a))
             .collect()
@@ -291,12 +294,13 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn mark_account_limited(&self, agent: AgentKind, name: &str, until_ms: i64) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT INTO accounts (agent, name, kind, limited_until, last_used, created_at)
+        self.conn()?
+            .prepare_cached(
+                "INSERT INTO accounts (agent, name, kind, limited_until, last_used, created_at)
              VALUES (?1, ?2, 'default', ?3, ?4, ?4)
              ON CONFLICT(agent, name) DO UPDATE SET limited_until = ?3, last_used = ?4",
-            params![agent.as_str(), name, until_ms, now_ms()],
-        )?;
+            )?
+            .execute(params![agent.as_str(), name, until_ms, now_ms()])?;
         Ok(())
     }
 
@@ -307,13 +311,14 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn mark_account_used(&self, agent: AgentKind, name: &str, succeeded: bool) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT INTO accounts (agent, name, kind, last_used, created_at)
+        self.conn()?
+            .prepare_cached(
+                "INSERT INTO accounts (agent, name, kind, last_used, created_at)
              VALUES (?1, ?2, 'default', ?3, ?3)
              ON CONFLICT(agent, name) DO UPDATE SET last_used = ?3,
                  limited_until = CASE WHEN ?4 THEN NULL ELSE limited_until END",
-            params![agent.as_str(), name, now_ms(), succeeded],
-        )?;
+            )?
+            .execute(params![agent.as_str(), name, now_ms(), succeeded])?;
         Ok(())
     }
 
@@ -324,12 +329,15 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn account_runs(&self, agent: AgentKind, name: &str, now: i64) -> Result<(u64, u64)> {
-        let (today, total): (i64, i64) = self.conn()?.query_row(
-            "SELECT COUNT(CASE WHEN started_at >= ?3 THEN 1 END), COUNT(*)
+        let (today, total): (i64, i64) = self
+            .conn()?
+            .prepare_cached(
+                "SELECT COUNT(CASE WHEN started_at >= ?3 THEN 1 END), COUNT(*)
              FROM requests WHERE agent = ?1 AND account = ?2",
-            params![agent.as_str(), name, day_start_utc(now)],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
+            )?
+            .query_row(params![agent.as_str(), name, day_start_utc(now)], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
         Ok((
             u64::try_from(today).unwrap_or(0),
             u64::try_from(total).unwrap_or(0),
@@ -351,6 +359,31 @@ impl Store {
                     .is_some_and(|l| l.iter().any(|n| n == name))
             })
             .count())
+    }
+
+    /// How many tokens list each account, by agent and name: what
+    /// [`Store::tokens_using_account`] answers for one account, for every
+    /// account from one read of the tokens table. Accounts no token lists
+    /// are absent.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn account_token_counts(&self) -> Result<HashMap<(AgentKind, String), usize>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare_cached("SELECT accounts FROM tokens")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            for (agent, names) in acct::decode(&row?) {
+                // A token counts once per account, even if listed twice.
+                let names: BTreeSet<String> = names.into_iter().collect();
+                for name in names {
+                    *counts.entry((agent, name)).or_insert(0) += 1;
+                }
+            }
+        }
+        Ok(counts)
     }
 
     /// The `agent:name` entries of `map` that are not accounts. `default`
@@ -381,10 +414,9 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn set_request_account(&self, id: &str, account: &str) -> Result<()> {
-        self.conn()?.execute(
-            "UPDATE requests SET account = ?2 WHERE id = ?1",
-            params![id, account],
-        )?;
+        self.conn()?
+            .prepare_cached("UPDATE requests SET account = ?2 WHERE id = ?1")?
+            .execute(params![id, account])?;
         Ok(())
     }
 
@@ -557,6 +589,12 @@ mod tests {
             s.tokens_using_account(AgentKind::Claude, "work").unwrap(),
             2
         );
+        let counts = s.account_token_counts().unwrap();
+        for (name, n) in [("work", 2), ("home", 2)] {
+            assert_eq!(counts[&(AgentKind::Claude, name.to_owned())], n);
+            assert_eq!(s.tokens_using_account(AgentKind::Claude, name).unwrap(), n);
+        }
+        assert_eq!(counts.len(), 2);
 
         let r = s.remove_account(AgentKind::Claude, "work").unwrap();
         assert_eq!(

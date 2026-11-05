@@ -178,10 +178,13 @@ impl Poller {
         let mut out = Vec::new();
         let accounts = self.store.list_accounts().unwrap_or_default();
         let projects = self.store.list_projects().unwrap_or_default();
+        // One read of the tokens for every account, not one per account. A
+        // failed read binds nothing, as a failed count did.
+        let counts = self.store.account_token_counts().unwrap_or_default();
         let bound = |agent: AgentKind, name: &str| {
-            self.store
-                .tokens_using_account(agent, name)
-                .is_ok_and(|n| n > 0)
+            counts
+                .get(&(agent, name.to_owned()))
+                .is_some_and(|n| *n > 0)
                 || projects.iter().any(|p| {
                     p.accounts
                         .get(&agent)

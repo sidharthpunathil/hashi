@@ -82,6 +82,15 @@ fn row_to_project(r: &Row<'_>) -> rusqlite::Result<Result<Project>> {
     Ok(build())
 }
 
+/// Use of project `?1` since day start `?2` and month start `?3`. Every
+/// column it touches is in `idx_requests_project_usage`.
+pub(super) const PROJECT_USAGE_SQL: &str = "SELECT
+         COUNT(CASE WHEN created_at >= ?2 THEN 1 END),
+         COUNT(*),
+         COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost_usd END), 0.0),
+         COALESCE(SUM(cost_usd), 0.0)
+     FROM requests WHERE project = ?1 AND created_at >= ?3";
+
 impl Store {
     /// Records a new project. Returns `false` if the name is taken. The
     /// caller validates it first.
@@ -145,7 +154,8 @@ impl Store {
     pub fn get_project(&self, name: &str) -> Result<Option<Project>> {
         let sql = format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE name = ?1");
         self.conn()?
-            .query_row(&sql, [name], row_to_project)
+            .prepare_cached(&sql)?
+            .query_row([name], row_to_project)
             .optional()?
             .transpose()
     }
@@ -158,7 +168,7 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = self.conn()?;
         let sql = format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name");
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], row_to_project)?;
         rows.map(|r| r.map_err(StoreError::from).and_then(|p| p))
             .collect()
@@ -199,21 +209,14 @@ impl Store {
     /// Fails on database errors.
     pub fn project_stats(&self, name: &str, now: i64) -> Result<ProjectStats> {
         let conn = self.conn()?;
-        let (today, month, today_cost, month_cost): (i64, i64, f64, f64) = conn.query_row(
-            "SELECT
-                 COUNT(CASE WHEN created_at >= ?2 THEN 1 END),
-                 COUNT(*),
-                 COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost_usd END), 0.0),
-                 COALESCE(SUM(cost_usd), 0.0)
-             FROM requests WHERE project = ?1 AND created_at >= ?3",
-            params![name, day_start_utc(now), month_start_utc(now)],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?;
-        let tokens: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tokens WHERE project = ?1",
-            [name],
-            |r| r.get(0),
-        )?;
+        let (today, month, today_cost, month_cost): (i64, i64, f64, f64) =
+            conn.prepare_cached(PROJECT_USAGE_SQL)?.query_row(
+                params![name, day_start_utc(now), month_start_utc(now)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+        let tokens: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM tokens WHERE project = ?1")?
+            .query_row([name], |r| r.get(0))?;
         let n = |v: i64| u64::try_from(v).unwrap_or(0);
         Ok(ProjectStats {
             today_requests: n(today),
