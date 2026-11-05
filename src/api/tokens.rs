@@ -42,6 +42,10 @@ pub struct CreateTokenBody {
     /// "personal"]}`. An agent left out uses its default account.
     #[serde(default)]
     pub accounts: Option<AccountMap>,
+    /// Project to bind the token to. Its agents are intersected with the
+    /// project's, and its account lists must stay inside the project's.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Body of `PATCH /v1/tokens/{id}`. Omitted fields are left as they are.
@@ -69,6 +73,10 @@ pub struct UpdateTokenBody {
     /// default account.
     #[serde(default)]
     pub accounts: Option<AccountMap>,
+    /// Binds the token to this project; `null` puts it back on its own
+    /// workspace.
+    #[serde(default, deserialize_with = "present")]
+    pub project: Option<Option<String>>,
 }
 
 /// The `limits` object of `PATCH /v1/tokens/{id}`.
@@ -107,7 +115,7 @@ impl LimitsPatch {
 }
 
 /// Tells a field that is present (even as `null`) from one left out.
-fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+pub(super) fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -210,6 +218,7 @@ pub fn validate_new_token(body: CreateTokenBody) -> ApiResult<NewToken> {
         limits,
         accounts: acct::normalize(body.accounts.unwrap_or_default())
             .map_err(ApiError::BadRequest)?,
+        project: super::check_project_name(body.project)?,
     })
 }
 
@@ -239,6 +248,12 @@ pub(super) async fn create(
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
     let mut new = validate_new_token(body)?;
     new.accounts = check_accounts(&state.store, new.accounts)?;
+    super::check_binding(
+        &state.store,
+        new.project.as_deref(),
+        &new.agents,
+        &new.accounts,
+    )?;
     if state.store.list_tokens()?.len() >= MAX_TOKENS {
         return Err(ApiError::Conflict("token limit reached, revoke one first"));
     }
@@ -314,9 +329,24 @@ pub(super) async fn update(
             acct::format_bindings(&token.accounts)
         ));
     }
+    if let Some(project) = body.project {
+        token.project = super::check_project_name(project)?;
+        changes.push(format!(
+            "project {}",
+            token.project.as_deref().unwrap_or(crate::projects::DEFAULT)
+        ));
+    }
     if changes.is_empty() {
         return Err(ApiError::BadRequest("nothing to update".to_owned()));
     }
+    // Checked on every change, so neither a new project nor new accounts
+    // can take the token outside its project.
+    super::check_binding(
+        &state.store,
+        token.project.as_deref(),
+        &token.agents,
+        &token.accounts,
+    )?;
 
     state.store.save_token_policy(&token)?;
     if body.paused == Some(false) {
@@ -417,6 +447,7 @@ mod tests {
             note: None,
             limits: None,
             accounts: None,
+            project: None,
         }
     }
 

@@ -33,6 +33,7 @@ fn state() -> AppState {
             note: None,
             limits: Default::default(),
             accounts: Default::default(),
+            project: None,
         })
         .unwrap();
     for (i, (agent, msg)) in [
@@ -372,6 +373,7 @@ fn add_user(app: &mut App, name: &str) {
             note: None,
             limits: Default::default(),
             accounts: Default::default(),
+            project: None,
         })
         .unwrap();
     app.refresh();
@@ -549,6 +551,7 @@ fn tokens_table_shows_status_and_usage() {
                 ..Default::default()
             },
             accounts: Default::default(),
+            project: None,
         })
         .unwrap();
     for i in 0..2 {

@@ -137,6 +137,9 @@ struct RequestView {
     /// The account that ran it, for admins only.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    /// The project it ran in, by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
     created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
@@ -163,6 +166,7 @@ pub fn request_json(store: &Store, r: Request, admin: bool) -> ApiResult<(Status
         poll: format!("/v1/ask/{}", r.id),
         duration_ms: r.duration_ms(),
         account: if admin { r.account } else { None },
+        project: r.project,
         created_at: rfc3339(r.created_at),
         completed_at: r.completed_at.and_then(rfc3339),
         id: r.id,
@@ -225,15 +229,29 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             "message must not contain NUL bytes".to_owned(),
         ));
     }
+    // A project-bound token gets its project's effective settings: the
+    // agents both allow, the project's default agent and models.
+    let project = match &token.project {
+        Some(name) => Some(state.store.get_project(name)?.ok_or_else(|| {
+            ApiError::Forbidden("this token's project no longer exists; ask the owner".to_owned())
+        })?),
+        None => None,
+    };
+    let eff = crate::projects::effective(token, project.as_ref());
     let agent = match input.agent.as_deref() {
         Some(name) => name
             .parse::<AgentKind>()
             .map_err(|e| ApiError::BadRequest(e.to_string()))?,
-        None => state.default_agent,
+        None => eff.default_agent.unwrap_or(state.default_agent),
     };
     if !token.allows(agent) {
         return Err(ApiError::Forbidden(format!(
             "this token may not use {agent}"
+        )));
+    }
+    if !eff.allows(agent) {
+        return Err(ApiError::Forbidden(format!(
+            "this token's project does not allow {agent}"
         )));
     }
     if let Some(model) = &input.model
@@ -243,6 +261,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             "model contains unsupported characters".to_owned(),
         ));
     }
+    let model = eff.model(agent, input.model.as_deref());
     if !state
         .runtime
         .agents
@@ -261,7 +280,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             id: &id,
             token,
             agent,
-            model: input.model.as_deref(),
+            model: model.as_deref(),
             message: &message,
         },
         &token.limits,
@@ -463,7 +482,9 @@ pub async fn me_json(state: &AppState, token: &Token) -> ApiResult<Value> {
         "role": token.role,
         "status": token.status(now),
         "sessionMode": token.session_mode,
-        "agents": token.agents,
+        "agents": super::usable_agents(&state.store, token),
+        // The project's name only: never its folder or accounts.
+        "project": token.project,
         "expiresAt": token.expires_at.and_then(rfc3339),
         "limits": token.limits,
         "usage": usage,

@@ -343,9 +343,10 @@ async fn models(
     auth: Result<Auth, ApiError>,
 ) -> OaResult<Json<Value>> {
     let Auth(token) = auth?;
+    let usable = crate::api::usable_agents(&state.store, &token);
     let data: Vec<Value> = AgentKind::ALL
         .into_iter()
-        .filter(|a| token.allows(*a))
+        .filter(|a| usable.contains(a))
         .filter(|a| {
             state
                 .runtime

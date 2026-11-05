@@ -18,6 +18,10 @@
 //! | `DELETE` | `/v1/tokens/{id}`     | admin | Revoke a token                     |
 //! | `GET`    | `/v1/audit`           | admin | Recent sharing and access changes  |
 //! | `GET`    | `/v1/accounts`        | admin | Accounts per agent and their state |
+//! | `GET`    | `/v1/projects`        | admin | Projects with their use today      |
+//! | `POST`   | `/v1/projects`        | admin | Add a project                      |
+//! | `PATCH`  | `/v1/projects/{name}` | admin | Change a project                   |
+//! | `DELETE` | `/v1/projects/{name}` | admin | Remove a project (never its folder)|
 //! | `GET`    | `/v1/invites`         | admin | List invite links                  |
 //! | `POST`   | `/v1/invites`         | admin | Create a one-time invite link      |
 //! | `DELETE` | `/v1/invites/{id}`    | admin | Cancel a pending invite            |
@@ -32,6 +36,7 @@ mod ask;
 mod cancel;
 mod invites;
 mod openai;
+mod projects;
 mod tokens;
 
 pub use cancel::cancel_request;
@@ -40,6 +45,10 @@ pub use ask::{
     AskBody, SubmitInput, me_json, reads_any_request, request_json, submit, wait_until_done,
 };
 pub use invites::{CreateInviteBody, snippets, validate_new_invite};
+pub use projects::{
+    CreateProjectBody, UpdateProjectBody, apply_update, check_binding, check_bound,
+    check_project_name, project_json, usable_agents, validate_project,
+};
 pub use tokens::{
     CreateTokenBody, LimitsPatch, UpdateTokenBody, check_accounts, validate_limits,
     validate_new_token,
@@ -246,6 +255,11 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
         )
         .route("/v1/audit", get(tokens::audit))
         .route("/v1/accounts", get(accounts))
+        .route("/v1/projects", get(projects::list).post(projects::create))
+        .route(
+            "/v1/projects/{name}",
+            axum::routing::patch(projects::update).delete(projects::remove),
+        )
         .route("/v1/invites", get(invites::list).post(invites::create))
         .route("/v1/invites/{id}", delete(invites::cancel))
         .route("/v1/claim/preview", post(invites::preview))

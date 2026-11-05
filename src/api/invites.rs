@@ -43,6 +43,9 @@ pub struct CreateInviteBody {
     /// Accounts per agent the token may use, as on `POST /v1/tokens`.
     #[serde(default)]
     pub accounts: Option<AccountMap>,
+    /// Project the token is bound to, as on `POST /v1/tokens`.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Body of the claim endpoints.
@@ -65,6 +68,7 @@ fn invite_json(i: &Invite, now: i64) -> Value {
         "createdAt": rfc3339(i.created_at),
         "claimedAt": i.claimed_at.and_then(rfc3339),
         "accounts": i.accounts,
+        "project": i.project,
     })
 }
 
@@ -83,6 +87,7 @@ pub fn validate_new_invite(body: CreateInviteBody) -> ApiResult<NewInvite> {
         note: None,
         limits: body.limits,
         accounts: body.accounts,
+        project: body.project,
     })?;
     let link_hours = body.link_hours.unwrap_or(24);
     if !LINK_HOURS.contains(&link_hours) {
@@ -100,6 +105,7 @@ pub fn validate_new_invite(body: CreateInviteBody) -> ApiResult<NewInvite> {
         limits,
         link_hours,
         accounts: probe.accounts,
+        project: probe.project,
     })
 }
 
@@ -203,6 +209,12 @@ pub(super) async fn create(
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
     let mut new = validate_new_invite(body)?;
     new.accounts = super::check_accounts(&state.store, new.accounts)?;
+    super::check_binding(
+        &state.store,
+        new.project.as_deref(),
+        &new.agents,
+        &new.accounts,
+    )?;
     let now = now_ms();
     let pending = state
         .store
@@ -328,6 +340,8 @@ fn preview_code(state: &AppState, body: ClaimJson) -> ApiResult<Json<Value>> {
             "sessionMode": i.session_mode,
             "limits": i.limits,
             "tokenExpiresInDays": i.token_expires_in_days,
+            // The name only: never the folder or the accounts.
+            "project": i.project,
             "linkExpiresAt": rfc3339(i.expires_at),
             "notice": "The owner of this Hashi can see the prompts you send and the answers you get.",
         }))),
@@ -396,6 +410,7 @@ mod tests {
             limits: None,
             link_hours: None,
             accounts: None,
+            project: None,
         }
     }
 

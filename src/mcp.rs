@@ -122,7 +122,9 @@ async fn dispatch(
     match method {
         "initialize" => Ok(initialize(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools(token) })),
+        "tools/list" => Ok(json!({
+            "tools": tools(&crate::api::usable_agents(&state.store, token))
+        })),
         "tools/call" => {
             let call: CallParams =
                 serde_json::from_value(params).map_err(RpcError::invalid_params)?;
@@ -161,10 +163,10 @@ fn ask_tool_agent(name: &str) -> Option<AgentKind> {
     (ask_tool_name(agent) == name).then_some(agent)
 }
 
-fn tools(token: &Token) -> Vec<Value> {
+fn tools(agents: &[AgentKind]) -> Vec<Value> {
     let mut list: Vec<Value> = AgentKind::ALL
         .into_iter()
-        .filter(|a| token.allows(*a))
+        .filter(|a| agents.contains(a))
         .map(|agent| {
             json!({
                 "name": ask_tool_name(agent),

@@ -17,10 +17,12 @@ mod accounts;
 mod audit;
 mod cancel;
 mod invites;
+mod projects;
 
 pub use accounts::{AccountState, AccountStatus};
 pub use audit::AuditEntry;
 pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
+pub use projects::{ProjectStats, RemovedProject};
 
 use crate::accounts::{self as acct, AccountMap};
 use crate::agent::{AgentKind, Usage};
@@ -127,6 +129,9 @@ pub struct Request {
     /// Accounts this request already ran into a limit on, so a failover
     /// never tries one twice.
     pub accounts_tried: Vec<String>,
+    /// The project its token was bound to when it was sent, or `None` for
+    /// the token's own workspace.
+    pub project: Option<String>,
 }
 
 impl Request {
@@ -157,6 +162,8 @@ pub struct NewToken {
     /// Accounts per agent, in order of preference. An agent without an
     /// entry uses its default account.
     pub accounts: AccountMap,
+    /// The project the token is bound to, or `None` for its own workspace.
+    pub project: Option<String>,
 }
 
 /// Upper bound on stored tokens, enforced by the API and by invite redemption.
@@ -440,7 +447,42 @@ DROP TABLE sessions;
 ALTER TABLE sessions_v4 RENAME TO sessions;
 ";
 
-const MIGRATIONS: [&str; 4] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4];
+/// Version 5: projects. A project is a folder with its own agents,
+/// accounts and defaults; tokens, invites and requests name the project
+/// they belong to (`NULL` for the implicit default project), and sessions
+/// are kept per project as well, so the sessions table is rebuilt again
+/// with the project in its primary key.
+const SCHEMA_V5: &str = r"
+CREATE TABLE IF NOT EXISTS projects (
+    name          TEXT PRIMARY KEY,
+    path          TEXT NOT NULL,
+    agents        TEXT NOT NULL,
+    accounts      TEXT NOT NULL DEFAULT '{}',
+    default_agent TEXT,
+    models        TEXT NOT NULL DEFAULT '{}',
+    note          TEXT,
+    created_at    INTEGER NOT NULL
+);
+ALTER TABLE tokens ADD COLUMN project TEXT;
+ALTER TABLE invites ADD COLUMN project TEXT;
+ALTER TABLE requests ADD COLUMN project TEXT;
+CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project, created_at);
+CREATE TABLE sessions_v5 (
+    token_id         TEXT NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+    agent            TEXT NOT NULL,
+    account          TEXT NOT NULL DEFAULT 'default',
+    project          TEXT NOT NULL DEFAULT 'default',
+    agent_session_id TEXT NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    PRIMARY KEY (token_id, agent, account, project)
+);
+INSERT INTO sessions_v5 (token_id, agent, account, project, agent_session_id, updated_at)
+    SELECT token_id, agent, account, 'default', agent_session_id, updated_at FROM sessions;
+DROP TABLE sessions;
+ALTER TABLE sessions_v5 RENAME TO sessions;
+";
+
+const MIGRATIONS: [&str; 5] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
 
 /// Usage of token `?1` since day start `?2` and month start `?3`. Every
 /// column it touches is in `idx_requests_usage`.
@@ -455,11 +497,11 @@ const TOKEN_USAGE_SQL: &str = "SELECT
 
 const TOKEN_COLUMNS: &str = "id, name, prefix, role, session_mode, agents, expires_at, created_at, \
      last_used_at, paused, note, daily_requests, monthly_requests, daily_budget_usd, \
-     monthly_budget_usd, max_pending, accounts";
+     monthly_budget_usd, max_pending, accounts, project";
 
 const REQUEST_COLUMNS: &str = "id, token_id, token_name, agent, model, message, stateful, status, \
      response, error, input_tokens, output_tokens, cost_usd, created_at, started_at, completed_at, \
-     account, accounts_tried";
+     account, accounts_tried, project";
 
 impl Store {
     /// Opens (or creates) the database at `path`.
@@ -573,8 +615,8 @@ impl Store {
             .transpose()
     }
 
-    /// Writes a token's editable fields: name, note, pause, expiry, limits
-    /// and accounts.
+    /// Writes a token's editable fields: name, note, pause, expiry, limits,
+    /// accounts and project.
     ///
     /// # Errors
     ///
@@ -584,7 +626,7 @@ impl Store {
         self.conn()?.execute(
             "UPDATE tokens SET name = ?1, note = ?2, paused = ?3, expires_at = ?4,
                  daily_requests = ?5, monthly_requests = ?6, daily_budget_usd = ?7,
-                 monthly_budget_usd = ?8, max_pending = ?9, accounts = ?11
+                 monthly_budget_usd = ?8, max_pending = ?9, accounts = ?11, project = ?12
              WHERE id = ?10",
             params![
                 t.name,
@@ -598,6 +640,7 @@ impl Store {
                 l.max_pending,
                 t.id,
                 acct::encode(&t.accounts),
+                t.project,
             ],
         )?;
         Ok(())
@@ -920,7 +963,7 @@ impl Store {
         let sql = format!(
             "SELECT id, token_id, token_name, agent, model, substr(message, 1, {n}), stateful,
                  status, NULL, substr(error, 1, {n}), input_tokens, output_tokens, cost_usd,
-                 created_at, started_at, completed_at, account, accounts_tried
+                 created_at, started_at, completed_at, account, accounts_tried, project
              FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?1",
             n = BRIEF_MESSAGE_CHARS
         );
@@ -1194,12 +1237,29 @@ impl Store {
         agent: AgentKind,
         account: &str,
     ) -> Result<Option<String>> {
+        self.project_session(token_id, agent, account, crate::projects::DEFAULT)
+    }
+
+    /// The agent session a stateful token should resume on `account` in
+    /// `project` (`default` for the token's own workspace). Agents keep
+    /// their history per folder, so each project has its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn project_session(
+        &self,
+        token_id: &str,
+        agent: AgentKind,
+        account: &str,
+        project: &str,
+    ) -> Result<Option<String>> {
         Ok(self
             .conn()?
             .query_row(
                 "SELECT agent_session_id FROM sessions
-                 WHERE token_id = ?1 AND agent = ?2 AND account = ?3",
-                params![token_id, agent.as_str(), account],
+                 WHERE token_id = ?1 AND agent = ?2 AND account = ?3 AND project = ?4",
+                params![token_id, agent.as_str(), account, project],
                 |r| r.get(0),
             )
             .optional()?)
@@ -1226,18 +1286,41 @@ impl Store {
         account: &str,
         session: &str,
     ) -> Result<()> {
+        self.set_project_session(token_id, agent, account, crate::projects::DEFAULT, session)
+    }
+
+    /// Records the agent session for a token on `account` in `project`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_project_session(
+        &self,
+        token_id: &str,
+        agent: AgentKind,
+        account: &str,
+        project: &str,
+        session: &str,
+    ) -> Result<()> {
         self.conn()?.execute(
-            "INSERT INTO sessions (token_id, agent, account, agent_session_id, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(token_id, agent, account) DO UPDATE SET agent_session_id = ?4,
-                 updated_at = ?5",
-            params![token_id, agent.as_str(), account, session, now_ms()],
+            "INSERT INTO sessions (token_id, agent, account, project, agent_session_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(token_id, agent, account, project) DO UPDATE SET agent_session_id = ?5,
+                 updated_at = ?6",
+            params![
+                token_id,
+                agent.as_str(),
+                account,
+                project,
+                session,
+                now_ms()
+            ],
         )?;
         Ok(())
     }
 
-    /// Forgets a token's sessions with `agent`, on every account, so the
-    /// next prompt starts fresh.
+    /// Forgets a token's sessions with `agent`, on every account and in
+    /// every project, so the next prompt starts fresh.
     ///
     /// # Errors
     ///
@@ -1294,8 +1377,9 @@ fn migrate(conn: &mut Connection) -> Result<i64> {
 
 fn insert_request_row(conn: &Connection, new: NewRequest<'_>) -> Result<()> {
     conn.execute(
-        "INSERT INTO requests (id, token_id, token_name, agent, model, message, stateful, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
+        "INSERT INTO requests (id, token_id, token_name, agent, model, message, stateful, status,
+             created_at, project)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9)",
         params![
             new.id,
             new.token.id,
@@ -1305,6 +1389,7 @@ fn insert_request_row(conn: &Connection, new: NewRequest<'_>) -> Result<()> {
             new.message,
             new.token.session_mode == SessionMode::Stateful,
             now_ms(),
+            new.token.project,
         ],
     )?;
     Ok(())
@@ -1328,13 +1413,14 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
         note: new.note.clone(),
         limits: new.limits,
         accounts: new.accounts.clone(),
+        project: new.project.clone(),
     };
     let l = token.limits;
     conn.execute(
         "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, expires_at,
              created_at, note, daily_requests, monthly_requests, daily_budget_usd,
-             monthly_budget_usd, max_pending, accounts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             monthly_budget_usd, max_pending, accounts, project)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             token.id,
             token.name,
@@ -1352,6 +1438,7 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
             l.monthly_budget_usd,
             l.max_pending,
             acct::encode(&token.accounts),
+            token.project,
         ],
     )?;
     Ok((token, secret))
@@ -1383,6 +1470,7 @@ fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
                 max_pending: r.get(15)?,
             },
             accounts: acct::decode(&accounts),
+            project: r.get(17)?,
         })
     };
     Ok(build())
@@ -1427,6 +1515,7 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<Result<Request>> {
                 .filter(|n| !n.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            project: r.get(18)?,
         })
     };
     Ok(build())
@@ -1450,6 +1539,7 @@ mod tests {
             note: None,
             limits: Limits::default(),
             accounts: AccountMap::new(),
+            project: None,
         }
     }
 
@@ -1492,7 +1582,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         // Opening again is a no-op.
         drop(s);
         assert!(Store::open(&path).is_ok());
@@ -1531,7 +1621,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 2).unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 4);
+        assert_eq!(s.schema_version().unwrap(), 5);
         let conn = s.conn().unwrap();
         let mode: i64 = conn
             .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
@@ -1581,7 +1671,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 4);
+        assert_eq!(s.schema_version().unwrap(), 5);
         let t = s.get_token("t1").unwrap().unwrap();
         assert!(t.accounts.is_empty());
         assert_eq!(
@@ -1604,6 +1694,82 @@ mod tests {
             .execute("DELETE FROM tokens WHERE id = 't1'", [])
             .unwrap();
         assert!(s.session("t1", AgentKind::Claude).unwrap().is_none());
+    }
+
+    #[test]
+    fn migrates_v4_database_to_v5_keeping_sessions_outside_any_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v4.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4] {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            conn.execute(
+                "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, created_at,
+                     accounts)
+                 VALUES ('t1', 'old', ?1, 'hashi_old', 'user', 'stateful', 'claude', 1,
+                     '{\"claude\":[\"work\"]}')",
+                [token::hash("hashi_old_secret")],
+            )
+            .unwrap();
+            for (account, session) in [("default", "sess-d"), ("work", "sess-w")] {
+                conn.execute(
+                    "INSERT INTO sessions (token_id, agent, account, agent_session_id, updated_at)
+                     VALUES ('t1', 'claude', ?1, ?2, 1)",
+                    params![account, session],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO requests (id, token_id, token_name, agent, message, status, created_at,
+                     account)
+                 VALUES ('r1', 't1', 'old', 'claude', 'hi', 'completed', 1, 'work')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO invites (id, hash, label, session_mode, agents, expires_at, created_at)
+                 VALUES ('i1', 'h', 'bob', 'stateless', 'claude', 9999999999999, 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 5);
+        let t = s.get_token("t1").unwrap().unwrap();
+        assert_eq!(t.project, None);
+        assert_eq!(t.accounts[&AgentKind::Claude], ["work"]);
+        assert_eq!(
+            s.session("t1", AgentKind::Claude).unwrap().as_deref(),
+            Some("sess-d")
+        );
+        assert_eq!(
+            s.project_session("t1", AgentKind::Claude, "work", "default")
+                .unwrap()
+                .as_deref(),
+            Some("sess-w")
+        );
+        assert!(
+            s.project_session("t1", AgentKind::Claude, "work", "api")
+                .unwrap()
+                .is_none()
+        );
+        let r = s.get_request("r1").unwrap().unwrap();
+        assert_eq!((r.account.as_deref(), r.project), (Some("work"), None));
+        assert_eq!(s.list_invites().unwrap()[0].project, None);
+        assert!(s.list_projects().unwrap().is_empty());
+        // Deleting the token still cascades to its sessions.
+        s.conn()
+            .unwrap()
+            .execute("DELETE FROM tokens WHERE id = 't1'", [])
+            .unwrap();
+        assert!(s.session("t1", AgentKind::Claude).unwrap().is_none());
+        drop(s);
+        assert!(Store::open(&path).is_ok(), "opening again is a no-op");
     }
 
     #[test]

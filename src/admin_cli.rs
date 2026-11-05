@@ -1,6 +1,6 @@
 //! Offline admin commands that work straight on the database: tokens,
-//! invites, accounts and the audit log. Every change is audited with actor
-//! `cli`.
+//! invites, accounts, projects and the audit log. Every change is audited
+//! with actor `cli`.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -110,6 +110,10 @@ pub enum TokenCommand {
         /// claude=work,personal (repeatable). Default: each agent's own login.
         #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
         accounts: Vec<Binding>,
+        /// Bind the token to this project: it runs in the project's folder,
+        /// with the agents both allow and accounts inside the project's.
+        #[arg(long)]
+        project: Option<String>,
         #[command(flatten)]
         limits: LimitArgs,
     },
@@ -142,6 +146,12 @@ pub enum TokenCommand {
         /// --account.
         #[arg(long)]
         clear_accounts: bool,
+        /// Bind the token to this project.
+        #[arg(long, conflicts_with = "clear_project")]
+        project: Option<String>,
+        /// Put the token back on its own workspace.
+        #[arg(long)]
+        clear_project: bool,
         #[command(flatten)]
         limits: LimitArgs,
     },
@@ -185,6 +195,9 @@ pub struct ShareArgs {
     /// claude=work,personal (repeatable).
     #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
     pub accounts: Vec<Binding>,
+    /// Bind the token to this project. The claim page shows only its name.
+    #[arg(long)]
+    pub project: Option<String>,
     #[command(flatten)]
     pub limits: LimitArgs,
 }
@@ -214,6 +227,19 @@ fn find_token(store: &Store, id_or_prefix: &str) -> Result<Token> {
     }
 }
 
+/// Checks binding to `project` (by name), with these agents and accounts.
+fn bind(
+    store: &Store,
+    project: Option<String>,
+    agents: &[AgentKind],
+    accounts: &AccountMap,
+) -> Result<Option<String>> {
+    let project = hashi::api::check_project_name(project).map_err(|e| anyhow::anyhow!("{e}"))?;
+    hashi::api::check_binding(store, project.as_deref(), agents, accounts)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(project)
+}
+
 fn clean_label(s: &str) -> Result<String> {
     let s = s.trim();
     if s.is_empty() || s.chars().count() > 100 || s.chars().any(char::is_control) {
@@ -237,9 +263,12 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             expires_in_days,
             note,
             accounts,
+            project,
             limits,
         } => {
             let accounts = bindings(store, AccountMap::new(), accounts)?;
+            let agents = agents.unwrap_or_else(|| AgentKind::ALL.to_vec());
+            let project = bind(store, project, &agents, &accounts)?;
             let role = if admin { Role::Admin } else { Role::User };
             let new = NewToken {
                 name: clean_label(&name)?,
@@ -249,7 +278,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                 } else {
                     SessionMode::Stateless
                 },
-                agents: agents.unwrap_or_else(|| AgentKind::ALL.to_vec()),
+                agents,
                 expires_in_days,
                 note,
                 limits: if limits.any() {
@@ -258,6 +287,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     NewToken::default_limits(role)
                 },
                 accounts,
+                project,
             };
             let (t, secret) = store.create_token(&new)?;
             store.audit("cli", "token.create", &t.name, t.role.as_str())?;
@@ -268,8 +298,16 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
         TokenCommand::List => {
             let now = now_ms();
             println!(
-                "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} ACCOUNTS",
-                "NAME", "PREFIX", "ROLE", "STATUS", "SESSION", "AGENTS", "TODAY", "LAST USED",
+                "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} {:<12} ACCOUNTS",
+                "NAME",
+                "PREFIX",
+                "ROLE",
+                "STATUS",
+                "SESSION",
+                "AGENTS",
+                "TODAY",
+                "LAST USED",
+                "PROJECT",
             );
             for t in store.list_tokens()? {
                 let agents = t
@@ -287,7 +325,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     None => usage.today_requests.to_string(),
                 };
                 println!(
-                    "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} {}",
+                    "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} {:<12} {}",
                     t.name,
                     t.prefix,
                     t.role.as_str(),
@@ -296,6 +334,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     agents,
                     today,
                     used,
+                    t.project.as_deref().unwrap_or("-"),
                     acct::format_bindings(&t.accounts)
                 );
             }
@@ -309,6 +348,8 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             clear_limits,
             accounts,
             clear_accounts,
+            project,
+            clear_project,
             limits,
         } => {
             let mut t = find_token(store, &id)?;
@@ -351,9 +392,23 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                 t.accounts = bindings(store, base, accounts)?;
                 changes.push(format!("accounts {}", acct::format_bindings(&t.accounts)));
             }
+            if clear_project {
+                t.project = None;
+                changes.push("project default".to_owned());
+            } else if project.is_some() {
+                t.project =
+                    hashi::api::check_project_name(project).map_err(|e| anyhow::anyhow!("{e}"))?;
+                changes.push(format!(
+                    "project {}",
+                    t.project.as_deref().unwrap_or(hashi::projects::DEFAULT)
+                ));
+            }
             if changes.is_empty() {
                 bail!("nothing to update; see `hashi token update --help`");
             }
+            // Every change is checked, so neither a new project nor new
+            // accounts can take the token outside its project.
+            t.project = bind(store, t.project.clone(), &t.agents, &t.accounts)?;
             store.save_token_policy(&t)?;
             let detail = changes.join(", ");
             store.audit("cli", "token.update", &t.name, &detail)?;
@@ -403,6 +458,8 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
     let mut limits = args.limits.apply(Limits::default());
     limits.max_pending = limits.max_pending.or(Some(3));
     let accounts = bindings(store, AccountMap::new(), args.accounts)?;
+    let agents = args.agents.unwrap_or_else(|| AgentKind::ALL.to_vec());
+    let project = bind(store, args.project, &agents, &accounts)?;
     let (invite, code) = store.create_invite(&hashi::store::NewInvite {
         label: clean_label(&args.label)?,
         session_mode: if args.stateful {
@@ -410,11 +467,12 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         } else {
             SessionMode::Stateless
         },
-        agents: args.agents.unwrap_or_else(|| AgentKind::ALL.to_vec()),
+        agents,
         token_expires_in_days: args.expires_in_days,
         limits,
         link_hours: args.link_hours,
         accounts,
+        project,
     })?;
     store.audit(
         "cli",
@@ -435,8 +493,13 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", args.port));
     eprintln!(
-        "invite for {} (works once, expires {}):",
+        "invite for {}{} (works once, expires {}):",
         invite.label,
+        invite
+            .project
+            .as_deref()
+            .map(|p| format!(", in project {p}"))
+            .unwrap_or_default(),
         rfc3339(invite.expires_at).unwrap_or_default()
     );
     println!("{base}/claim/{code}");
@@ -529,6 +592,9 @@ pub struct BinArgs {
     /// Path to the Qwen Code executable.
     #[arg(long, env = "HASHI_QWEN_BIN")]
     qwen_bin: Option<PathBuf>,
+    /// Path to the Cursor CLI executable.
+    #[arg(long, env = "HASHI_CURSOR_BIN")]
+    cursor_bin: Option<PathBuf>,
 }
 
 impl BinArgs {
@@ -539,7 +605,7 @@ impl BinArgs {
             AgentKind::Gemini => self.gemini_bin.clone(),
             AgentKind::Opencode => self.opencode_bin.clone(),
             AgentKind::Qwen => self.qwen_bin.clone(),
-            AgentKind::Cursor => None,
+            AgentKind::Cursor => self.cursor_bin.clone(),
         };
         custom.unwrap_or_else(|| AgentConfig::default_for(agent).bin)
     }
@@ -1017,6 +1083,253 @@ fn set_disabled(store: &Store, agent: AgentKind, name: &str, disabled: bool) -> 
         "",
     )?;
     println!("{action} {agent}:{name}");
+    Ok(())
+}
+
+// ── projects ───────────────────────────────────────────────────────────────
+
+/// One `--model <agent>=<model>` value.
+type ModelBinding = (AgentKind, String);
+
+fn parse_model(s: &str) -> Result<ModelBinding, String> {
+    hashi::projects::parse_model(s)
+}
+
+/// The settings `project add` and `project update` share.
+#[derive(Debug, Args, Clone, Default)]
+pub struct ProjectArgs {
+    /// Agents the project allows (comma separated). Default for a new
+    /// project: the installed ones.
+    #[arg(long, value_delimiter = ',')]
+    agents: Option<Vec<AgentKind>>,
+    /// Accounts for an agent, in order, for example claude=work,personal
+    /// (repeatable). An agent left out uses its default account.
+    #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
+    accounts: Vec<Binding>,
+    /// Agent used when a request names none.
+    #[arg(long)]
+    default_agent: Option<AgentKind>,
+    /// Model for an agent when a request names none, for example
+    /// claude=sonnet (repeatable).
+    #[arg(long = "model", value_name = "AGENT=MODEL", value_parser = parse_model)]
+    models: Vec<ModelBinding>,
+    /// Who or what the project is for.
+    #[arg(long)]
+    note: Option<String>,
+}
+
+/// `hashi project ...`
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// Add a project: a folder that tokens and invites can be bound to.
+    Add {
+        /// Name, 1 to 32 characters from a-z, 0-9 and -.
+        name: String,
+        /// Absolute path of an existing folder. Symlinks are resolved.
+        path: PathBuf,
+        #[command(flatten)]
+        settings: ProjectArgs,
+        #[command(flatten)]
+        bins: BinArgs,
+    },
+    /// Change a project. Bound tokens must stay inside it.
+    Update {
+        /// Project name.
+        name: String,
+        /// New folder.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Put every agent back on its default account before applying
+        /// --account.
+        #[arg(long)]
+        clear_accounts: bool,
+        /// Remove the default agent.
+        #[arg(long, conflicts_with = "default_agent")]
+        clear_default_agent: bool,
+        /// Remove every model before applying --model.
+        #[arg(long)]
+        clear_models: bool,
+        #[command(flatten)]
+        settings: ProjectArgs,
+    },
+    /// List projects with their folder, settings and use.
+    List,
+    /// Remove a project. Its folder is never touched.
+    Remove {
+        /// Project name.
+        name: String,
+        /// Put bound tokens and invites back on their own workspace first.
+        #[arg(long)]
+        unbind: bool,
+    },
+}
+
+/// The agents whose executable is there, or every agent when none is.
+fn installed_agents(bins: &BinArgs) -> Vec<AgentKind> {
+    let found: Vec<AgentKind> = AgentKind::ALL
+        .into_iter()
+        .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
+        .collect();
+    if found.is_empty() {
+        AgentKind::ALL.to_vec()
+    } else {
+        found
+    }
+}
+
+fn api_err(e: hashi::api::ApiError) -> anyhow::Error {
+    anyhow::anyhow!("{e}")
+}
+
+/// Runs a `hashi project` command.
+///
+/// # Errors
+///
+/// Fails on invalid input or database errors.
+pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
+    match cmd {
+        ProjectCommand::Add {
+            name,
+            path,
+            settings,
+            bins,
+        } => {
+            let mut accounts = AccountMap::new();
+            for (agent, names) in settings.accounts {
+                accounts.insert(agent, names);
+            }
+            let raw = hashi::projects::Project {
+                name,
+                path: String::new(),
+                agents: settings.agents.unwrap_or_else(|| installed_agents(&bins)),
+                accounts,
+                default_agent: settings.default_agent,
+                models: settings.models.into_iter().collect(),
+                note: settings.note,
+                created_at: now_ms(),
+            };
+            if store.list_projects()?.len() >= hashi::projects::MAX_PROJECTS {
+                bail!("project limit reached, remove one first");
+            }
+            let p = hashi::api::validate_project(store, Some(home), raw, &path).map_err(api_err)?;
+            if !store.add_project(&p)? {
+                bail!("a project named {} already exists", p.name);
+            }
+            store.audit("cli", "project.add", &p.name, &p.path)?;
+            println!(
+                "added project {} in {} (agents {})",
+                p.name,
+                p.path,
+                hashi::token::encode_agents(&p.agents)
+            );
+            println!(
+                "share it with: hashi share <name> --project {}  (or --project on token create)",
+                p.name
+            );
+        }
+        ProjectCommand::Update {
+            name,
+            path,
+            clear_accounts,
+            clear_default_agent,
+            clear_models,
+            settings,
+        } => {
+            let current = store
+                .get_project(&name)?
+                .with_context(|| format!("no project named {name}"))?;
+            let accounts = (clear_accounts || !settings.accounts.is_empty()).then(|| {
+                let mut map = if clear_accounts {
+                    AccountMap::new()
+                } else {
+                    current.accounts.clone()
+                };
+                for (agent, names) in settings.accounts {
+                    map.insert(agent, names);
+                }
+                map
+            });
+            let models = (clear_models || !settings.models.is_empty()).then(|| {
+                let mut map = if clear_models {
+                    hashi::projects::ModelMap::new()
+                } else {
+                    current.models.clone()
+                };
+                map.extend(settings.models);
+                map
+            });
+            let body = hashi::api::UpdateProjectBody {
+                path: path.map(|p| p.to_string_lossy().into_owned()),
+                agents: settings.agents,
+                accounts,
+                default_agent: if clear_default_agent {
+                    Some(None)
+                } else {
+                    settings.default_agent.map(Some)
+                },
+                models,
+                note: settings.note,
+            };
+            let (p, changes) =
+                hashi::api::apply_update(store, Some(home), current, body).map_err(api_err)?;
+            store.save_project(&p)?;
+            let detail = changes.join(", ");
+            store.audit("cli", "project.update", &p.name, &detail)?;
+            println!("updated {}: {detail}", p.name);
+        }
+        ProjectCommand::List => {
+            let projects = store.list_projects()?;
+            if projects.is_empty() {
+                println!(
+                    "no projects yet; every token runs in its own workspace (add one with hashi project add)"
+                );
+                return Ok(());
+            }
+            let now = now_ms();
+            println!(
+                "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} PATH",
+                "NAME", "TOKENS", "TODAY", "MONTH", "SPEND", "AGENTS", "ACCOUNTS", "MODELS"
+            );
+            for p in projects {
+                let st = store.project_stats(&p.name, now)?;
+                let agents = match p.default_agent {
+                    Some(d) => format!("{} ({d})", hashi::token::encode_agents(&p.agents)),
+                    None => hashi::token::encode_agents(&p.agents),
+                };
+                println!(
+                    "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} {}",
+                    p.name,
+                    st.tokens,
+                    st.today_requests,
+                    st.month_requests,
+                    format!("${:.2}", st.month_cost_usd),
+                    agents,
+                    acct::format_bindings(&p.accounts),
+                    hashi::projects::format_models(&p.models),
+                    p.path
+                );
+            }
+        }
+        ProjectCommand::Remove { name, unbind } => match store.remove_project(&name, unbind)? {
+            hashi::store::RemovedProject::NotFound => bail!("no project named {name}"),
+            hashi::store::RemovedProject::Bound { tokens, invites } => bail!(
+                "{tokens} token(s) and {invites} pending invite(s) are bound to {name}; pass \
+                 --unbind to put them back on their own workspace"
+            ),
+            hashi::store::RemovedProject::Removed { tokens, invites } => {
+                store.audit(
+                    "cli",
+                    "project.remove",
+                    &name,
+                    &format!("unbound {tokens} token(s) and {invites} invite(s)"),
+                )?;
+                println!(
+                    "removed project {name}; unbound {tokens} token(s) and {invites} invite(s). \
+                     Its folder was not touched."
+                );
+            }
+        },
+    }
     Ok(())
 }
 

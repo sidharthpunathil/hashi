@@ -815,6 +815,7 @@ pub fn ensure_admin(store: &Store) -> Result<Option<String>> {
         note: Some("created on first start".to_owned()),
         limits: crate::token::Limits::default(),
         accounts: crate::accounts::AccountMap::new(),
+        project: None,
     })?;
     Ok(Some(secret.raw))
 }

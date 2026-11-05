@@ -405,6 +405,7 @@ impl ShareForm {
             },
             link_hours: self.link_hours(),
             accounts,
+            project: None,
         }
     }
 }
@@ -1177,6 +1178,7 @@ impl App {
             note: None,
             limits: NewToken::default_limits(form.role),
             accounts,
+            project: None,
         };
         match self.state.store.create_token(&new) {
             Ok((token, secret)) => {
