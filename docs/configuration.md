@@ -102,6 +102,7 @@ Run `hashi` in a terminal and the dashboard takes over the screen. When stdout i
 | `s` | Share: create an invite link (Tokens and Commands views) |
 | `p` | Pause or resume the selected token |
 | `i` / `x` | Switch to pending invites / cancel one |
+| `x` | Cancel the selected queued or running request, after confirmation (Requests view). Audited as `dashboard` |
 | `c` | Copy the API URL, or the token or invite link being shown |
 | `t` | Go public: start a Cloudflare quick tunnel on the running server. Without `cloudflared`, opens its install popup; with Tailscale public, asks to switch |
 | `r` | Refresh |

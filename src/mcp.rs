@@ -35,8 +35,8 @@ const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "Hashi relays prompts to coding agents (such as Claude Code and \
 Codex) running on its owner's machine. Use an ask_<agent> tool to send a prompt and get the \
-answer. Long runs return a request id: pass it to get_result. my_usage shows this token's \
-limits and usage.";
+answer. Long runs return a request id: pass it to get_result, or to cancel to stop it. \
+my_usage shows this token's limits and usage.";
 
 /// A JSON-RPC error: code and message.
 struct RpcError(i64, String);
@@ -198,6 +198,18 @@ fn tools(token: &Token) -> Vec<Value> {
         },
     }));
     list.push(json!({
+        "name": "cancel",
+        "description": "Cancel an earlier ask_* request by id while it is queued or \
+                        running. A running agent is stopped.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Request id returned by ask_*." },
+            },
+            "required": ["id"],
+        },
+    }));
+    list.push(json!({
         "name": "my_usage",
         "description": "Show this token's access: status, allowed agents, limits, \
                         usage today and this month, and when limits reset.",
@@ -238,6 +250,13 @@ async fn call_tool(state: &AppState, token: &Token, call: CallParams) -> Result<
             ask(state, token, agent, args(call.arguments)?).await
         }
         "get_result" => get_result(state, token, args(call.arguments)?).await,
+        "cancel" => {
+            let a: GetResultArgs = args(call.arguments)?;
+            // Ownership is checked as `get_result` checks it.
+            api::cancel_request(state, token, &a.id)
+                .await
+                .map(|r| (format!("Cancelled request {}.", r.id), false))
+        }
         "my_usage" => api::me_json(state, token).await.map(|v| {
             (
                 serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),

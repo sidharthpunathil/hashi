@@ -6,6 +6,9 @@
 //! | `GET`    | `/v1/status`          |       | Version, uptime, agent readiness   |
 //! | `POST`   | `/v1/ask`             | token | Queue a prompt                     |
 //! | `GET`    | `/v1/ask/{id}`        | token | Poll (or long-poll) a result       |
+//! | `DELETE` | `/v1/ask/{id}`        | token | Cancel a queued or running request |
+//! | `POST`   | `/v1/chat/completions`| token | OpenAI-compatible chat             |
+//! | `GET`    | `/v1/models`          | token | OpenAI-compatible model list       |
 //! | `DELETE` | `/v1/session/{agent}` | token | Reset a stateful conversation      |
 //! | `GET`    | `/v1/me`              | any   | The token's own access and usage   |
 //! | `GET`    | `/v1/stats`           | admin | Counters and machine resources     |
@@ -25,8 +28,12 @@
 //! "any" accepts paused and expired tokens, so they can see why they stopped.
 
 mod ask;
+mod cancel;
 mod invites;
+mod openai;
 mod tokens;
+
+pub use cancel::cancel_request;
 
 pub use ask::{
     AskBody, SubmitInput, me_json, reads_any_request, request_json, submit, wait_until_done,
@@ -225,7 +232,8 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/status", get(status))
         .route("/v1/ask", post(ask::ask))
-        .route("/v1/ask/{id}", get(ask::poll))
+        .route("/v1/ask/{id}", get(ask::poll).delete(cancel::delete))
+        .merge(openai::routes())
         .route("/v1/session/{agent}", delete(ask::reset_session))
         .route("/v1/me", get(ask::me))
         .route("/v1/stats", get(stats))
