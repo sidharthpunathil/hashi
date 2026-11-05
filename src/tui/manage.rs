@@ -111,6 +111,10 @@ impl App {
             Err(_) => return false,
         };
         let any = !done.is_empty();
+        if any {
+            // A bridge may have been saved.
+            self.cache.clear();
+        }
         for d in done {
             match d {
                 Done::Connected(Ok(name)) => {

@@ -842,7 +842,8 @@ pub struct App {
     pub recent: Vec<Request>,
     /// All tokens.
     pub tokens: Vec<Token>,
-    /// Today's and this month's use, by token id.
+    /// Today's and this month's use, by token id. Read once per refresh
+    /// while the Tokens view shows, the only place it appears.
     pub usage: HashMap<String, TokenUsage>,
     /// Invites not yet claimed or expired, newest first.
     pub invites: Vec<Invite>,
@@ -903,6 +904,8 @@ pub struct App {
     pub request_checks: Option<Vec<crate::access_client::Checked>>,
     /// Whether a request status check is running.
     pub request_checking: bool,
+    /// What views read between refreshes; see [`super::cache`].
+    pub(crate) cache: super::cache::FrameCache,
 }
 
 /// State a background task fills in for the dashboard.
@@ -960,6 +963,7 @@ impl App {
             access_pending: 0,
             request_checks: None,
             request_checking: false,
+            cache: super::cache::FrameCache::default(),
         };
         app.refresh();
         app
@@ -970,16 +974,13 @@ impl App {
         let store = &self.state.store;
         let loaded = (|| {
             let stats = store.stats()?;
+            // Only the agent cards read these, one per shown agent.
             let mut per = HashMap::new();
-            for a in AgentKind::ALL {
+            for a in self.shown_agents() {
                 per.insert(a, store.agent_stats(a)?);
             }
             let now = now_ms();
             let tokens = store.list_tokens()?;
-            let mut usage = HashMap::new();
-            for tk in &tokens {
-                usage.insert(tk.id.clone(), store.token_usage(&tk.id, now)?);
-            }
             let invites: Vec<Invite> = store
                 .list_invites()?
                 .into_iter()
@@ -990,17 +991,18 @@ impl App {
                 per,
                 store.recent_requests_brief(RECENT_LIMIT)?,
                 tokens,
-                usage,
                 invites,
             ))
         })();
+        // The tokens' use, account usage, projects and the rest are read
+        // by the first frame that shows them.
+        self.cache.clear();
         match loaded {
-            Ok((stats, per, recent, tokens, usage, invites)) => {
+            Ok((stats, per, recent, tokens, invites)) => {
                 self.stats = stats;
                 self.agent_stats = per;
                 self.recent = recent;
                 self.tokens = tokens;
-                self.usage = usage;
                 self.invites = invites;
                 clamp(&mut self.requests_table, self.recent.len());
                 clamp(&mut self.tokens_table, self.tokens.len());
@@ -1216,6 +1218,8 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        // The key may add or remove an account, a project or a bridge.
+        self.cache.clear_after_key();
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return;
@@ -2030,6 +2034,7 @@ impl App {
     /// Called by the event loop when a command run with the terminal
     /// attached has finished. `result` is a line to show, or the error.
     pub fn command_finished(&mut self, done: &PendingCommand, result: Result<String, String>) {
+        self.cache.clear();
         self.refresh_helpers();
         match done {
             PendingCommand::Install(plan) => {

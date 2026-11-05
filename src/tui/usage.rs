@@ -7,10 +7,6 @@
 //! store through [`snapshot`], so any view can place a usage section
 //! without this module knowing its layout.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
-
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -202,41 +198,33 @@ pub fn render(frame: &mut Frame, area: Rect, accounts: &[AccountUsage], rotate_a
     frame.render_widget(Paragraph::new(lines(accounts, rotate_at, width)), area);
 }
 
-/// The best headroom among an agent's accounts, as the agent card shows it,
-/// from a snapshot read at most once a second.
+/// The best headroom among an agent's accounts in `accounts` (a
+/// [`snapshot`]), as the agent card shows it: the most left among those
+/// that are not limited.
 #[must_use]
-pub fn best_headroom(store: &Store, agent: AgentKind, rotate_at: u8) -> Option<Summary> {
-    type Cache = HashMap<AgentKind, (Instant, Option<Summary>)>;
-    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
-    let mut guard = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    let cache = guard.get_or_insert_with(HashMap::new);
-    if let Some((at, s)) = cache.get(&agent)
-        && at.elapsed() < Duration::from_secs(1)
-    {
-        return s.clone();
-    }
-    let now = now_ms();
-    let best = store
-        .usage_accounts()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(a, _)| *a == agent)
-        .filter_map(|(a, n)| store.account_summary(a, &n, rotate_at, now).ok())
+pub fn best_headroom(accounts: &[AccountUsage], agent: AgentKind) -> Option<Summary> {
+    accounts
+        .iter()
+        .filter(|a| a.agent == agent)
+        .map(|a| &a.summary)
         .filter(|s| s.headroom.is_some() && s.state != UsageState::Limited)
         .max_by(|a, b| {
             a.headroom
                 .partial_cmp(&b.headroom)
                 .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    cache.insert(agent, (Instant::now(), best.clone()));
-    best
+        })
+        .cloned()
 }
 
 /// The spans an agent card appends for the best account's headroom, or
 /// none when nothing is known.
 #[must_use]
-pub fn headroom_spans(store: &Store, agent: AgentKind, rotate_at: u8) -> Vec<Span<'static>> {
-    let Some(s) = best_headroom(store, agent, rotate_at) else {
+pub fn headroom_spans(
+    accounts: &[AccountUsage],
+    agent: AgentKind,
+    rotate_at: u8,
+) -> Vec<Span<'static>> {
+    let Some(s) = best_headroom(accounts, agent) else {
         return Vec::new();
     };
     let Some(h) = s.headroom_pct() else {

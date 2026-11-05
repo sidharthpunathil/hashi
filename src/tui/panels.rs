@@ -538,21 +538,17 @@ fn list_popup(
 
 fn accounts(app: &App, frame: &mut Frame, selected: usize) {
     let now = crate::util::now_ms();
-    let list = app.account_rows();
+    let list = app.account_table();
     let rows: Vec<Row<'static>> = list
         .iter()
-        .map(|a| {
+        .map(|row| {
+            let a = &row.state;
             let state = match a.status(now) {
                 crate::store::AccountStatus::Limited(until) => {
                     format!("limited until {}", rfc3339(until).unwrap_or_default())
                 }
                 s => s.as_str().to_owned(),
             };
-            let tokens = app
-                .state
-                .store
-                .tokens_using_account(a.agent, &a.name)
-                .unwrap_or(0);
             Row::new(vec![
                 Cell::from(Span::styled(
                     format!("{} {}", t::agent_glyph(a.agent), a.agent),
@@ -560,14 +556,14 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
                 )),
                 Cell::from(Span::styled(a.name.clone(), strong())),
                 Cell::from(Span::styled(a.kind.as_str(), plain())),
-                Cell::from(Span::styled(app.signed_in(a), plain())),
+                Cell::from(Span::styled(row.signed_in.clone(), plain())),
                 Cell::from(Span::styled(state, plain())),
                 Cell::from(Span::styled(
                     a.last_used
                         .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u))),
                     t::muted(),
                 )),
-                Cell::from(Span::styled(tokens.to_string(), plain())),
+                Cell::from(Span::styled(row.tokens.to_string(), plain())),
             ])
         })
         .collect();
@@ -578,11 +574,12 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
         ));
     }
     // Usage gauges for the selected account, from the poller and runs.
-    let rotate_at = app.state.dispatcher.usage().policy().rotate_at;
+    let rotate_at = app.rotate_at();
     let usage = list.get(selected).and_then(|sel| {
-        super::usage::snapshot(&app.state.store, rotate_at)
-            .into_iter()
-            .find(|u| u.agent == sel.agent && u.name == sel.name)
+        app.usage_snapshot()
+            .iter()
+            .find(|u| u.agent == sel.state.agent && u.name == sel.state.name)
+            .cloned()
     });
     match usage {
         Some(u) => foot.extend(super::usage::lines(&[u], rotate_at, 24)),
@@ -671,16 +668,11 @@ fn add_account(frame: &mut Frame, form: &AccountForm, tick: u64) {
 }
 
 fn projects(app: &App, frame: &mut Frame, selected: usize) {
-    let now = crate::util::now_ms();
-    let list = app.state.store.list_projects().unwrap_or_default();
+    let list = app.cached_projects();
     let rows: Vec<Row<'static>> = list
         .iter()
         .map(|p| {
-            let tokens = app
-                .state
-                .store
-                .project_stats(&p.name, now)
-                .map_or(0, |s| s.tokens);
+            let tokens = app.project_token_count(&p.name);
             let agents = match p.default_agent {
                 Some(d) => format!("{} ({d})", crate::token::encode_agents(&p.agents)),
                 None => crate::token::encode_agents(&p.agents),

@@ -2238,3 +2238,79 @@ fn the_project_form_sets_the_account_strategy_and_rotate_threshold() {
     let p = app.state.store.get_project("api").unwrap().unwrap();
     assert_eq!(p.account_strategy, None);
 }
+
+#[test]
+fn views_pick_up_store_changes_on_the_next_refresh_or_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Accounts);
+    assert!(draw(&mut app, 190, 44).contains("only the default logins"));
+    // Added behind the dashboard's back: frames reuse what they read until
+    // the next refresh.
+    app.state
+        .store
+        .add_account(
+            AgentKind::Claude,
+            "work",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    assert!(draw(&mut app, 190, 44).contains("only the default logins"));
+    app.refresh();
+    assert!(draw(&mut app, 190, 44).contains("1 account"));
+    // A key press reads afresh too, so the dashboard's own changes show at
+    // once.
+    app.state
+        .store
+        .add_account(
+            AgentKind::Codex,
+            "team",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    app.on_key(key(KeyCode::Char('j')));
+    app.on_key(key(KeyCode::Char('k')));
+    assert!(draw(&mut app, 190, 44).contains("2 accounts"));
+}
+
+#[test]
+fn a_long_token_list_draws_and_reads_only_the_rows_on_screen() {
+    let st = state();
+    for i in 0..80 {
+        st.store
+            .create_token(&NewToken {
+                name: format!("user-{i:02}"),
+                role: Role::User,
+                session_mode: SessionMode::Stateless,
+                agents: AgentKind::ALL.to_vec(),
+                expires_in_days: None,
+                note: None,
+                limits: Default::default(),
+                accounts: Default::default(),
+                project: None,
+            })
+            .unwrap();
+    }
+    let mut app = App::new(st, None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    let first = app.tokens[0].clone();
+    let last = app.tokens[80].clone();
+    let out = draw(&mut app, 160, 40);
+    assert!(out.contains(&first.name), "{out}");
+    assert!(!out.contains(&last.name));
+    assert!(app.usage.len() < 40, "read {} tokens' use", app.usage.len());
+    assert!(!app.usage.contains_key(&last.id));
+    // Down to the last row: the table scrolls with the selection and reads
+    // the use of the rows that came into view.
+    for _ in 0..80 {
+        app.on_key(key(KeyCode::Char('j')));
+    }
+    let out = draw(&mut app, 160, 40);
+    assert!(out.contains(&format!("▌{} ", last.name)), "{out}");
+    assert!(!out.contains(&first.name));
+    let now = hashi::util::now_ms();
+    assert_eq!(
+        app.usage[&last.id],
+        app.state.store.token_usage(&last.id, now).unwrap()
+    );
+}
