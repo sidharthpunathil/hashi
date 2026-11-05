@@ -97,6 +97,7 @@ async fn harness() -> Harness {
         name: "Test Hashi".to_owned(),
         tls: None,
         tunnel_token: None,
+        update_check: false,
     };
 
     let running = server::start(cfg, Bus::default()).await.unwrap();

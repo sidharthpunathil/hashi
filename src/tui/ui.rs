@@ -120,9 +120,25 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         t::muted(),
     ));
     lines.push(Line::from(brand_line));
+    // Its own line, so a long agent list never pushes it out of view.
+    let tag = update_tag(app);
+    if !tag.is_empty() {
+        lines.push(Line::from(tag));
+    }
     frame.render_widget(Paragraph::new(lines), brand);
 
     frame.render_widget(Paragraph::new(status_lines(app)), status);
+}
+
+/// The "update vX.Y.Z: hashi update" tag, when a newer release exists.
+fn update_tag(app: &App) -> Vec<Span<'static>> {
+    match &app.update {
+        Some(version) => vec![
+            Span::styled(format!("↑ update v{version}"), t::fg(t::ORCHID)),
+            Span::styled(": hashi update", t::muted()),
+        ],
+        None => Vec::new(),
+    }
 }
 
 fn status_lines(app: &App) -> Vec<Line<'static>> {
@@ -210,6 +226,11 @@ fn render_compact_header(app: &App, frame: &mut Frame, area: Rect) {
         format!("  {}", app.state.runtime.base_url()),
         plain(),
     ));
+    let tag = update_tag(app);
+    if !tag.is_empty() {
+        spans.push(Span::raw("   "));
+        spans.extend(tag);
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

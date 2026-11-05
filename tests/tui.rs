@@ -224,6 +224,19 @@ fn overview_shows_brand_agents_and_stats() {
 }
 
 #[test]
+fn header_shows_an_available_update() {
+    let mut app = App::new(state(), None, false);
+    assert!(!draw(&mut app, 140, 40).contains("hashi update"));
+    app.on_event(Event::UpdateAvailable {
+        version: "9.9.9".into(),
+        url: "https://github.com/sidharthpunathil/hashi/releases/tag/v9.9.9".into(),
+    });
+    assert_eq!(app.update.as_deref(), Some("9.9.9"));
+    assert!(draw(&mut app, 140, 40).contains("update v9.9.9: hashi update"));
+    assert!(draw(&mut app, 120, 24).contains("update v9.9.9: hashi update"));
+}
+
+#[test]
 fn compact_layout_fits_small_terminals() {
     let mut app = App::new(state(), None, false);
     let out = draw(&mut app, 80, 24);

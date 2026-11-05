@@ -55,6 +55,21 @@ enum Command {
     Doctor(AgentArgs),
     /// Write a redacted diagnostic report to attach to a bug report.
     Report(ReportArgs),
+    /// Download the latest release and replace this binary.
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    /// Only report whether an update is available.
+    #[arg(long)]
+    check: bool,
+    /// Install this release (for example v0.3.0) instead of the latest.
+    #[arg(long, conflicts_with = "check")]
+    version: Option<String>,
+    /// Do not ask for confirmation.
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -168,6 +183,9 @@ struct ServeArgs {
     /// Plain logs instead of the dashboard (also used when stdout is not a terminal).
     #[arg(long)]
     headless: bool,
+    /// Do not check GitHub for a newer release (checked at most once a day).
+    #[arg(long, env = "HASHI_NO_UPDATE_CHECK")]
+    no_update_check: bool,
     /// Agent used when a request does not name one.
     #[arg(long, default_value = "claude", env = "HASHI_DEFAULT_AGENT")]
     default_agent: AgentKind,
@@ -277,6 +295,10 @@ async fn main() -> Result<()> {
     // Before the dashboard starts: ratatui chains its terminal restore in
     // front of this hook, so the crash note prints on a sane terminal.
     diagnostics::install_panic_hook(home.join("logs"));
+    // A Windows update leaves the old binary beside the new one.
+    if let Ok(exe) = std::env::current_exe() {
+        hashi::update::cleanup_old_exe(&exe);
+    }
     match cli.command {
         None => serve(&home, ServeArgs::parse_from(["hashi"])).await,
         Some(Command::Serve(args)) => serve(&home, *args).await,
@@ -285,8 +307,11 @@ async fn main() -> Result<()> {
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
         Some(Command::Ask(args)) => ask(&home, args).await,
-        Some(Command::Doctor(args)) => doctor(&args).await,
+        Some(Command::Doctor(args)) => doctor(&home, &args).await,
         Some(Command::Report(args)) => report(&home, args).await,
+        Some(Command::Update(args)) => {
+            tokio::task::spawn_blocking(move || update(&home, &args)).await?
+        }
     }
 }
 
@@ -387,6 +412,7 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
             _ => None,
         },
         tunnel_token: args.tunnel_token.clone(),
+        update_check: !args.no_update_check,
     };
 
     let bus = Bus::default();
@@ -558,7 +584,93 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
     Ok(())
 }
 
-async fn doctor(args: &AgentArgs) -> Result<()> {
+/// `hashi update`: report, or download, verify and install a release.
+fn update(home: &std::path::Path, args: &UpdateArgs) -> Result<()> {
+    use hashi::update::{self, Outcome, Sources};
+    let current = env!("CARGO_PKG_VERSION");
+    let sources = Sources::default();
+    if args.check {
+        let latest = update::check(home, &sources.api, hashi::util::now_ms(), true)?;
+        if update::is_newer(&latest.version, &update::current_version()) {
+            println!(
+                "hashi v{current}: v{} is available, run hashi update",
+                latest.version
+            );
+        } else {
+            println!("hashi v{current} is up to date");
+        }
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("finding the running binary")?;
+    server::prepare_home(home)?;
+    let tty = std::io::stdin().is_terminal();
+    let yes = args.yes;
+    let mut confirm = |plan: &update::Plan| {
+        if yes || !tty {
+            return true;
+        }
+        eprint!(
+            "Update hashi v{current} to {} at {}? [y/N] ",
+            plan.tag,
+            plan.exe.display()
+        );
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    match update::install(home, &sources, &exe, args.version.as_deref(), &mut confirm)? {
+        Outcome::UpToDate(tag) => {
+            println!("hashi v{current} is already the latest release ({tag})");
+        }
+        Outcome::Declined => println!("not updated"),
+        Outcome::Updated(tag) => println!("updated to {tag}; restart hashi to use it"),
+    }
+    Ok(())
+}
+
+/// Doctor's update line: always asks GitHub (ignoring the cache's age)
+/// unless `HASHI_NO_UPDATE_CHECK` is set.
+async fn doctor_update(home: &std::path::Path) {
+    let current = env!("CARGO_PKG_VERSION");
+    if hashi::update::opted_out() {
+        println!(
+            "  · {:<12} v{current}, update check off ({})",
+            "hashi",
+            hashi::update::OPT_OUT_ENV
+        );
+        return;
+    }
+    let home = home.to_path_buf();
+    let latest = tokio::task::spawn_blocking(move || {
+        hashi::update::check(
+            &home,
+            hashi::update::LATEST_URL,
+            hashi::util::now_ms(),
+            true,
+        )
+    })
+    .await;
+    match latest {
+        Ok(Ok(r)) if hashi::update::is_newer(&r.version, &hashi::update::current_version()) => {
+            println!(
+                "  ! {:<12} v{current}, latest v{}: update available, run hashi update",
+                "hashi", r.version
+            );
+        }
+        Ok(Ok(r)) => println!(
+            "  ✓ {:<12} v{current}, latest v{}: up to date",
+            "hashi", r.version
+        ),
+        Ok(Err(e)) => println!(
+            "  · {:<12} v{current}, could not check for updates ({})",
+            "hashi",
+            diagnostics::terminal_safe(&hashi::util::truncate(&format!("{e:#}"), 80))
+        ),
+        Err(_) => println!("  · {:<12} v{current}", "hashi"),
+    }
+}
+
+async fn doctor(home: &std::path::Path, args: &AgentArgs) -> Result<()> {
     println!("\n  ✦ hashi doctor\n");
     let mut found = 0;
     for info in server::discover_agents(&args.configs()).await {
@@ -580,6 +692,7 @@ async fn doctor(args: &AgentArgs) -> Result<()> {
             "cloudflared"
         ),
     }
+    doctor_update(home).await;
     println!();
     if found == 0 {
         println!(

@@ -49,6 +49,13 @@ pub enum Event {
     TunnelReady(String),
     /// The public tunnel failed or closed.
     TunnelDown(String),
+    /// A newer Hashi release is published.
+    UpdateAvailable {
+        /// The new version, such as `0.3.0`.
+        version: String,
+        /// Its release page.
+        url: String,
+    },
     /// Free-form operational message.
     Log(String),
 }

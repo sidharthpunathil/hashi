@@ -414,6 +414,8 @@ pub struct App {
     pub toast: Option<(String, Instant)>,
     /// Tunnel status.
     pub tunnel: TunnelState,
+    /// A newer release, such as `0.3.0`, when the update check found one.
+    pub update: Option<String>,
     /// Set when the user asks to quit.
     pub should_quit: bool,
     /// Freeze spinners and other animation (`HASHI_REDUCED_MOTION=1`).
@@ -459,6 +461,7 @@ impl App {
             } else {
                 TunnelState::Off
             },
+            update: None,
             should_quit: false,
             reduced_motion: std::env::var("HASHI_REDUCED_MOTION").is_ok_and(|v| v != "0"),
             detail_cache: super::ui::DetailCache::default(),
@@ -637,6 +640,16 @@ impl App {
                     glyph: "!",
                     color: theme::AMBER,
                     text: format!("tunnel: {reason}"),
+                }
+            }
+            Event::UpdateAvailable { version, .. } => {
+                let text = format!("update v{version} is available: run hashi update");
+                self.update = Some(version);
+                FeedItem {
+                    at: now_ms(),
+                    glyph: "↑",
+                    color: theme::ORCHID,
+                    text,
                 }
             }
             Event::Log(text) => FeedItem {

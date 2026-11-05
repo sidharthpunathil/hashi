@@ -57,6 +57,7 @@ async fn start_full(rate_limit: u32, net: NetLimits, public_url: Option<String>)
         name: "Net test".into(),
         tls: None,
         tunnel_token: None,
+        update_check: false,
     };
     let running = server::start_with(cfg, net, Bus::default()).await.unwrap();
     let base = running.state.runtime.local_url.clone();
