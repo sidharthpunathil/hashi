@@ -21,8 +21,8 @@ Include the version (`hashi --version`), what you did, what happened, and what y
 ## Out of scope
 
 - Anything a valid admin token is designed to allow
-- Files an agent reads with your account, outside the confinement its own sandbox or Hashi's settings provide (agents run as you; see the Security section of the README)
-- Behaviour of Claude Code, Codex or cloudflared themselves (report those upstream)
+- Files an agent reads with your account, outside the confinement its own sandbox or Hashi's settings provide (agents run as you; see the [security model](docs/security-model.md))
+- Behaviour of the agent CLIs, cloudflared or Tailscale themselves (report those upstream)
 - Exposing Hashi on a public interface without a tunnel or reverse proxy, after the warning it prints
 
 ## Supported versions
