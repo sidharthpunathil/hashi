@@ -161,6 +161,18 @@ claude:default  unknown
 
 Runs move off an account once it is 90% used (`--rotate-at`), and a project can pick its accounts by `--account-strategy most-left` (the most quota left) or `soonest-reset` (spend the quota that is about to reset unused) instead of list order. A conversation stays on its account until that account reaches the threshold. Add `--refresh` to read now, `--json` for scripts, or `--no-usage-poll` on `hashi serve` to turn the reads off. See [usage and strategies](docs/configuration.md#usage-and-strategies).
 
+### Pool what friends share
+
+When a friend shares their Hashi with you, connect to it once and add it as one of your own accounts. It then joins your account lists, projects, failover and strategies like any other:
+
+```bash
+hashi connect https://bob.example/claim/hashi_inv_...   # saved as the remote "bob"
+hashi account add claude bob-claude --remote bob
+hashi share alice --account claude=work,bob-claude
+```
+
+A run on `bob-claude` goes to Bob's bridge and comes back with its answer, usage and cost. When his limits are reached the account waits for their reset, a paused or revoked token switches it off with the reason in `hashi account list`, and a bridge that cannot be reached moves the prompt to your next account. Bob sees every prompt sent through it, and the people you share with never see that the account is remote. If Bob shares with `--share-usage`, his bridge also tells you how much quota is left, so `most-left` and `--rotate-at` treat his account like your own. See [remote accounts](docs/configuration.md#remote-accounts).
+
 ## Supported agents
 
 Hashi drives whichever of these you have installed and signed in to. Each runs headless with its safest unattended setting, so a prompt cannot make it approve its own tool use.

@@ -207,6 +207,37 @@ hashi ask --remote work "Explain main.rs" -a codex
 - It never runs another program unless you pass `--setup claude`, which runs `claude mcp add --transport http <name> <base>/mcp --header "Authorization: Bearer <token>"` (set `HASHI_CLAUDE_BIN` to use a different executable).
 - `hashi ask --remote` sends the prompt, waits up to 60 seconds at a time until it completes or fails, and prints the answer with control characters removed. A failure prints the server's error and exits non-zero. Without `-a`, the server's default agent answers.
 
+### Remote accounts
+
+A bridge you connected to can also be one of your own accounts, so the access a friend shares joins your account lists, projects, failover and strategies:
+
+```bash
+hashi account add claude bob-claude --remote bob                     # Claude Code on the remote saved as "bob"
+hashi account add codex bob-codex --remote bob --remote-agent codex  # --remote-agent: the agent on their bridge (default: the same)
+hashi token update hashi_1a2b3c4d --account claude=work,bob-claude
+hashi account list                                                   # KIND shows "remote via bob"
+hashi account usage                                                  # "via bob" or "via bob, shared", with source remote
+```
+
+- `--remote` names a remote from `hashi remote list`. Adding the account checks the bridge's `/v1/status`: one that reports this Hashi's own instance id is refused, and an unreachable one is added with a warning (runs check again, see below). It prints a reminder that the friend running that bridge sees every prompt sent through the account and every answer, as their claim page told you. The remote's token stays in `~/.hashi/remotes.json`; the database keeps only the remote's name. `hashi remote remove` leaves the account, which is switched off on its next run.
+- A run sends the prompt to the remote's `POST /v1/ask` with the remote's token and long-polls it, at most 30 seconds at a time, until it finishes. The run timeout (`--timeout`) applies, and a timeout or a cancel (`DELETE /v1/ask/{id}`, revoking the token) cancels the request on the remote bridge too, best effort. The answer, its tokens and its cost come from the remote, and the cost counts against your token's budget like a local run's.
+- What the remote says decides what happens to the account:
+
+| The remote answers | The account | The prompt |
+|---|---|---|
+| `limit_reached`, `too_many_pending`, `rate_limited`, or every account behind the token is at its limit | limited until `resetAt` (or `--account-cooldown`) | runs on the next account |
+| `token_paused`, `unauthorized` (revoked or expired), `forbidden`, or the bridge is this Hashi | disabled, with the reason in `hashi account list` and `disabledReason` in `GET /v1/accounts` | runs on the next account |
+| no answer (a network error, a `5xx`) | unchanged | runs on the next account |
+| the run failed there | unchanged | fails with the remote's error |
+
+  `hashi account enable` switches a disabled remote account back on and clears its reason.
+- **Sessions.** A stateful conversation on a remote account is the remote's: the remote token's own session mode decides whether it continues there. Hashi does not carry a conversation across accounts.
+- **Usage.** While the server runs, each enabled remote account bound to a token or project is read on the usage cadence (every five minutes with jitter, and about a minute after each run) with `GET /v1/me` on the remote. When the friend shares usage (`--share-usage` on their side), the account gets one `via <remote>` window with the headroom left on their accounts and its reset, so `most-left`, `soonest-reset` and `--rotate-at` treat it like a local account. The remote token's own caps (`dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`) are kept as windows too, and when one runs out the account counts as limited until it resets. `POST /v1/accounts/{agent}/{name}/refresh` reads one now.
+- **Loops.** A forwarded prompt carries `X-Hashi-Hops` (one more per bridge) and `X-Hashi-From` (this Hashi's instance id). A bridge refuses a prompt that has already been forwarded through more than 2 bridges, or one that it sent itself, and never forwards a prompt that came through 2 already.
+- People you share with never see that an account is remote: their answers and errors name no bridge.
+
+**Sharing usage with the people you share with.** `--share-usage` on `hashi token create` and `hashi share` (or `hashi token update <id> --share-usage true|false`, `shareUsage` in the API) lets that token see, in `/v1/me` and on its `/me` page, how much quota is left for each of its agents: the headroom of the best account serving it, the next reset and the state. Account names, the number of accounts and the windows are never included. The claim page says "The bridge owner lets you see how much quota is left". Off by default.
+
 ## Dashboard keys
 
 Run `hashi` in a terminal and the dashboard takes over the screen. When stdout is not a terminal, or with `--headless`, Hashi prints plain log lines instead.
