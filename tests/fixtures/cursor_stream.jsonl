@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/tmp/work","session_id":"stream-chat-1","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"ping"}]},"session_id":"stream-chat-1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]},"session_id":"stream-chat-1"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1200,"duration_api_ms":1200,"result":"pong","session_id":"stream-chat-1"}
