@@ -1344,25 +1344,35 @@ impl Store {
     /// Fails on database errors.
     pub fn stats(&self) -> Result<Stats> {
         let conn = self.conn()?;
+        let n = |v: i64| u64::try_from(v).unwrap_or(0);
         let tokens: i64 = conn.query_row("SELECT COUNT(*) FROM tokens", [], |r| r.get(0))?;
+        // A bare COUNT(*) counts index pages without reading each entry,
+        // which a GROUP BY over every status has to do. Completed requests
+        // are the bulk, so they are what is left once the other three are
+        // counted; this module writes no fifth status.
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))?;
         let mut stats = Stats {
-            tokens: u64::try_from(tokens).unwrap_or(0),
+            tokens: n(tokens),
+            total: n(total),
             ..Stats::default()
         };
-        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM requests GROUP BY status")?;
+        let mut stmt = conn.prepare(
+            "SELECT status, COUNT(*) FROM requests
+             WHERE status IN ('queued', 'running', 'failed') GROUP BY status",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
-            let (status, n) = row?;
-            let n = u64::try_from(n).unwrap_or(0);
-            stats.total += n;
+            let (status, count) = row?;
             match status.as_str() {
-                "queued" => stats.queued = n,
-                "running" => stats.running = n,
-                "completed" => stats.completed = n,
-                "failed" => stats.failed = n,
+                "queued" => stats.queued = n(count),
+                "running" => stats.running = n(count),
+                "failed" => stats.failed = n(count),
                 _ => {}
             }
         }
+        stats.completed = stats
+            .total
+            .saturating_sub(stats.queued + stats.running + stats.failed);
         Ok(stats)
     }
 
@@ -2573,5 +2583,20 @@ mod tests {
         s.fail_request(&id, "boom").unwrap();
         let st = s.stats().unwrap();
         assert_eq!((st.total, st.queued, st.failed, st.tokens), (2, 1, 1, 1));
+        assert_eq!((st.running, st.completed), (0, 0));
+
+        // One of each status, plus more completed ones.
+        enqueue(&s, &t, AgentKind::Gemini);
+        s.claim_next(AgentKind::Gemini).unwrap();
+        for _ in 0..3 {
+            let id = enqueue(&s, &t, AgentKind::Qwen);
+            s.claim_next(AgentKind::Qwen).unwrap();
+            s.complete_request(&id, "ok", None).unwrap();
+        }
+        let st = s.stats().unwrap();
+        assert_eq!(
+            (st.total, st.queued, st.running, st.completed, st.failed),
+            (6, 1, 1, 3, 1)
+        );
     }
 }
