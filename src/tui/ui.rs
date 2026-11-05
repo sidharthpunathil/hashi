@@ -999,7 +999,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 Line::from(Span::styled(
                     format!(
                         "curl {url}/v1/ask -H \"Authorization: Bearer {}…\" \\",
-                        &secret.get(..14).unwrap_or(secret)
+                        secret.get(..14).unwrap_or(secret)
                     ),
                     t::fg(t::ORCHID),
                 )),

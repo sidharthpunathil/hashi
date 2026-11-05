@@ -81,13 +81,11 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
                     .map(str::to_owned)
                     .or(failure);
             }
-            Some("error") => {
-                if failure.is_none() {
-                    failure = event
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                }
+            Some("error") if failure.is_none() => {
+                failure = event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
             _ => {}
         }
