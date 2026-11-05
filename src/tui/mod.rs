@@ -330,7 +330,7 @@ fn update(home: &std::path::Path) -> anyhow::Result<String> {
     let exe = std::env::current_exe()?;
     let current = env!("CARGO_PKG_VERSION");
     Ok(
-        match crate::update::install(home, &Sources::default(), &exe, None, &mut |_| true)? {
+        match crate::update::install(home, &Sources::default(), &exe, None, false, &mut |_| true)? {
             Outcome::UpToDate(tag) => format!("hashi v{current} is already the latest ({tag})"),
             Outcome::Declined => "not updated".to_owned(),
             Outcome::Updated(tag) => {

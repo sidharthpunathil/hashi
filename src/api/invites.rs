@@ -16,7 +16,7 @@ use crate::util::{now_ms, rfc3339};
 /// Default in-flight cap for invited tokens.
 pub const INVITE_DEFAULT_MAX_PENDING: u32 = 3;
 /// Upper bound on pending invites.
-pub const MAX_PENDING_INVITES: usize = 100;
+pub const MAX_PENDING_INVITES: usize = crate::store::MAX_PENDING_INVITES;
 const LINK_HOURS: [u32; 3] = [1, 24, 168];
 
 /// Body of `POST /v1/invites`.

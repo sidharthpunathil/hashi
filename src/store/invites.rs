@@ -13,6 +13,11 @@ use crate::util::now_ms;
 /// Prefix of invite codes.
 pub const INVITE_PREFIX: &str = "hashi_inv_";
 
+/// Upper bound on pending invites, enforced when one is created.
+pub const MAX_PENDING_INVITES: usize = 100;
+
+const INVITE_LIMIT: &str = "too many pending invites, cancel some first";
+
 /// Input for [`Store::create_invite`].
 #[derive(Debug, Clone)]
 pub struct NewInvite {
@@ -121,7 +126,8 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails on database errors.
+    /// Fails with [`StoreError::LimitReached`] at [`MAX_PENDING_INVITES`],
+    /// or on database errors.
     pub fn create_invite(&self, new: &NewInvite) -> Result<(Invite, String)> {
         let bytes: [u8; 32] = rand::random();
         let code = format!("{INVITE_PREFIX}{}", hex::encode(bytes));
@@ -131,11 +137,13 @@ impl Store {
 
     /// Creates an invite whose code only the holder of `hash`'s preimage
     /// knows. An accepted access request uses this: its code is derived from
-    /// the requester's pickup secret, which the server never stores.
+    /// the requester's pickup secret, which the server never stores. The
+    /// pending count and the insert share one IMMEDIATE transaction.
     ///
     /// # Errors
     ///
-    /// Fails on database errors.
+    /// Fails with [`StoreError::LimitReached`] at [`MAX_PENDING_INVITES`],
+    /// or on database errors.
     pub fn create_invite_with_hash(&self, new: &NewInvite, hash: &str) -> Result<Invite> {
         let now = now_ms();
         let invite = Invite {
@@ -154,7 +162,17 @@ impl Store {
             share_usage: false,
         };
         let l = invite.limits;
-        self.conn()?.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM invites WHERE claimed_at IS NULL AND expires_at > ?1",
+            [now],
+            |r| r.get(0),
+        )?;
+        if usize::try_from(pending).unwrap_or(usize::MAX) >= MAX_PENDING_INVITES {
+            return Err(StoreError::LimitReached(INVITE_LIMIT));
+        }
+        tx.execute(
             "INSERT INTO invites (id, hash, label, session_mode, agents, token_expires_in_days,
                  daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd,
                  max_pending, expires_at, created_at, accounts, project)
@@ -177,6 +195,7 @@ impl Store {
                 invite.project,
             ],
         )?;
+        tx.commit()?;
         Ok(invite)
     }
 
@@ -370,6 +389,53 @@ mod tests {
             accounts: AccountMap::new(),
             project: None,
         }
+    }
+
+    #[test]
+    fn create_refuses_past_the_pending_invite_cap_on_every_path() {
+        let s = Store::open_in_memory().unwrap();
+        for _ in 0..MAX_PENDING_INVITES {
+            s.create_invite(&new_invite(24)).unwrap();
+        }
+        let e = s.create_invite(&new_invite(24)).unwrap_err();
+        assert!(matches!(e, StoreError::LimitReached(_)), "{e:?}");
+        assert!(e.to_string().contains("pending invites"), "{e}");
+        let e = s.create_invite_with_hash(&new_invite(24), "h").unwrap_err();
+        assert!(matches!(e, StoreError::LimitReached(_)), "{e:?}");
+        assert_eq!(s.list_invites().unwrap().len(), MAX_PENDING_INVITES);
+        // A cancelled invite frees its slot.
+        let id = s.list_invites().unwrap()[0].id.clone();
+        assert!(s.cancel_invite(&id).unwrap());
+        s.create_invite(&new_invite(24)).unwrap();
+    }
+
+    #[test]
+    fn create_token_refuses_past_the_token_cap() {
+        let s = Store::open_in_memory().unwrap();
+        let user = |i: usize| NewToken {
+            name: format!("t{i}"),
+            role: Role::User,
+            session_mode: SessionMode::Stateless,
+            agents: vec![AgentKind::Claude],
+            expires_in_days: None,
+            note: None,
+            limits: Limits::default(),
+            accounts: AccountMap::new(),
+            project: None,
+        };
+        for i in 0..super::super::MAX_TOKENS {
+            s.create_token(&user(i)).unwrap();
+        }
+        let e = s.create_token(&user(999)).unwrap_err();
+        assert!(matches!(e, StoreError::LimitReached(_)), "{e:?}");
+        assert_eq!(s.list_tokens().unwrap().len(), super::super::MAX_TOKENS);
+        // A full server without an admin can still mint its first one.
+        let admin = NewToken {
+            role: Role::Admin,
+            ..user(1000)
+        };
+        s.create_token(&admin).unwrap();
+        assert!(s.create_token(&admin).is_err());
     }
 
     #[test]

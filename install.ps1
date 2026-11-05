@@ -26,6 +26,14 @@ function Install-Hashi {
     $spark = [char]0x2726; $check = [char]0x2713; $arrow = [char]0x203A; $dot = [char]0x00B7
 
     $repo = 'sidharthpunathil/hashi'
+    # An invite link of exactly the shape the claim page builds (SAFE_ORIGIN
+    # and SAFE_CODE in src/web/hashi.js, joined by /claim/). Nothing else
+    # reaches `hashi connect`, so no quote or space can split the argument
+    # Windows PowerShell 5.1 builds for it.
+    $connectPattern = '^(?:https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])|http://(?:localhost|127(?:\.[0-9]{1,3}){3}|\[::1\]))(?::[0-9]{1,5})?/claim/hashi_inv_[0-9a-f]{16,118}\z'
+    if ($env:HASHI_CONNECT -and ($env:HASHI_CONNECT -cnotmatch $connectPattern)) {
+        throw 'HASHI_CONNECT is not an invite link like https://<host>/claim/hashi_inv_<code>; copy the command from the claim page again.'
+    }
     $version = if ($env:HASHI_VERSION) { $env:HASHI_VERSION } else { 'latest' }
     $installDir = if ($env:HASHI_INSTALL_DIR) { $env:HASHI_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\hashi\bin' }
 
@@ -117,9 +125,12 @@ function Install-Hashi {
             $link = $env:HASHI_CONNECT
             Remove-Item Env:HASHI_CONNECT -ErrorAction SilentlyContinue
             Write-Host "  $arrow connecting with your invite link" -ForegroundColor Magenta
-            & $exe connect $link
+            # Splatted, so '--' reaches hashi as a plain argument and the link
+            # can never be read as an option.
+            $connectArgs = @('connect', '--', $link)
+            & $exe @connectArgs
             if ($LASTEXITCODE -ne 0) {
-                throw "Hashi is installed, but connecting with the invite link failed (the reason is above). An invite link works once: if it was already used or has expired, ask for a new one, then run: hashi connect '<new link>'"
+                throw "Hashi is installed, but connecting with the invite link failed (the reason is above). An invite link works once: if it was already used or has expired, ask for a new one, then run: hashi connect -- '<new link>'"
             }
             Write-Host ''
             return

@@ -552,24 +552,60 @@ pub fn list(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Forgets a saved remote. The token stays valid on the server until its
-/// owner revokes it.
+/// Forgets a saved remote and switches off the accounts that used it. The
+/// token stays valid on the server until its owner revokes it.
 ///
 /// # Errors
 ///
 /// Fails when there is no remote with that name or saving fails.
 pub fn remove(home: &Path, name: &str) -> Result<()> {
-    forget(home, name)?;
-    println!("Removed {name}. Its token still works until the owner revokes it.");
+    let disabled = forget_counting(home, name)?;
+    println!(
+        "Removed {}. Its token still works until the owner revokes it.",
+        terminal_safe(name)
+    );
+    if disabled > 0 {
+        println!(
+            "Switched off {disabled} account(s) that used it; remove them, or add them again \
+             for another remote."
+        );
+    }
     Ok(())
 }
 
-/// Forgets a saved remote without printing anything.
+/// Forgets a saved remote without printing anything, and switches off the
+/// accounts that used it (see [`disable_remote_accounts`]).
 ///
 /// # Errors
 ///
 /// Fails when there is no remote with that name or saving fails.
 pub fn forget(home: &Path, name: &str) -> Result<()> {
+    forget_counting(home, name).map(drop)
+}
+
+/// Switches off every remote account that forwards to the remote `name`,
+/// with a reason, so a new remote saved under the same name later does not
+/// silently receive their prompts. Returns how many it switched off.
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub fn disable_remote_accounts(store: &crate::store::Store, name: &str) -> Result<usize> {
+    let reason = format!(
+        "its remote {} was removed; remove this account, or add it again for another remote",
+        crate::util::one_line(name)
+    );
+    let mut n = 0;
+    for a in store.list_accounts()? {
+        if a.remote.as_deref() == Some(name) && !a.disabled {
+            store.disable_account_because(a.agent, &a.name, &reason)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+fn forget_counting(home: &Path, name: &str) -> Result<usize> {
     let mut remotes = load(home)?;
     let before = remotes.len();
     remotes.retain(|r| r.name != name);
@@ -579,7 +615,13 @@ pub fn forget(home: &Path, name: &str) -> Result<()> {
             terminal_safe(name)
         );
     }
-    save(home, &remotes)
+    save(home, &remotes)?;
+    // Only a home with a database has accounts; a client-only home gets none.
+    if !home.join("hashi.db").is_file() {
+        return Ok(0);
+    }
+    let store = crate::server::open_store(home)?;
+    disable_remote_accounts(&store, name)
 }
 
 // ── ask ─────────────────────────────────────────────────────────────────────

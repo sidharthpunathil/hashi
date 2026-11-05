@@ -28,7 +28,7 @@ pub use access::{
 };
 pub use accounts::{AccountState, AccountStatus, RemovedAccount};
 pub use audit::AuditEntry;
-pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
+pub use invites::{INVITE_PREFIX, Invite, InviteState, MAX_PENDING_INVITES, NewInvite, Redeemed};
 pub use projects::{ProjectStats, RemovedProject};
 pub use usage::{Conversation, PollStatus, Spend};
 
@@ -49,6 +49,21 @@ pub enum StoreError {
     /// A stored value could not be decoded.
     #[error("corrupt record: {0}")]
     Corrupt(String),
+    /// The database was written by a newer Hashi than this one.
+    #[error(
+        "this database has schema version {found}, but this Hashi supports up to \
+         {supported}. A newer Hashi wrote it: install that version again, or use another --home"
+    )]
+    NewerSchema {
+        /// The database's `user_version`.
+        found: i64,
+        /// [`SCHEMA_VERSION`].
+        supported: i64,
+    },
+    /// A cap on stored records (tokens, pending invites, projects) is
+    /// reached. The message says which.
+    #[error("{0}")]
+    LimitReached(&'static str),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -177,8 +192,12 @@ pub struct NewToken {
     pub project: Option<String>,
 }
 
-/// Upper bound on stored tokens, enforced by the API and by invite redemption.
+/// Upper bound on stored tokens, enforced by [`Store::create_token`] and by
+/// invite redemption, so the API, the CLI and the dashboard all get it.
 pub const MAX_TOKENS: usize = 100;
+
+/// The message [`StoreError::LimitReached`] carries at [`MAX_TOKENS`].
+pub const TOKEN_LIMIT: &str = "token limit reached, revoke one first";
 
 /// Error stored on a queued request whose token expired before it started.
 pub const EXPIRED_BEFORE_START: &str = "the token expired before this request started";
@@ -643,9 +662,11 @@ impl Store {
     }
 
     fn init(mut conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        // First, so a second process opening the file at the same moment
+        // waits for the first one's locks instead of failing.
         conn.pragma_update(None, "busy_timeout", 5_000)?;
+        enable_wal(&conn)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         // Room for every statement the request path and the workers prepare
         // with `prepare_cached`, so none is parsed and planned again.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
@@ -678,12 +699,29 @@ impl Store {
     // ── tokens ─────────────────────────────────────────────────────────────
 
     /// Creates a token and returns its record plus the one-time raw secret.
+    /// The count and the insert share one IMMEDIATE transaction, so the cap
+    /// holds however many callers race. The first admin token of a server
+    /// without one is always allowed, so a full server can still start.
     ///
     /// # Errors
     ///
-    /// Fails on database errors.
+    /// Fails with [`StoreError::LimitReached`] at [`MAX_TOKENS`], or on
+    /// database errors.
     pub fn create_token(&self, new: &NewToken) -> Result<(Token, GeneratedToken)> {
-        insert_token(&*self.conn()?, new)
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (tokens, admins): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COUNT(CASE WHEN role = 'admin' THEN 1 END) FROM tokens",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let first_admin = new.role == Role::Admin && admins == 0;
+        if usize::try_from(tokens).unwrap_or(usize::MAX) >= MAX_TOKENS && !first_admin {
+            return Err(StoreError::LimitReached(TOKEN_LIMIT));
+        }
+        let out = insert_token(&tx, new)?;
+        tx.commit()?;
+        Ok(out)
     }
 
     /// Resolves a raw bearer secret to an unexpired token and records the use.
@@ -802,6 +840,45 @@ impl Store {
         Ok(conn
             .prepare_cached("SELECT value FROM meta WHERE key = 'instance_id'")?
             .query_row([], |r| r.get(0))?)
+    }
+
+    /// Records the instance id the bridge behind remote account `name` of
+    /// `agent` reported when the account was added, or forgets it with
+    /// `None`. Each forward checks the bridge still reports it.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_remote_instance(
+        &self,
+        agent: AgentKind,
+        name: &str,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let key = remote_instance_key(agent, name);
+        let conn = self.conn()?;
+        match instance {
+            Some(id) => conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = ?2",
+                params![key, id],
+            )?,
+            None => conn.execute("DELETE FROM meta WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
+
+    /// The instance id recorded by [`Store::set_remote_instance`].
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn remote_instance(&self, agent: AgentKind, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()?
+            .prepare_cached("SELECT value FROM meta WHERE key = ?1")?
+            .query_row([remote_instance_key(agent, name)], |r| r.get(0))
+            .optional()?)
     }
 
     /// A token's use in the UTC day and month containing `now_ms`. Served
@@ -1293,6 +1370,7 @@ impl Store {
         let invites = self.prune_invites(cutoff)?;
         // Access requests have their own, shorter clock.
         let access = self.prune_access(now_ms() - crate::access::PURGE_DAYS * 86_400_000)?;
+        let _ = projects::delete_orphan_sessions(&*self.conn()?)?;
         Ok(Pruned {
             requests,
             audit,
@@ -1510,9 +1588,12 @@ impl Store {
     ) -> Result<()> {
         self.conn()?
             .prepare_cached(
+                // A run that finishes after its project was removed leaves
+                // no row behind for a new project of the same name.
                 "INSERT INTO sessions
                      (token_id, agent, account, project, agent_session_id, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                 WHERE ?4 = 'default' OR EXISTS (SELECT 1 FROM projects WHERE name = ?4)
                  ON CONFLICT(token_id, agent, account, project) DO UPDATE SET
                      agent_session_id = ?5, updated_at = ?6",
             )?
@@ -1568,20 +1649,56 @@ fn usage_in(conn: &Connection, token_id: &str, now_ms: i64) -> Result<TokenUsage
     })
 }
 
-/// Applies pending migrations and returns the version the database was at.
-fn migrate(conn: &mut Connection) -> Result<i64> {
-    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let done = usize::try_from(version).unwrap_or(0);
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(done) {
-        let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
-        tx.pragma_update(
-            None,
-            "user_version",
-            i64::try_from(i + 1).unwrap_or(i64::MAX),
-        )?;
-        tx.commit()?;
+/// Switches to WAL. SQLite answers the switch with "database is locked"
+/// without waiting while another connection is mid-switch, so it is retried
+/// for as long as `busy_timeout` would have waited.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(e)
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => return Ok(r?),
+        }
     }
+}
+
+fn remote_instance_key(agent: AgentKind, name: &str) -> String {
+    format!("remote_instance:{}:{name}", agent.as_str())
+}
+
+fn user_version(conn: &Connection) -> Result<i64> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::NewerSchema {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    Ok(version)
+}
+
+/// Applies pending migrations and returns the version the database was at.
+/// Refuses a database newer than [`SCHEMA_VERSION`]. The migrations run in
+/// one IMMEDIATE transaction that reads the version again once it holds the
+/// write lock, so a second process opening the file at the same time waits
+/// and then finds nothing left to do.
+fn migrate(conn: &mut Connection) -> Result<i64> {
+    if user_version(conn)? == SCHEMA_VERSION {
+        return Ok(SCHEMA_VERSION);
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version = user_version(&tx)?;
+    let done = usize::try_from(version).unwrap_or(0);
+    for sql in MIGRATIONS.iter().skip(done) {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
     Ok(version)
 }
 
@@ -1767,6 +1884,85 @@ mod tests {
         })
         .unwrap();
         id
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_naming_both_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hashi.db");
+        drop(Store::open(&path).unwrap());
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 90)
+            .unwrap();
+        let Err(e) = Store::open(&path) else {
+            panic!("a newer schema opened")
+        };
+        assert!(
+            matches!(e, StoreError::NewerSchema { found, supported }
+                if found == SCHEMA_VERSION + 90 && supported == SCHEMA_VERSION),
+            "{e:?}"
+        );
+        let msg = e.to_string();
+        assert!(msg.contains(&(SCHEMA_VERSION + 90).to_string()), "{msg}");
+        assert!(msg.contains(&SCHEMA_VERSION.to_string()), "{msg}");
+    }
+
+    #[test]
+    fn a_failed_migration_rolls_back_as_a_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hashi.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
+                c.execute_batch(sql).unwrap();
+            }
+            c.pragma_update(None, "user_version", 3).unwrap();
+            // Makes V4 fail half way through.
+            c.execute_batch("CREATE TABLE sessions_v4 (x);").unwrap();
+        }
+        assert!(Store::open(&path).is_err());
+        {
+            let c = Connection::open(&path).unwrap();
+            let v: i64 = c
+                .pragma_query_value(None, "user_version", |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 3);
+            c.execute_batch("DROP TABLE sessions_v4;").unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn two_processes_migrating_at_once_both_succeed() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("hashi.db");
+            {
+                let c = Connection::open(&path).unwrap();
+                for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
+                    c.execute_batch(sql).unwrap();
+                }
+                c.pragma_update(None, "user_version", 3).unwrap();
+            }
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Store::open(&path).map(|_| ()).map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().unwrap();
+            }
+            let s = Store::open(&path).unwrap();
+            assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        }
     }
 
     #[test]

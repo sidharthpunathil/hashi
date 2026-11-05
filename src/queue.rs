@@ -1155,7 +1155,11 @@ impl Worker {
             .clone()
             .unwrap_or_else(|| (String::new(), self.agent));
         let target = match forward::Target::load(&self.cfg.home, &remote, remote_agent) {
-            Ok(t) => t,
+            Ok(t) => t.expecting(
+                self.store
+                    .remote_instance(self.agent, &account.name)
+                    .map_err(|e| e.to_string())?,
+            ),
             Err(why) => {
                 warn!(agent = %self.agent, account = %account.name,
                       "could not load a remote account: {why}");

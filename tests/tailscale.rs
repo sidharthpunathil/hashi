@@ -245,6 +245,7 @@ async fn serve_turns_on_then_off_exactly_its_own_listener() {
             "serve status --json".to_owned(),
             format!("serve --bg --https=443 {target}"),
             "serve status --json".to_owned(),
+            "serve status --json".to_owned(),
             "serve --https=443 off".to_owned(),
         ]
     );
@@ -268,6 +269,25 @@ async fn shutdown_runs_only_the_matching_off_command() {
     let offs: Vec<&String> = argv.iter().filter(|a| a.ends_with(" off")).collect();
     assert_eq!(offs, ["funnel --https=443 off"]);
     assert_eq!(argv.last().unwrap(), "funnel --https=443 off");
+}
+
+#[tokio::test]
+async fn shutdown_leaves_a_port_that_was_repointed_since() {
+    let mut w = start().await;
+    go(&w, Mode::Serve);
+    assert!(matches!(w.next().await, Event::TunnelReady(_)));
+    // Between the last recheck and shutdown, the port now serves someone
+    // else's app.
+    w.put(
+        "on",
+        &format!(
+            r#"{{"TCP":{{"443":{{"HTTPS":true}}}},
+              "Web":{{"{HOST}:443":{{"Handlers":{{"/":{{"Proxy":"http://127.0.0.1:3000"}}}}}}}}}}"#
+        ),
+    );
+    let argv = w.shutdown().await;
+    assert!(!argv.iter().any(|a| a.ends_with(" off")), "{argv:?}");
+    assert_eq!(argv.last().unwrap(), "serve status --json");
 }
 
 #[tokio::test]

@@ -93,13 +93,23 @@ pub(super) const PROJECT_USAGE_SQL: &str = "SELECT
 
 impl Store {
     /// Records a new project. Returns `false` if the name is taken. The
-    /// caller validates it first.
+    /// caller validates it first. The count and the insert share one
+    /// IMMEDIATE transaction, so every caller gets the cap.
     ///
     /// # Errors
     ///
-    /// Fails on database errors.
+    /// Fails with [`StoreError::LimitReached`] at [`proj::MAX_PROJECTS`], or
+    /// on database errors.
     pub fn add_project(&self, p: &Project) -> Result<bool> {
-        let n = self.conn()?.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= proj::MAX_PROJECTS {
+            return Err(StoreError::LimitReached(
+                "project limit reached, remove one first",
+            ));
+        }
+        let n = tx.execute(
             "INSERT INTO projects (name, path, agents, accounts, default_agent, models, note,
                  created_at, account_strategy, rotate_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -117,6 +127,7 @@ impl Store {
                 p.rotate_at,
             ],
         )?;
+        tx.commit()?;
         Ok(n == 1)
     }
 
@@ -230,7 +241,9 @@ impl Store {
     /// Deletes project `name`'s record and the sessions kept in it, in one
     /// transaction. While tokens or pending invites are bound to it, this
     /// refuses unless `unbind`, which first puts them back on their own
-    /// workspace. The folder itself is never touched.
+    /// workspace. Prompts still queued under it fail with
+    /// [`PROJECT_REMOVED`] rather than run in the token's workspace. The
+    /// folder itself is never touched.
     ///
     /// # Errors
     ///
@@ -272,11 +285,29 @@ impl Store {
             "UPDATE invites SET project = NULL WHERE project = ?1",
             [name],
         )?;
-        tx.execute("DELETE FROM sessions WHERE project = ?1", [name])?;
+        tx.execute(
+            "UPDATE requests SET status = 'failed', error = ?2, completed_at = ?3
+             WHERE project = ?1 AND status = 'queued'",
+            params![name, PROJECT_REMOVED, now_ms()],
+        )?;
         tx.execute("DELETE FROM projects WHERE name = ?1", [name])?;
+        delete_orphan_sessions(&tx)?;
         tx.commit()?;
         Ok(RemovedProject::Removed { tokens, invites })
     }
+}
+
+/// Error stored on a prompt that was still queued when its project was
+/// removed.
+pub const PROJECT_REMOVED: &str = "project removed";
+
+/// Deletes sessions kept in a project that no longer exists.
+pub(super) fn delete_orphan_sessions(conn: &rusqlite::Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM sessions
+         WHERE project <> ?1 AND project NOT IN (SELECT name FROM projects)",
+        [proj::DEFAULT],
+    )?)
 }
 
 #[cfg(test)]
@@ -415,6 +446,81 @@ mod tests {
     }
 
     #[test]
+    fn add_refuses_past_the_project_cap() {
+        let s = store();
+        for i in 0..proj::MAX_PROJECTS {
+            assert!(s.add_project(&project(&format!("p{i}"))).unwrap());
+        }
+        let e = s.add_project(&project("one-more")).unwrap_err();
+        assert!(matches!(e, StoreError::LimitReached(_)), "{e:?}");
+        assert!(e.to_string().contains("project limit"), "{e}");
+        assert_eq!(s.list_projects().unwrap().len(), proj::MAX_PROJECTS);
+    }
+
+    #[test]
+    fn unbind_fails_prompts_still_queued_under_the_removed_project() {
+        let s = store();
+        s.add_project(&project("api")).unwrap();
+        let bound = token(&s, Some("api"));
+        let free = token(&s, None);
+        let queue = |t: &crate::token::Token| {
+            let id = uuid::Uuid::new_v4().to_string();
+            s.insert_request(NewRequest {
+                id: &id,
+                token: t,
+                agent: AgentKind::Claude,
+                model: None,
+                message: "hi",
+            })
+            .unwrap();
+            id
+        };
+        let (queued, other) = (queue(&bound), queue(&free));
+        s.remove_project("api", true).unwrap();
+        let r = s.get_request(&queued).unwrap().unwrap();
+        assert_eq!(r.status, crate::store::RequestStatus::Failed);
+        assert_eq!(r.error.as_deref(), Some(PROJECT_REMOVED));
+        assert!(
+            s.claim_next(AgentKind::Claude)
+                .unwrap()
+                .is_some_and(|r| r.id == other)
+        );
+    }
+
+    #[test]
+    fn sessions_of_a_removed_project_are_not_kept_or_written_again() {
+        let s = store();
+        s.add_project(&project("api")).unwrap();
+        let t = token(&s, Some("api"));
+        s.remove_project("api", true).unwrap();
+        // A run that was in flight finishes after the removal.
+        s.set_project_session(&t.id, AgentKind::Claude, "default", "api", "late")
+            .unwrap();
+        // A row an older build left behind.
+        s.conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO sessions (token_id, agent, account, project, agent_session_id,
+                     updated_at) VALUES (?1, 'claude', 'work', 'gone', 'old', 1)",
+                [&t.id],
+            )
+            .unwrap();
+        s.prune_all(14).unwrap();
+        s.add_project(&project("api")).unwrap();
+        let n: i64 = s
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(
+            s.project_session(&t.id, AgentKind::Claude, "default", "api")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn requests_carry_their_project_and_count_in_its_stats() {
         let s = store();
         s.add_project(&project("api")).unwrap();
@@ -476,6 +582,8 @@ mod tests {
     #[test]
     fn sessions_are_kept_per_project() {
         let s = store();
+        s.add_project(&project("api")).unwrap();
+        s.add_project(&project("blog")).unwrap();
         let t = token(&s, None);
         s.set_project_session(&t.id, AgentKind::Claude, "work", "api", "a")
             .unwrap();

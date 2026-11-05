@@ -33,6 +33,19 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
 fail() { printf '  %s✗ %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
+# An invite link of exactly the shape the claim page builds (SAFE_ORIGIN and
+# SAFE_CODE in src/web/hashi.js, joined by /claim/). Nothing else reaches
+# `hashi connect`.
+CONNECT_PATTERN='^(https://([A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])|http://(localhost|127(\.[0-9]{1,3}){3}|\[::1\]))(:[0-9]{1,5})?/claim/hashi_inv_[0-9a-f]{16,118}$'
+
+valid_connect_link() {
+    case "$1" in
+        *"
+"*) return 1 ;;
+    esac
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq "$CONNECT_PATTERN"
+}
+
 download() {
     # download <url> <file>
     if has curl; then
@@ -105,6 +118,10 @@ path_hint() {
 main() {
     printf '\n  %s✦ hashi%s %sthe bridge to Claude Code and Codex%s\n\n' "$BOLD$PURPLE" "$RESET" "$DIM" "$RESET"
 
+    if [ -n "${HASHI_CONNECT:-}" ] && ! valid_connect_link "$HASHI_CONNECT"; then
+        fail "HASHI_CONNECT is not an invite link like https://<host>/claim/hashi_inv_<code>; copy the command from the claim page again"
+    fi
+
     tmp="$(mktemp -d 2>/dev/null || mktemp -d -t hashi)"
     trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -144,8 +161,8 @@ main() {
         # A friend's setup: redeem the invite link instead of checking for
         # local agents, which they do not need.
         step "connecting with your invite link"
-        if ! "$INSTALL_DIR/hashi" connect "$HASHI_CONNECT"; then
-            fail "Hashi is installed, but connecting with the invite link failed (the reason is above). An invite link works once: if it was already used or has expired, ask for a new one, then run: hashi connect '<new link>'"
+        if ! "$INSTALL_DIR/hashi" connect -- "$HASHI_CONNECT"; then
+            fail "Hashi is installed, but connecting with the invite link failed (the reason is above). An invite link works once: if it was already used or has expired, ask for a new one, then run: hashi connect -- '<new link>'"
         fi
         return 0
     fi
