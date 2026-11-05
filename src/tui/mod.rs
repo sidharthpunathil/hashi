@@ -2,6 +2,7 @@
 
 pub mod app;
 mod clipboard;
+pub mod qr;
 pub mod theme;
 pub mod ui;
 

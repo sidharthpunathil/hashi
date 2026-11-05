@@ -1173,3 +1173,47 @@ fn a_binding_outside_the_project_is_refused_in_the_form() {
             .any(|t| t.name == "bot")
     );
 }
+
+#[test]
+fn qr_code_renders_at_a_fixed_size_with_its_finder_patterns() {
+    let url = "https://calm-river-bridge.trycloudflare.com/claim/hashi_inv_0123456789abcdef";
+    let lines = hashi::tui::qr::lines(url).unwrap();
+    let (w, h) = hashi::tui::qr::size(url).unwrap();
+    // Version 5 (37 modules) at the default error correction, plus a quiet
+    // zone of two modules on each side, two modules to a cell vertically.
+    assert_eq!((w, h), (41, 21));
+    assert_eq!(lines.len(), usize::from(h));
+    assert!(lines.iter().all(|l| l.chars().count() == usize::from(w)));
+    // The first cell row is quiet zone only.
+    assert!(lines[0].chars().all(|c| c == ' '));
+    // The second holds module rows 0 and 1: the top of the two upper finder
+    // patterns, seven dark modules over dark, five light, dark.
+    let row: Vec<char> = lines[1].chars().collect();
+    let finder = ['█', '▀', '▀', '▀', '▀', '▀', '█'];
+    assert_eq!(row[..2], [' ', ' ']);
+    assert_eq!(row[2..9], finder);
+    assert_eq!(row[usize::from(w) - 9..usize::from(w) - 2], finder);
+    assert_eq!(row[usize::from(w) - 2..], [' ', ' ']);
+    // The same text always gives the same code.
+    assert_eq!(hashi::tui::qr::lines(url).unwrap(), lines);
+}
+
+#[test]
+fn invite_popup_shows_a_qr_code_when_the_terminal_has_room() {
+    let mut app = App::new(state(), None, false);
+    share_invite(&mut app, "alice");
+    let Some(Popup::InviteReveal { code, .. }) = &app.popup else {
+        panic!("expected the invite popup")
+    };
+    let url = app.invite_url(code);
+    let qr = hashi::tui::qr::lines(&url).unwrap();
+    let big = draw(&mut app, 160, 60);
+    assert!(big.contains(qr[1].trim()), "{big}");
+    assert!(!big.contains("larger to see the link as a QR code"));
+    let small = draw(&mut app, 140, 30);
+    assert!(
+        small.contains("larger to see the link as a QR code"),
+        "{small}"
+    );
+    assert!(!small.contains(qr[1].trim()));
+}

@@ -1816,11 +1816,14 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
             let url = app.invite_url(code);
             let local_only = &app.local_only();
             let starting = matches!(app.tunnel, TunnelState::Starting);
-            let height = if *local_only { 15 } else { 12 };
+            let mut height: u16 = if *local_only { 15 } else { 12 };
             let width = u16::try_from(url.chars().count() + 10)
                 .unwrap_or(u16::MAX)
                 .max(80);
-            let rect = centered(area, width, height);
+            // The QR code when the terminal has room for it under the text.
+            let qr = super::qr::size(&url)
+                .filter(|(w, h)| area.height >= height + h + 3 && area.width >= w + 10)
+                .and_then(|_| super::qr::lines(&url));
             let mut lines = vec![
                 Line::from(Span::styled(
                     "Send this link to the person you are sharing with:",
@@ -1835,17 +1838,39 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::raw(""),
-                Line::from(vec![
-                    Span::styled("◌ ", t::fg(t::ORCHID)),
-                    Span::styled(
-                        format!(
-                            "Works once, expires in {}. Opening it gives them their own token.",
-                            super::app::link_short(*link_hours)
-                        ),
-                        t::muted(),
-                    ),
-                ]),
             ];
+            match &qr {
+                Some(rows) => {
+                    height += u16::try_from(rows.len()).unwrap_or(0) + 1;
+                    // Dark on light whatever the terminal's theme, as
+                    // phone cameras expect.
+                    let style = Style::new()
+                        .fg(ratatui::style::Color::Black)
+                        .bg(ratatui::style::Color::White);
+                    for row in rows {
+                        lines.push(Line::from(Span::styled(row.clone(), style)).centered());
+                    }
+                    lines.push(Line::raw(""));
+                }
+                None => {
+                    height += 1;
+                    lines.push(Line::from(Span::styled(
+                        "Make the terminal larger to see the link as a QR code.",
+                        t::muted(),
+                    )));
+                }
+            }
+            lines.push(Line::from(vec![
+                Span::styled("◌ ", t::fg(t::ORCHID)),
+                Span::styled(
+                    format!(
+                        "Works once, expires in {}. Opening it gives them their own token.",
+                        super::app::link_short(*link_hours)
+                    ),
+                    t::muted(),
+                ),
+            ]));
+            let rect = centered(area, width, height);
             if *local_only {
                 lines.push(Line::raw(""));
                 lines.push(Line::from(vec![
