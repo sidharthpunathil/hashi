@@ -1,5 +1,7 @@
 //! Prompts: one submit path shared by HTTP and MCP, results, and `/v1/me`.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::Json;
@@ -12,7 +14,7 @@ use tokio::sync::broadcast::error::RecvError;
 use super::{AnyToken, ApiError, ApiResult, AppState, Auth, MAX_MESSAGE_BYTES, MAX_WAIT_SECS};
 use crate::agent::{self, AgentKind, Usage};
 use crate::events::Event;
-use crate::store::{NewRequest, Request, RequestStatus, Store};
+use crate::store::{Admission, NewRequest, Request, RequestStatus, Store, admin_reserve};
 use crate::token::{Token, TokenStatus};
 use crate::util::{next_day_utc, next_month_utc, now_ms, rfc3339};
 
@@ -39,6 +41,68 @@ pub struct WaitQuery {
     /// Seconds to long-poll for completion.
     #[serde(default)]
     pub wait: Option<u64>,
+}
+
+/// Long polls one token may hold open at once, across `POST /v1/ask`,
+/// `GET /v1/ask/{id}` and the MCP tools. Further waits answer at once.
+pub const MAX_WAITS_PER_TOKEN: usize = 4;
+
+/// Counts the long polls each token holds open.
+#[derive(Debug, Default)]
+pub struct WaitSlots {
+    held: Mutex<HashMap<String, usize>>,
+}
+
+/// One held long poll. Dropping it frees the slot.
+#[derive(Debug)]
+pub struct WaitSlot {
+    slots: Arc<WaitSlots>,
+    token_id: String,
+}
+
+impl WaitSlots {
+    /// Takes a slot for `token_id`, or `None` when it already holds
+    /// [`MAX_WAITS_PER_TOKEN`].
+    #[must_use]
+    pub fn try_acquire(self: &Arc<Self>, token_id: &str) -> Option<WaitSlot> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = held.entry(token_id.to_owned()).or_insert(0);
+        if *n >= MAX_WAITS_PER_TOKEN {
+            return None;
+        }
+        *n += 1;
+        Some(WaitSlot {
+            slots: Arc::clone(self),
+            token_id: token_id.to_owned(),
+        })
+    }
+
+    /// Long polls `token_id` holds right now.
+    #[must_use]
+    pub fn held(&self, token_id: &str) -> usize {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(token_id)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for WaitSlot {
+    fn drop(&mut self) {
+        let mut held = self
+            .slots
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = held.get_mut(&self.token_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                held.remove(&self.token_id);
+            }
+        }
+    }
 }
 
 /// A prompt to submit, from any front end.
@@ -119,7 +183,9 @@ fn limit_error(limit: &'static str, message: String, reset_at: i64) -> ApiError 
 /// Validates a prompt against the token's policy and queues it.
 ///
 /// Checks run in this order: pause, input, agent scope and availability,
-/// in-flight cap, request caps, budget caps, global queue limit.
+/// request caps, budget caps, then the in-flight cap and the global queue
+/// limit, which are checked in the same transaction as the insert. Non-admin
+/// tokens cannot take the last [`admin_reserve`] queue slots.
 ///
 /// # Errors
 ///
@@ -184,18 +250,6 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
 
     let usage = state.store.token_usage(&token.id, now)?;
     let l = token.limits;
-    if let Some(max) = l.max_pending
-        && usage.pending >= u64::from(max)
-    {
-        return Err(ApiError::coded(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_pending",
-            format!(
-                "this token already has {} prompt(s) in flight (max {max})",
-                usage.pending
-            ),
-        ));
-    }
     if let Some(max) = l.daily_requests
         && usage.today_requests >= u64::from(max)
     {
@@ -232,20 +286,35 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             next_month_utc(now),
         ));
     }
-    if state.store.pending_count()? >= state.queue_limit {
-        return Err(ApiError::TooManyRequests(
-            "queue is full, try again shortly",
-        ));
-    }
 
     let id = uuid::Uuid::new_v4().to_string();
-    state.store.insert_request(NewRequest {
-        id: &id,
-        token,
-        agent,
-        model: input.model.as_deref(),
-        message: &message,
-    })?;
+    let admission = state.store.insert_request_checked(
+        NewRequest {
+            id: &id,
+            token,
+            agent,
+            model: input.model.as_deref(),
+            message: &message,
+        },
+        l.max_pending,
+        state.queue_limit,
+        admin_reserve(state.queue_limit),
+    )?;
+    match admission {
+        Admission::Accepted => {}
+        Admission::TokenBusy { pending, max } => {
+            return Err(ApiError::coded(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_pending",
+                format!("this token already has {pending} prompt(s) in flight (max {max})"),
+            ));
+        }
+        Admission::QueueFull => {
+            return Err(ApiError::TooManyRequests(
+                "queue is full, try again shortly",
+            ));
+        }
+    }
     state.bus.emit(Event::Queued {
         id: id.clone(),
         agent,
@@ -258,14 +327,17 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         .ok_or(ApiError::NotFound("request vanished"))
 }
 
-/// Waits up to `secs` (capped at the server maximum) for a request to finish,
-/// then returns its latest state.
+/// Waits up to `secs` (capped at `cap`) for a request to finish, then
+/// returns its latest state. The wait counts against `waiter`, the token
+/// asking; one that already holds [`MAX_WAITS_PER_TOKEN`] waits gets the
+/// current state at once instead.
 ///
 /// # Errors
 ///
 /// Fails on database errors or if the request does not exist.
 pub async fn wait_until_done(
     state: &AppState,
+    waiter: &str,
     id: &str,
     secs: u64,
     cap: u64,
@@ -279,6 +351,9 @@ pub async fn wait_until_done(
     if current.status.is_terminal() || secs == 0 {
         return Ok(current);
     }
+    let Some(_slot) = state.waits.try_acquire(waiter) else {
+        return Ok(current);
+    };
     let deadline = Duration::from_secs(secs.min(cap));
     let _ = tokio::time::timeout(deadline, async {
         loop {
@@ -315,7 +390,7 @@ pub(super) async fn ask(
     )
     .await?;
     let req = match wait {
-        Some(secs) => wait_until_done(&state, &req.id, secs, MAX_WAIT_SECS).await?,
+        Some(secs) => wait_until_done(&state, &token.id, &req.id, secs, MAX_WAIT_SECS).await?,
         None => req,
     };
     let (code, v) = request_json(&state.store, req)?;
@@ -338,7 +413,7 @@ pub(super) async fn poll(
     }
     let req = match q.wait {
         Some(secs) if !req.status.is_terminal() => {
-            wait_until_done(&state, &id, secs, MAX_WAIT_SECS).await?
+            wait_until_done(&state, &token.id, &id, secs, MAX_WAIT_SECS).await?
         }
         _ => req,
     };

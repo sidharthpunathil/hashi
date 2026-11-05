@@ -24,6 +24,10 @@ use crate::guard::ResourceGuard;
 use crate::store::{Request, Store};
 use crate::util::{now_ms, truncate};
 
+/// Characters of an agent's error written to the log. The database row keeps
+/// the full text, so a noisy failure cannot grow the log quickly.
+pub const LOG_ERROR_CHARS: usize = 500;
+
 /// Settings shared by all workers.
 #[derive(Debug, Clone)]
 pub struct QueueConfig {
@@ -131,11 +135,16 @@ impl Worker {
                     match self.store.claim_next(self.agent) {
                         Ok(Some(req)) => {
                             self.guard.start(&mut permit);
+                            let id = req.id.clone();
                             tokio::select! {
                                 () = cancel.cancelled() => {
-                                    // Dropping the run kills its process tree. Leave
-                                    // the request `running`; recovery re-queues it on
-                                    // the next start.
+                                    // Dropping the run kills its process tree. A clean
+                                    // stop is not the prompt's fault, so put it back
+                                    // without counting an interruption. If this fails,
+                                    // recovery re-queues it on the next start.
+                                    if let Err(e) = self.store.requeue(&id) {
+                                        warn!(id = %id, error = %e, "failed to re-queue on shutdown");
+                                    }
                                     return;
                                 }
                                 () = self.process(req) => {}
@@ -179,7 +188,7 @@ impl Worker {
                     id = %req.id,
                     agent = %self.agent,
                     error_id = %error_id,
-                    error = %msg,
+                    error = %log_excerpt(&msg),
                     "request failed"
                 );
                 if let Err(e) = self.store.fail_request(&req.id, &msg) {
@@ -247,5 +256,22 @@ impl Worker {
             warn!(error = %e, "failed to persist session");
         }
         Ok(out)
+    }
+}
+
+/// The part of an agent's error that goes into the log.
+fn log_excerpt(err: &str) -> String {
+    truncate(err, LOG_ERROR_CHARS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logged_errors_are_short_but_short_errors_are_whole() {
+        let long = "x".repeat(4_000);
+        assert_eq!(log_excerpt(&long).chars().count(), LOG_ERROR_CHARS);
+        assert_eq!(log_excerpt("please sign in again"), "please sign in again");
     }
 }

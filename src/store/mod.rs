@@ -2,13 +2,15 @@
 //!
 //! The connection lives behind a `std::sync::Mutex`. Every query here is a
 //! short indexed lookup or write on a local file, so critical sections are
-//! microseconds long and the lock is never held across an `.await`.
+//! microseconds long and the lock is never held across an `.await`. Queries
+//! that run often (usage checks, the dashboard list) never read prompt or
+//! response bodies, so their cost does not grow with what users send.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 
 mod audit;
@@ -144,6 +146,74 @@ pub struct NewToken {
     pub limits: Limits,
 }
 
+/// `maxPending` given to non-admin tokens created without any limits.
+pub const DEFAULT_MAX_PENDING: u32 = 3;
+
+impl NewToken {
+    /// Limits for a token created without any: non-admin tokens may have
+    /// [`DEFAULT_MAX_PENDING`] prompts in flight, admins are unlimited.
+    #[must_use]
+    pub fn default_limits(role: Role) -> Limits {
+        match role {
+            Role::Admin => Limits::default(),
+            Role::User => Limits {
+                max_pending: Some(DEFAULT_MAX_PENDING),
+                ..Limits::default()
+            },
+        }
+    }
+}
+
+/// Queue slots kept free for admin tokens: 10% of `queue_limit`, at least 5,
+/// but never more than half the queue.
+#[must_use]
+pub const fn admin_reserve(queue_limit: u64) -> u64 {
+    let tenth = queue_limit.div_ceil(10);
+    let reserve = if tenth < 5 { 5 } else { tenth };
+    let half = queue_limit / 2;
+    if reserve < half { reserve } else { half }
+}
+
+/// Result of [`Store::insert_request_checked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    /// Queued.
+    Accepted,
+    /// The token already has `pending` prompts in flight, at its cap of `max`.
+    TokenBusy {
+        /// Prompts queued or running for this token.
+        pending: u64,
+        /// The token's `maxPending`.
+        max: u32,
+    },
+    /// The queue has no room for this token's role.
+    QueueFull,
+}
+
+/// What one maintenance pass removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// Finished requests.
+    pub requests: usize,
+    /// Audit records.
+    pub audit: usize,
+    /// Claimed or expired invites.
+    pub invites: usize,
+}
+
+/// Audit records and spent invites are kept at least this many days.
+pub const MIN_AUDIT_DAYS: u32 = 90;
+
+/// Interruptions after which a request is failed instead of re-queued.
+pub const MAX_INTERRUPTS: i64 = 3;
+
+/// A database whose live data is at most this size is converted to
+/// incremental auto-vacuum (which needs a full `VACUUM`) automatically.
+const AUTO_VACUUM_CONVERT_BYTES: i64 = 128 * 1024 * 1024;
+
+/// Characters of the prompt kept by [`Store::recent_requests_brief`].
+pub const BRIEF_MESSAGE_CHARS: u32 = 200;
+
 /// A token's use in the current UTC day and month.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,10 +246,10 @@ pub struct NewRequest<'a> {
 }
 
 /// Outcome of a revoke attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Revoke {
-    /// The token was deleted.
-    Revoked,
+    /// The token with this id was deleted.
+    Revoked(String),
     /// No token matched.
     NotFound,
     /// Refused: it is the last admin token.
@@ -292,7 +362,28 @@ CREATE TABLE IF NOT EXISTS audit (
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at);
 ";
 
-const MIGRATIONS: [&str; 2] = [SCHEMA_V1, SCHEMA_V2];
+/// Version 3: usage checks served from an index alone, a status index for
+/// the queue limit, and a crash counter per request. Incremental
+/// auto-vacuum is switched on after the migration by [`Store::compact`].
+const SCHEMA_V3: &str = r"
+ALTER TABLE requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+DROP INDEX IF EXISTS idx_requests_token;
+CREATE INDEX IF NOT EXISTS idx_requests_usage ON requests(token_id, created_at, status, cost_usd);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status, agent);
+";
+
+const MIGRATIONS: [&str; 3] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3];
+
+/// Usage of token `?1` since day start `?2` and month start `?3`. Every
+/// column it touches is in `idx_requests_usage`.
+const TOKEN_USAGE_SQL: &str = "SELECT
+         COUNT(CASE WHEN created_at >= ?2 THEN 1 END),
+         COUNT(CASE WHEN created_at >= ?3 THEN 1 END),
+         COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost_usd END), 0.0),
+         COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost_usd END), 0.0),
+         COUNT(CASE WHEN status IN ('queued', 'running') THEN 1 END)
+     FROM requests
+     WHERE token_id = ?1 AND (created_at >= ?3 OR status IN ('queued', 'running'))";
 
 const TOKEN_COLUMNS: &str = "id, name, prefix, role, session_mode, agents, expires_at, created_at, \
      last_used_at, paused, note, daily_requests, monthly_requests, daily_budget_usd, \
@@ -324,10 +415,26 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5_000)?;
-        migrate(&mut conn)?;
-        Ok(Self {
+        let before = migrate(&mut conn)?;
+        let store = Self {
             conn: Mutex::new(conn),
-        })
+        };
+        if before < 3 {
+            // Best effort: another process may hold the database, and the
+            // hourly maintenance pass tries again.
+            if let Err(e) = store.compact() {
+                tracing::warn!(error = %e, "could not enable incremental auto-vacuum yet");
+            }
+        }
+        Ok(store)
+    }
+
+    /// The directory holding the database file, or `None` in memory.
+    #[must_use]
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        let conn = self.conn().ok()?;
+        let path = conn.path().filter(|p| !p.is_empty())?;
+        Path::new(path).parent().map(Path::to_path_buf)
     }
 
     fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -425,7 +532,8 @@ impl Store {
         Ok(())
     }
 
-    /// A token's use in the UTC day and month containing `now_ms`.
+    /// A token's use in the UTC day and month containing `now_ms`. Served
+    /// entirely from `idx_requests_usage`, so it never reads request bodies.
     ///
     /// # Errors
     ///
@@ -433,17 +541,9 @@ impl Store {
     pub fn token_usage(&self, token_id: &str, now_ms: i64) -> Result<TokenUsage> {
         let day = crate::util::day_start_utc(now_ms);
         let month = month_start_utc(now_ms);
-        let row = self.conn()?.query_row(
-            "SELECT
-                 COUNT(CASE WHEN created_at >= ?2 THEN 1 END),
-                 COUNT(CASE WHEN created_at >= ?3 THEN 1 END),
-                 COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost_usd END), 0.0),
-                 COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost_usd END), 0.0),
-                 COUNT(CASE WHEN status IN ('queued', 'running') THEN 1 END)
-             FROM requests
-             WHERE token_id = ?1 AND (created_at >= ?3 OR status IN ('queued', 'running'))",
-            params![token_id, day, month],
-            |r| {
+        let row = self
+            .conn()?
+            .query_row(TOKEN_USAGE_SQL, params![token_id, day, month], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
@@ -451,8 +551,7 @@ impl Store {
                     r.get::<_, f64>(3)?,
                     r.get::<_, i64>(4)?,
                 ))
-            },
-        )?;
+            })?;
         let n = |v: i64| u64::try_from(v).unwrap_or(0);
         Ok(TokenUsage {
             today_requests: n(row.0),
@@ -520,32 +619,66 @@ impl Store {
         }
         tx.execute("DELETE FROM tokens WHERE id = ?1", [id])?;
         tx.commit()?;
-        Ok(Revoke::Revoked)
+        Ok(Revoke::Revoked(id.clone()))
     }
 
     // ── requests ───────────────────────────────────────────────────────────
 
-    /// Enqueues a request.
+    /// Enqueues a request without checking any cap.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn insert_request(&self, new: NewRequest<'_>) -> Result<()> {
-        self.conn()?.execute(
-            "INSERT INTO requests (id, token_id, token_name, agent, model, message, stateful, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
-            params![
-                new.id,
-                new.token.id,
-                new.token.name,
-                new.agent.as_str(),
-                new.model,
-                new.message,
-                new.token.session_mode == SessionMode::Stateful,
-                now_ms(),
-            ],
+        insert_request_row(&*self.conn()?, new)
+    }
+
+    /// Enqueues a request only if the token is under `max_pending` and the
+    /// queue has room. Non-admin tokens may fill the queue up to
+    /// `queue_limit - admin_reserve`; admins may use all of it. The counts
+    /// and the insert run in one transaction, so concurrent submits cannot
+    /// overshoot either cap.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn insert_request_checked(
+        &self,
+        new: NewRequest<'_>,
+        max_pending: Option<u32>,
+        queue_limit: u64,
+        admin_reserve: u64,
+    ) -> Result<Admission> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(max) = max_pending {
+            let pending: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM requests
+                 WHERE token_id = ?1 AND status IN ('queued', 'running')",
+                [&new.token.id],
+                |r| r.get(0),
+            )?;
+            let pending = u64::try_from(pending).unwrap_or(0);
+            if pending >= u64::from(max) {
+                return Ok(Admission::TokenBusy { pending, max });
+            }
+        }
+        let total: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM requests WHERE status IN ('queued', 'running')",
+            [],
+            |r| r.get(0),
         )?;
-        Ok(())
+        let cap = if new.token.is_admin() {
+            queue_limit
+        } else {
+            queue_limit.saturating_sub(admin_reserve)
+        };
+        if u64::try_from(total).unwrap_or(0) >= cap {
+            return Ok(Admission::QueueFull);
+        }
+        insert_request_row(&tx, new)?;
+        tx.commit()?;
+        Ok(Admission::Accepted)
     }
 
     /// Whether `agent` has any queued request.
@@ -627,7 +760,8 @@ impl Store {
             .transpose()
     }
 
-    /// Most recent requests, newest first.
+    /// Most recent requests, newest first, with full bodies. The dashboard
+    /// list uses [`Store::recent_requests_brief`] instead.
     ///
     /// # Errors
     ///
@@ -635,6 +769,28 @@ impl Store {
     pub fn recent_requests(&self, limit: u32) -> Result<Vec<Request>> {
         let sql = format!(
             "SELECT {REQUEST_COLUMNS} FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?1"
+        );
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([limit], row_to_request)?;
+        rows.map(|r| r.map_err(StoreError::from).and_then(|t| t))
+            .collect()
+    }
+
+    /// Most recent requests, newest first, for a list view: the prompt and
+    /// error are cut to [`BRIEF_MESSAGE_CHARS`] characters in SQL and the
+    /// response is left out. Load one in full with [`Store::get_request`].
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn recent_requests_brief(&self, limit: u32) -> Result<Vec<Request>> {
+        let sql = format!(
+            "SELECT id, token_id, token_name, agent, model, substr(message, 1, {n}), stateful,
+                 status, NULL, substr(error, 1, {n}), input_tokens, output_tokens, cost_usd,
+                 created_at, started_at, completed_at
+             FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?1",
+            n = BRIEF_MESSAGE_CHARS
         );
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&sql)?;
@@ -699,16 +855,50 @@ impl Store {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
-    /// Re-queues requests that were running when the process last stopped.
+    /// Re-queues requests that were running when the process last stopped,
+    /// and counts the interruption. A request that has now interrupted the
+    /// server [`MAX_INTERRUPTS`] times is failed instead, so a prompt that
+    /// crashes Hashi cannot run again on every start. Returns how many
+    /// requests were touched.
     ///
     /// # Errors
     ///
     /// Fails on database errors.
     pub fn recover_interrupted(&self) -> Result<usize> {
-        Ok(self.conn()?.execute(
-            "UPDATE requests SET status = 'queued', started_at = NULL WHERE status = 'running'",
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let failed = tx.execute(
+            "UPDATE requests SET status = 'failed', attempts = attempts + 1, completed_at = ?1,
+                 error = ?2
+             WHERE status = 'running' AND attempts + 1 >= ?3",
+            params![
+                now_ms(),
+                format!("stopped after interrupting the server {MAX_INTERRUPTS} times"),
+                MAX_INTERRUPTS
+            ],
+        )?;
+        let requeued = tx.execute(
+            "UPDATE requests SET status = 'queued', started_at = NULL, attempts = attempts + 1
+             WHERE status = 'running'",
             [],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(failed + requeued)
+    }
+
+    /// Puts a running request back in the queue without counting an
+    /// interruption, for a clean shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn requeue(&self, id: &str) -> Result<()> {
+        self.conn()?.execute(
+            "UPDATE requests SET status = 'queued', started_at = NULL
+             WHERE id = ?1 AND status = 'running'",
+            [id],
+        )?;
+        Ok(())
     }
 
     /// Deletes finished requests older than `days`.
@@ -724,6 +914,70 @@ impl Store {
             "DELETE FROM requests WHERE status IN ('completed', 'failed') AND completed_at < ?1",
             [cutoff],
         )?)
+    }
+
+    /// One maintenance pass: finished requests past `retention_days` (never
+    /// the current month), plus audit records and claimed or expired invites
+    /// older than `retention_days` or [`MIN_AUDIT_DAYS`], whichever is longer.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn prune_all(&self, retention_days: u32) -> Result<Pruned> {
+        let requests = self.prune(retention_days)?;
+        let cutoff = now_ms() - i64::from(retention_days.max(MIN_AUDIT_DAYS)) * 86_400_000;
+        let audit = self.prune_audit(cutoff)?;
+        let invites = self.prune_invites(cutoff)?;
+        Ok(Pruned {
+            requests,
+            audit,
+            invites,
+        })
+    }
+
+    /// Returns free pages to the file system. The first call on a database
+    /// without incremental auto-vacuum converts it with a full `VACUUM`, but
+    /// only while its live data is small (128 MiB); a larger database stays
+    /// as it is until pruning brings it under that size. Returns `true` when
+    /// incremental auto-vacuum is on afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors, for example when another process holds a
+    /// lock.
+    pub fn compact(&self) -> Result<bool> {
+        let conn = self.conn()?;
+        let mode: i64 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
+        if mode == 2 {
+            // Each step frees one page, so step until it is done.
+            let mut stmt = conn.prepare("PRAGMA incremental_vacuum")?;
+            let mut rows = stmt.query([])?;
+            while rows.next()?.is_some() {}
+            return Ok(true);
+        }
+        let pages: i64 = conn.pragma_query_value(None, "page_count", |r| r.get(0))?;
+        let free: i64 = conn.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        let size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0))?;
+        if (pages - free).saturating_mul(size) > AUTO_VACUUM_CONVERT_BYTES {
+            return Ok(false);
+        }
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        conn.execute_batch("VACUUM;")?;
+        let mode: i64 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
+        Ok(mode == 2)
+    }
+
+    /// Moves a request and every audit record `days` into the past.
+    #[cfg(test)]
+    pub(crate) fn backdate_for_tests(&self, request_id: &str, days: i64) {
+        let at = now_ms() - days * 86_400_000;
+        let conn = self.conn().unwrap();
+        conn.execute(
+            "UPDATE requests SET created_at = ?1, started_at = ?1, completed_at = ?1 WHERE id = ?2",
+            params![at, request_id],
+        )
+        .unwrap();
+        conn.execute("UPDATE audit SET at = ?1", [at]).unwrap();
     }
 
     /// Aggregate counters.
@@ -829,7 +1083,8 @@ impl Store {
     }
 }
 
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// Applies pending migrations and returns the version the database was at.
+fn migrate(conn: &mut Connection) -> Result<i64> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     let done = usize::try_from(version).unwrap_or(0);
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(done) {
@@ -842,6 +1097,24 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         )?;
         tx.commit()?;
     }
+    Ok(version)
+}
+
+fn insert_request_row(conn: &Connection, new: NewRequest<'_>) -> Result<()> {
+    conn.execute(
+        "INSERT INTO requests (id, token_id, token_name, agent, model, message, stateful, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
+        params![
+            new.id,
+            new.token.id,
+            new.token.name,
+            new.agent.as_str(),
+            new.model,
+            new.message,
+            new.token.session_mode == SessionMode::Stateful,
+            now_ms(),
+        ],
+    )?;
     Ok(())
 }
 
@@ -1015,10 +1288,227 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         // Opening again is a no-op.
         drop(s);
         assert!(Store::open(&path).is_ok());
+    }
+
+    fn plan(s: &Store, sql: &str) -> String {
+        let conn = s.conn().unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = stmt
+            .query_map(params!["t", 0_i64, 0_i64], |r| r.get::<_, String>(3))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("; ")
+    }
+
+    #[test]
+    fn token_usage_reads_only_the_covering_index() {
+        let s = store();
+        let p = plan(&s, TOKEN_USAGE_SQL);
+        assert!(
+            p.contains("USING COVERING INDEX idx_requests_usage"),
+            "unexpected plan: {p}"
+        );
+    }
+
+    #[test]
+    fn migrates_v2_database_to_v3_with_attempts_and_auto_vacuum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, SCHEMA_V2] {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 3);
+        let conn = s.conn().unwrap();
+        let mode: i64 = conn
+            .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, 2, "incremental auto-vacuum");
+        let attempts: i64 = conn
+            .query_row("SELECT COUNT(attempts) FROM requests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attempts, 0);
+    }
+
+    #[test]
+    fn brief_list_cuts_prompts_and_drops_responses() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let long = "é".repeat(5_000);
+        s.insert_request(NewRequest {
+            id: &id,
+            token: &t,
+            agent: AgentKind::Claude,
+            model: None,
+            message: &long,
+        })
+        .unwrap();
+        s.claim_next(AgentKind::Claude).unwrap();
+        s.complete_request(&id, &"r".repeat(50_000), None).unwrap();
+        let brief = s.recent_requests_brief(10).unwrap();
+        assert_eq!(brief[0].message.chars().count(), 200);
+        assert_eq!(brief[0].response, None);
+        assert_eq!(brief[0].status, RequestStatus::Completed);
+        let full = s.get_request(&id).unwrap().unwrap();
+        assert_eq!(
+            (full.message.len(), full.response.unwrap().len()),
+            (long.len(), 50_000)
+        );
+    }
+
+    fn checked(s: &Store, t: &Token, max: Option<u32>, limit: u64) -> Admission {
+        let id = uuid::Uuid::new_v4().to_string();
+        s.insert_request_checked(
+            NewRequest {
+                id: &id,
+                token: t,
+                agent: AgentKind::Claude,
+                model: None,
+                message: "hi",
+            },
+            max,
+            limit,
+            admin_reserve(limit),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn checked_insert_enforces_max_pending() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        for _ in 0..2 {
+            assert_eq!(checked(&s, &t, Some(2), 100), Admission::Accepted);
+        }
+        assert_eq!(
+            checked(&s, &t, Some(2), 100),
+            Admission::TokenBusy { pending: 2, max: 2 }
+        );
+    }
+
+    #[test]
+    fn admins_keep_a_reserved_share_of_the_queue() {
+        assert_eq!(
+            (
+                admin_reserve(100),
+                admin_reserve(20),
+                admin_reserve(4),
+                admin_reserve(1)
+            ),
+            (10, 5, 2, 0)
+        );
+        let s = store();
+        let (user, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let (admin, _) = s.create_token(&new_token(Role::Admin)).unwrap();
+        // 20 slots, 5 reserved: users stop at 15, the admin can use the rest.
+        for _ in 0..15 {
+            assert_eq!(checked(&s, &user, None, 20), Admission::Accepted);
+        }
+        assert_eq!(checked(&s, &user, None, 20), Admission::QueueFull);
+        for _ in 0..5 {
+            assert_eq!(checked(&s, &admin, None, 20), Admission::Accepted);
+        }
+        assert_eq!(checked(&s, &admin, None, 20), Admission::QueueFull);
+    }
+
+    #[test]
+    fn default_limits_cap_users_only() {
+        assert_eq!(
+            NewToken::default_limits(Role::User).max_pending,
+            Some(DEFAULT_MAX_PENDING)
+        );
+        assert_eq!(NewToken::default_limits(Role::Admin), Limits::default());
+    }
+
+    #[test]
+    fn third_interruption_fails_the_request() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let id = enqueue(&s, &t, AgentKind::Claude);
+        for _ in 0..2 {
+            s.claim_next(AgentKind::Claude).unwrap().unwrap();
+            assert_eq!(s.recover_interrupted().unwrap(), 1);
+            assert_eq!(
+                s.get_request(&id).unwrap().unwrap().status,
+                RequestStatus::Queued
+            );
+        }
+        s.claim_next(AgentKind::Claude).unwrap().unwrap();
+        assert_eq!(s.recover_interrupted().unwrap(), 1);
+        let r = s.get_request(&id).unwrap().unwrap();
+        assert_eq!(r.status, RequestStatus::Failed);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("stopped after interrupting the server 3 times")
+        );
+        assert!(s.claim_next(AgentKind::Claude).unwrap().is_none());
+    }
+
+    #[test]
+    fn clean_requeue_does_not_count_an_interruption() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let id = enqueue(&s, &t, AgentKind::Claude);
+        for _ in 0..5 {
+            s.claim_next(AgentKind::Claude).unwrap().unwrap();
+            s.requeue(&id).unwrap();
+        }
+        let r = s.get_request(&id).unwrap().unwrap();
+        assert_eq!((r.status, r.started_at), (RequestStatus::Queued, None));
+    }
+
+    #[test]
+    fn compact_returns_pruned_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("hashi.db")).unwrap();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..50 {
+            let id = uuid::Uuid::new_v4().to_string();
+            s.insert_request(NewRequest {
+                id: &id,
+                token: &t,
+                agent: AgentKind::Claude,
+                model: None,
+                message: &"m".repeat(30_000),
+            })
+            .unwrap();
+            ids.push(id);
+        }
+        let pages = |s: &Store| -> i64 {
+            s.conn()
+                .unwrap()
+                .pragma_query_value(None, "page_count", |r| r.get(0))
+                .unwrap()
+        };
+        let before = pages(&s);
+        s.conn()
+            .unwrap()
+            .execute("DELETE FROM requests", [])
+            .unwrap();
+        assert!(s.compact().unwrap());
+        assert!(pages(&s) < before / 4, "{} -> {}", before, pages(&s));
+    }
+
+    #[test]
+    fn data_dir_is_the_database_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("hashi.db")).unwrap();
+        assert_eq!(
+            s.data_dir().unwrap().canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+        assert!(store().data_dir().is_none());
     }
 
     #[test]
@@ -1109,7 +1599,10 @@ mod tests {
     fn revoke_by_prefix_deletes_token() {
         let s = store();
         let (user, _) = s.create_token(&new_token(Role::User)).unwrap();
-        assert_eq!(s.revoke_token(&user.prefix).unwrap(), Revoke::Revoked);
+        assert_eq!(
+            s.revoke_token(&user.prefix).unwrap(),
+            Revoke::Revoked(user.id.clone())
+        );
         assert_eq!(s.revoke_token(&user.id).unwrap(), Revoke::NotFound);
     }
 

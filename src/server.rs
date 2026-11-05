@@ -117,6 +117,44 @@ pub fn open_store(home: &Path) -> Result<Store> {
     Ok(store)
 }
 
+/// Deletes a revoked token's workspace, `<home>/workspaces/<token_id>/`,
+/// with every agent's directory in it. Symlinks are removed, never followed,
+/// so nothing outside the workspace root is touched. Returns `false` when
+/// there was nothing to delete.
+///
+/// # Errors
+///
+/// Fails if `token_id` is not a plain id, if the workspace root is not a real
+/// directory, or if deleting fails.
+pub fn remove_workspace(home: &Path, token_id: &str) -> std::io::Result<bool> {
+    use std::io::{Error, ErrorKind};
+    if token_id.is_empty()
+        || !token_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a token id"));
+    }
+    let root = home.join("workspaces");
+    match std::fs::symlink_metadata(&root) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(Error::other("the workspace root is not a directory")),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    }
+    let dir = root.join(token_id);
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+        // `remove_dir_all` does not follow symlinks inside the tree.
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&dir).map(|()| true),
+        // A link or file in place of the directory: remove the entry itself.
+        Ok(_) => std::fs::remove_file(&dir)
+            .or_else(|_| std::fs::remove_dir(&dir))
+            .map(|()| true),
+    }
+}
+
 /// Mints an admin token if none exists. Returns the raw secret when it did.
 ///
 /// # Errors
@@ -226,6 +264,7 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         default_agent: cfg.default_agent,
         queue_limit: cfg.queue_limit,
         run_timeout_secs: cfg.limits.timeout.as_secs(),
+        waits: Arc::default(),
     };
 
     let cancel = CancellationToken::new();
@@ -241,6 +280,12 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         &dispatcher,
         queue_cfg,
         guard,
+        cancel.clone(),
+    );
+    crate::maintenance::spawn(
+        &mut tasks,
+        Arc::clone(&store),
+        cfg.retention_days,
         cancel.clone(),
     );
 
