@@ -29,6 +29,8 @@ fn state() -> AppState {
             session_mode: SessionMode::Stateless,
             agents: AgentKind::ALL.to_vec(),
             expires_in_days: None,
+            note: None,
+            limits: Default::default(),
         })
         .unwrap();
     for (i, (agent, msg)) in [

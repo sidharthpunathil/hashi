@@ -22,6 +22,47 @@ pub fn rfc3339(ms: i64) -> Option<String> {
         .ok()
 }
 
+fn to_ms(dt: OffsetDateTime) -> i64 {
+    i64::try_from(dt.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
+}
+
+fn from_ms(ms: i64) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+/// Start of the UTC day containing `ms`.
+#[must_use]
+pub fn day_start_utc(ms: i64) -> i64 {
+    to_ms(from_ms(ms).replace_time(time::Time::MIDNIGHT))
+}
+
+/// Start of the next UTC day after `ms`.
+#[must_use]
+pub fn next_day_utc(ms: i64) -> i64 {
+    day_start_utc(ms) + 86_400_000
+}
+
+/// Start of the UTC month containing `ms`.
+#[must_use]
+pub fn month_start_utc(ms: i64) -> i64 {
+    let dt = from_ms(ms).replace_time(time::Time::MIDNIGHT);
+    to_ms(dt.replace_day(1).unwrap_or(dt))
+}
+
+/// Start of the next UTC month after `ms`.
+#[must_use]
+pub fn next_month_utc(ms: i64) -> i64 {
+    let start = from_ms(month_start_utc(ms));
+    let (year, month) = match start.month() {
+        time::Month::December => (start.year() + 1, time::Month::January),
+        m => (start.year(), m.next()),
+    };
+    time::Date::from_calendar_date(year, month, 1)
+        .map(|d| to_ms(d.midnight().assume_utc()))
+        .unwrap_or(i64::MAX)
+}
+
 /// Human friendly duration: `840ms`, `12.4s`, `3m 05s`, `2h 10m`.
 #[must_use]
 pub fn human_duration(d: Duration) -> String {
@@ -93,6 +134,34 @@ mod tests {
     #[test]
     fn one_line_collapses_newlines() {
         assert_eq!(one_line("a\n  b\tc"), "a b c");
+    }
+
+    #[test]
+    fn day_start_truncates() {
+        // 2026-11-05T09:35:31Z
+        let ms = 1_793_871_331_000;
+        assert_eq!(
+            rfc3339(day_start_utc(ms)).as_deref(),
+            Some("2026-11-05T00:00:00Z")
+        );
+        assert_eq!(
+            rfc3339(next_day_utc(ms)).as_deref(),
+            Some("2026-11-06T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn month_start_handles_december() {
+        // 2026-12-31T23:00:00Z
+        let ms = 1_798_758_000_000;
+        assert_eq!(
+            rfc3339(month_start_utc(ms)).as_deref(),
+            Some("2026-12-01T00:00:00Z")
+        );
+        assert_eq!(
+            rfc3339(next_month_utc(ms)).as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
     }
 
     #[test]

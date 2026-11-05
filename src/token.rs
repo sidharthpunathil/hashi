@@ -103,6 +103,62 @@ macro_rules! str_enum {
 str_enum!(Role { Admin => "admin", User => "user" });
 str_enum!(SessionMode { Stateless => "stateless", Stateful => "stateful" });
 
+/// Usage caps for one token. `None` means unlimited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Limits {
+    /// Prompts per UTC day.
+    #[serde(default)]
+    pub daily_requests: Option<u32>,
+    /// Prompts per UTC month.
+    #[serde(default)]
+    pub monthly_requests: Option<u32>,
+    /// Estimated spend per UTC day, as reported by the agent (Claude only).
+    #[serde(default)]
+    pub daily_budget_usd: Option<f64>,
+    /// Estimated spend per UTC month, as reported by the agent (Claude only).
+    #[serde(default)]
+    pub monthly_budget_usd: Option<f64>,
+    /// Prompts queued or running at once.
+    #[serde(default)]
+    pub max_pending: Option<u32>,
+}
+
+impl Limits {
+    /// `true` when every budget is non-negative and finite.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        [self.daily_budget_usd, self.monthly_budget_usd]
+            .into_iter()
+            .flatten()
+            .all(|b| b.is_finite() && b >= 0.0)
+    }
+}
+
+/// Whether a token can be used right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenStatus {
+    /// Usable.
+    Active,
+    /// Temporarily switched off by an admin.
+    Paused,
+    /// Past its expiry time.
+    Expired,
+}
+
+impl TokenStatus {
+    /// Stable lowercase identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Expired => "expired",
+        }
+    }
+}
+
 /// A stored token record. Never contains the raw secret.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +181,12 @@ pub struct Token {
     pub created_at: i64,
     /// Last successful authentication, in Unix milliseconds.
     pub last_used_at: Option<i64>,
+    /// Temporarily switched off.
+    pub paused: bool,
+    /// Who or what the token is for.
+    pub note: Option<String>,
+    /// Usage caps.
+    pub limits: Limits,
 }
 
 impl Token {
@@ -144,6 +206,18 @@ impl Token {
     #[must_use]
     pub fn is_expired(&self, now_ms: i64) -> bool {
         self.expires_at.is_some_and(|t| t <= now_ms)
+    }
+
+    /// Current status. Expiry wins over pause.
+    #[must_use]
+    pub fn status(&self, now_ms: i64) -> TokenStatus {
+        if self.is_expired(now_ms) {
+            TokenStatus::Expired
+        } else if self.paused {
+            TokenStatus::Paused
+        } else {
+            TokenStatus::Active
+        }
     }
 }
 
@@ -191,6 +265,22 @@ mod tests {
     fn agents_roundtrip_through_storage_encoding() {
         let agents = vec![AgentKind::Claude, AgentKind::Codex];
         assert_eq!(decode_agents(&encode_agents(&agents)), agents);
+    }
+
+    #[test]
+    fn negative_budgets_are_invalid() {
+        let l = Limits {
+            daily_budget_usd: Some(-1.0),
+            ..Limits::default()
+        };
+        assert!(!l.is_valid());
+        assert!(
+            Limits {
+                monthly_budget_usd: Some(5.0),
+                ..Limits::default()
+            }
+            .is_valid()
+        );
     }
 
     #[test]

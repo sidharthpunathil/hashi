@@ -543,6 +543,8 @@ impl App {
             session_mode: form.mode,
             agents: form.agents.agents(),
             expires_in_days: None,
+            note: None,
+            limits: crate::token::Limits::default(),
         };
         match self.state.store.create_token(&new) {
             Ok((token, secret)) => {

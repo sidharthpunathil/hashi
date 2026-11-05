@@ -111,6 +111,8 @@ pub fn ensure_admin(store: &Store) -> Result<Option<String>> {
         session_mode: SessionMode::Stateless,
         agents: AgentKind::ALL.to_vec(),
         expires_in_days: None,
+        note: Some("created on first start".to_owned()),
+        limits: crate::token::Limits::default(),
     })?;
     Ok(Some(secret.raw))
 }

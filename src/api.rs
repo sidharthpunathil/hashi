@@ -596,6 +596,8 @@ pub fn validate_new_token(body: CreateTokenBody) -> ApiResult<NewToken> {
         session_mode: body.session_mode.unwrap_or_default(),
         agents,
         expires_in_days: body.expires_in_days,
+        note: None,
+        limits: crate::token::Limits::default(),
     })
 }
 

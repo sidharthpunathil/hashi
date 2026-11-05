@@ -11,9 +11,15 @@ use std::sync::{Mutex, MutexGuard};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
+mod audit;
+mod invites;
+
+pub use audit::AuditEntry;
+pub use invites::{Invite, InviteState, NewInvite, Redeemed};
+
 use crate::agent::{AgentKind, Usage};
-use crate::token::{self, GeneratedToken, Role, SessionMode, Token};
-use crate::util::now_ms;
+use crate::token::{self, GeneratedToken, Limits, Role, SessionMode, Token};
+use crate::util::{month_start_utc, now_ms};
 
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +138,26 @@ pub struct NewToken {
     pub agents: Vec<AgentKind>,
     /// Lifetime in days, or `None` for no expiry.
     pub expires_in_days: Option<u32>,
+    /// Who or what the token is for.
+    pub note: Option<String>,
+    /// Usage caps.
+    pub limits: Limits,
+}
+
+/// A token's use in the current UTC day and month.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    /// Prompts since the start of the UTC day.
+    pub today_requests: u64,
+    /// Prompts since the start of the UTC month.
+    pub month_requests: u64,
+    /// Reported spend since the start of the UTC day.
+    pub today_cost_usd: f64,
+    /// Reported spend since the start of the UTC month.
+    pub month_cost_usd: f64,
+    /// Prompts queued or running now.
+    pub pending: u64,
 }
 
 /// Input for [`Store::insert_request`].
@@ -184,7 +210,9 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
-const SCHEMA: &str = r"
+/// Version 1: the 0.1.x schema. Statements are idempotent so databases created
+/// before versioning (which report `user_version` 0) upgrade cleanly.
+const SCHEMA_V1: &str = r"
 CREATE TABLE IF NOT EXISTS tokens (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
@@ -226,6 +254,50 @@ CREATE INDEX IF NOT EXISTS idx_requests_queue ON requests(agent, status, created
 CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at);
 ";
 
+/// Version 2: token policy, invites and the audit log.
+const SCHEMA_V2: &str = r"
+ALTER TABLE tokens ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tokens ADD COLUMN note TEXT;
+ALTER TABLE tokens ADD COLUMN daily_requests INTEGER;
+ALTER TABLE tokens ADD COLUMN monthly_requests INTEGER;
+ALTER TABLE tokens ADD COLUMN daily_budget_usd REAL;
+ALTER TABLE tokens ADD COLUMN monthly_budget_usd REAL;
+ALTER TABLE tokens ADD COLUMN max_pending INTEGER;
+CREATE INDEX IF NOT EXISTS idx_requests_token ON requests(token_id, created_at);
+CREATE TABLE IF NOT EXISTS invites (
+    id                    TEXT PRIMARY KEY,
+    hash                  TEXT NOT NULL UNIQUE,
+    label                 TEXT NOT NULL,
+    session_mode          TEXT NOT NULL,
+    agents                TEXT NOT NULL,
+    token_expires_in_days INTEGER,
+    daily_requests        INTEGER,
+    monthly_requests      INTEGER,
+    daily_budget_usd      REAL,
+    monthly_budget_usd    REAL,
+    max_pending           INTEGER,
+    expires_at            INTEGER NOT NULL,
+    created_at            INTEGER NOT NULL,
+    claimed_at            INTEGER,
+    token_id              TEXT REFERENCES tokens(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS audit (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    at     INTEGER NOT NULL,
+    actor  TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit(at);
+";
+
+const MIGRATIONS: [&str; 2] = [SCHEMA_V1, SCHEMA_V2];
+
+const TOKEN_COLUMNS: &str = "id, name, prefix, role, session_mode, agents, expires_at, created_at, \
+     last_used_at, paused, note, daily_requests, monthly_requests, daily_budget_usd, \
+     monthly_budget_usd, max_pending";
+
 const REQUEST_COLUMNS: &str = "id, token_id, token_name, agent, model, message, stateful, status, \
      response, error, input_tokens, output_tokens, cost_usd, created_at, started_at, completed_at";
 
@@ -248,11 +320,11 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5_000)?;
-        conn.execute_batch(SCHEMA)?;
+        migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -270,68 +342,125 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn create_token(&self, new: &NewToken) -> Result<(Token, GeneratedToken)> {
-        let secret = token::generate();
-        let now = now_ms();
-        let token = Token {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: new.name.clone(),
-            prefix: secret.prefix.clone(),
-            role: new.role,
-            session_mode: new.session_mode,
-            agents: new.agents.clone(),
-            expires_at: new.expires_in_days.map(|d| now + i64::from(d) * 86_400_000),
-            created_at: now,
-            last_used_at: None,
-        };
-        self.conn()?.execute(
-            "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, expires_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                token.id,
-                token.name,
-                secret.hash,
-                token.prefix,
-                token.role.as_str(),
-                token.session_mode.as_str(),
-                token::encode_agents(&token.agents),
-                token.expires_at,
-                token.created_at,
-            ],
-        )?;
-        Ok((token, secret))
+        insert_token(&*self.conn()?, new)
     }
 
-    /// Resolves a raw bearer secret to a live token and records the use.
+    /// Resolves a raw bearer secret to an unexpired token and records the use.
+    /// Paused tokens are returned; callers decide what a paused token may do.
     ///
     /// # Errors
     ///
     /// Fails on database errors. Unknown or expired tokens yield `Ok(None)`.
     pub fn authenticate(&self, raw: &str) -> Result<Option<Token>> {
+        let now = now_ms();
+        Ok(self.authenticate_any(raw)?.filter(|t| !t.is_expired(now)))
+    }
+
+    /// Like [`Store::authenticate`], but also returns expired tokens, so they
+    /// can still see why they stopped working.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors. Unknown tokens yield `Ok(None)`.
+    pub fn authenticate_any(&self, raw: &str) -> Result<Option<Token>> {
         let digest = token::hash(raw);
         let conn = self.conn()?;
-        let found = conn
-            .query_row(
-                "SELECT id, name, prefix, role, session_mode, agents, expires_at, created_at, last_used_at
-                 FROM tokens WHERE hash = ?1",
-                [&digest],
-                row_to_token,
-            )
+        let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE hash = ?1");
+        let Some(t) = conn
+            .query_row(&sql, [&digest], row_to_token)
             .optional()?
-            .transpose()?;
+            .transpose()?
+        else {
+            return Ok(None);
+        };
         let now = now_ms();
-        match found {
-            Some(t) if !t.is_expired(now) => {
-                conn.execute(
-                    "UPDATE tokens SET last_used_at = ?1 WHERE id = ?2",
-                    params![now, t.id],
-                )?;
-                Ok(Some(Token {
-                    last_used_at: Some(now),
-                    ..t
-                }))
-            }
-            _ => Ok(None),
-        }
+        conn.execute(
+            "UPDATE tokens SET last_used_at = ?1 WHERE id = ?2",
+            params![now, t.id],
+        )?;
+        Ok(Some(Token {
+            last_used_at: Some(now),
+            ..t
+        }))
+    }
+
+    /// Fetches a token by id.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn get_token(&self, id: &str) -> Result<Option<Token>> {
+        let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
+        self.conn()?
+            .query_row(&sql, [id], row_to_token)
+            .optional()?
+            .transpose()
+    }
+
+    /// Writes a token's editable fields: name, note, pause, expiry and limits.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn save_token_policy(&self, t: &Token) -> Result<()> {
+        let l = t.limits;
+        self.conn()?.execute(
+            "UPDATE tokens SET name = ?1, note = ?2, paused = ?3, expires_at = ?4,
+                 daily_requests = ?5, monthly_requests = ?6, daily_budget_usd = ?7,
+                 monthly_budget_usd = ?8, max_pending = ?9
+             WHERE id = ?10",
+            params![
+                t.name,
+                t.note,
+                t.paused,
+                t.expires_at,
+                l.daily_requests,
+                l.monthly_requests,
+                l.daily_budget_usd,
+                l.monthly_budget_usd,
+                l.max_pending,
+                t.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A token's use in the UTC day and month containing `now_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn token_usage(&self, token_id: &str, now_ms: i64) -> Result<TokenUsage> {
+        let day = crate::util::day_start_utc(now_ms);
+        let month = month_start_utc(now_ms);
+        let row = self.conn()?.query_row(
+            "SELECT
+                 COUNT(CASE WHEN created_at >= ?2 THEN 1 END),
+                 COUNT(CASE WHEN created_at >= ?3 THEN 1 END),
+                 COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost_usd END), 0.0),
+                 COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost_usd END), 0.0),
+                 COUNT(CASE WHEN status IN ('queued', 'running') THEN 1 END)
+             FROM requests
+             WHERE token_id = ?1 AND (created_at >= ?3 OR status IN ('queued', 'running'))",
+            params![token_id, day, month],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        let n = |v: i64| u64::try_from(v).unwrap_or(0);
+        Ok(TokenUsage {
+            today_requests: n(row.0),
+            month_requests: n(row.1),
+            today_cost_usd: row.2,
+            month_cost_usd: row.3,
+            pending: n(row.4),
+        })
     }
 
     /// Lists all tokens, newest first.
@@ -341,10 +470,8 @@ impl Store {
     /// Fails on database errors.
     pub fn list_tokens(&self) -> Result<Vec<Token>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, prefix, role, session_mode, agents, expires_at, created_at, last_used_at
-             FROM tokens ORDER BY created_at DESC",
-        )?;
+        let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens ORDER BY created_at DESC");
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_token)?;
         rows.map(|r| r.map_err(StoreError::from).and_then(|t| t))
             .collect()
@@ -549,7 +676,9 @@ impl Store {
     ///
     /// Fails on database errors.
     pub fn prune(&self, days: u32) -> Result<usize> {
-        let cutoff = now_ms() - i64::from(days) * 86_400_000;
+        let now = now_ms();
+        // Never prune this month's requests: monthly caps are counted from them.
+        let cutoff = (now - i64::from(days) * 86_400_000).min(month_start_utc(now));
         Ok(self.conn()?.execute(
             "DELETE FROM requests WHERE status IN ('completed', 'failed') AND completed_at < ?1",
             [cutoff],
@@ -659,6 +788,67 @@ impl Store {
     }
 }
 
+fn migrate(conn: &mut Connection) -> Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let done = usize::try_from(version).unwrap_or(0);
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(done) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(
+            None,
+            "user_version",
+            i64::try_from(i + 1).unwrap_or(i64::MAX),
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// Inserts a token inside an existing connection or transaction.
+fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedToken)> {
+    let secret = token::generate();
+    let now = now_ms();
+    let token = Token {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: new.name.clone(),
+        prefix: secret.prefix.clone(),
+        role: new.role,
+        session_mode: new.session_mode,
+        agents: new.agents.clone(),
+        expires_at: new.expires_in_days.map(|d| now + i64::from(d) * 86_400_000),
+        created_at: now,
+        last_used_at: None,
+        paused: false,
+        note: new.note.clone(),
+        limits: new.limits,
+    };
+    let l = token.limits;
+    conn.execute(
+        "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, expires_at,
+             created_at, note, daily_requests, monthly_requests, daily_budget_usd,
+             monthly_budget_usd, max_pending)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            token.id,
+            token.name,
+            secret.hash,
+            token.prefix,
+            token.role.as_str(),
+            token.session_mode.as_str(),
+            token::encode_agents(&token.agents),
+            token.expires_at,
+            token.created_at,
+            token.note,
+            l.daily_requests,
+            l.monthly_requests,
+            l.daily_budget_usd,
+            l.monthly_budget_usd,
+            l.max_pending,
+        ],
+    )?;
+    Ok((token, secret))
+}
+
 fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
     let role: String = r.get(3)?;
     let mode: String = r.get(4)?;
@@ -674,6 +864,15 @@ fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
             expires_at: r.get(6)?,
             created_at: r.get(7)?,
             last_used_at: r.get(8)?,
+            paused: r.get(9)?,
+            note: r.get(10)?,
+            limits: Limits {
+                daily_requests: r.get(11)?,
+                monthly_requests: r.get(12)?,
+                daily_budget_usd: r.get(13)?,
+                monthly_budget_usd: r.get(14)?,
+                max_pending: r.get(15)?,
+            },
         })
     };
     Ok(build())
@@ -731,6 +930,8 @@ mod tests {
             session_mode: SessionMode::Stateless,
             agents: AgentKind::ALL.to_vec(),
             expires_in_days: None,
+            note: None,
+            limits: Limits::default(),
         }
     }
 
@@ -745,6 +946,93 @@ mod tests {
         })
         .unwrap();
         id
+    }
+
+    #[test]
+    fn migrates_v1_database_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            // A 0.1.x database: v1 schema, user_version never set.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, created_at)
+                 VALUES ('t1', 'old', ?1, 'hashi_old', 'admin', 'stateless', 'claude,codex', 1)",
+                [token::hash("hashi_old_secret")],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let t = s.authenticate("hashi_old_secret").unwrap().unwrap();
+        assert_eq!(
+            (t.name.as_str(), t.paused, t.limits),
+            ("old", false, Limits::default())
+        );
+        let version: i64 = s
+            .conn()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        // Opening again is a no-op.
+        drop(s);
+        assert!(Store::open(&path).is_ok());
+    }
+
+    #[test]
+    fn paused_token_still_authenticates() {
+        let s = store();
+        let (mut t, secret) = s.create_token(&new_token(Role::User)).unwrap();
+        t.paused = true;
+        s.save_token_policy(&t).unwrap();
+        assert!(s.authenticate(&secret.raw).unwrap().unwrap().paused);
+    }
+
+    #[test]
+    fn save_token_policy_roundtrips_limits() {
+        let s = store();
+        let (mut t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        t.note = Some("for the CI bot".into());
+        t.limits = Limits {
+            daily_requests: Some(10),
+            monthly_requests: Some(100),
+            daily_budget_usd: Some(1.5),
+            monthly_budget_usd: Some(20.0),
+            max_pending: Some(2),
+        };
+        s.save_token_policy(&t).unwrap();
+        let back = s.get_token(&t.id).unwrap().unwrap();
+        assert_eq!((back.note, back.limits), (t.note, t.limits));
+    }
+
+    #[test]
+    fn token_usage_counts_today_and_pending() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let done = enqueue(&s, &t, AgentKind::Claude);
+        s.claim_next(AgentKind::Claude).unwrap();
+        let usage = Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cost_usd: Some(0.25),
+        };
+        s.complete_request(&done, "ok", Some(usage)).unwrap();
+        enqueue(&s, &t, AgentKind::Claude);
+        let u = s.token_usage(&t.id, now_ms()).unwrap();
+        assert_eq!((u.today_requests, u.month_requests, u.pending), (2, 2, 1));
+        assert!((u.today_cost_usd - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prune_keeps_the_current_month() {
+        let s = store();
+        let (t, _) = s.create_token(&new_token(Role::User)).unwrap();
+        let id = enqueue(&s, &t, AgentKind::Claude);
+        s.claim_next(AgentKind::Claude).unwrap();
+        s.complete_request(&id, "ok", None).unwrap();
+        // Zero-day retention would delete everything, but monthly caps need it.
+        assert_eq!(s.prune(0).unwrap(), 0);
     }
 
     #[test]
