@@ -298,15 +298,25 @@ impl Probe for SystemProbe {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
 
         let mut sys = self.sys.lock().ok()?;
+        // Every process is listed, since the run's are found by parent,
+        // group and session, but memory is then read for the run's alone.
         // Threads are not listed as processes of their own, or a
         // multithreaded agent's memory would be counted once per thread.
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+        let seen: Vec<sysinfo::Pid> =
+            crate::agent::tree::members(sys.processes(), pid, true, scope)
+                .into_iter()
+                .collect();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&seen),
+            true,
             ProcessRefreshKind::nothing().with_memory().without_tasks(),
         );
         let procs = sys.processes();
-        let seen = crate::agent::tree::members(procs, pid, true, scope);
         let mut found = false;
         let mut total = 0u64;
         for p in &seen {
