@@ -354,14 +354,17 @@ mod tests {
 
     #[test]
     fn env_sets_pwd_to_the_workspace() {
-        let dir = Path::new("/tmp/hashi-workspace");
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path();
         let env = env(dir);
         let get = |k: &str| {
             env.iter()
                 .find(|(key, _)| key == k)
                 .map(|(_, v)| v.as_str())
         };
-        assert_eq!(get("PWD"), Some("/tmp/hashi-workspace"));
+        // Compare with the platform's own absolute form (a drive letter on Windows).
+        let expected = std::path::absolute(dir).unwrap();
+        assert_eq!(get("PWD"), Some(expected.to_string_lossy().as_ref()));
         assert_eq!(get("OPENCODE_DISABLE_AUTOUPDATE"), Some("1"));
         assert_eq!(get("OPENCODE_DISABLE_PROJECT_CONFIG"), Some("1"));
     }
