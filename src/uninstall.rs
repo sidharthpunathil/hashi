@@ -726,7 +726,13 @@ pub fn execute(
             return Ok(Outcome::Declined(plan));
         }
     }
-    let mut removed = remove_files(&plan, target.exe.as_deref());
+    // Only the binary that is actually running needs the deferred delete;
+    // any other path (an install found elsewhere, or a test's) is removed
+    // directly.
+    let running = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    let mut removed = remove_files(&plan, running.as_deref());
     if let Some((dir, rest)) = &plan.path_entry {
         match write_user_path(rest) {
             Ok(()) => removed

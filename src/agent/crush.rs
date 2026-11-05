@@ -942,14 +942,17 @@ mod tests {
 
     #[test]
     fn account_dir_comes_from_home() {
+        // An absolute path on every platform (`/h` is not one on Windows).
+        let dir = std::env::temp_dir()
+            .join("h")
+            .join("accounts")
+            .join("crush")
+            .join("default");
         let env = EnvOverride {
             remove: vec![],
-            set: account_env(Path::new("/h/accounts/crush/default")),
+            set: account_env(&dir),
         };
-        assert_eq!(
-            account_dir_of(&env),
-            Some(PathBuf::from("/h/accounts/crush/default"))
-        );
+        assert_eq!(account_dir_of(&env), Some(dir));
         assert_eq!(account_dir_of(&EnvOverride::default()), None);
     }
 }

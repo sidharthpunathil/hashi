@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{self as acct, AccountKind};
+use crate::accounts::{self as acct, AccountKind};
 use crate::agent::AgentKind;
 use crate::store::{RemovedAccount, Store};
 
