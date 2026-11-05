@@ -1,0 +1,15 @@
+# Micro benches for docs/performance.md, outside the main build. Unix only.
+# Point the `hashi` path at another checkout to measure it instead.
+[package]
+name = "hashi-micro"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+hashi = { path = "../../.." }
+nix = { version = "0.31.3", default-features = false, features = ["resource"] }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
+tokio = { version = "1.54.1", features = ["rt", "macros"] }

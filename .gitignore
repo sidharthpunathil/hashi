@@ -40,3 +40,8 @@ Thumbs.db
 .claude/
 .agents/
 skills-lock.json
+
+# Micro benches (scripts/perf/micro) resolve and build on their own
+/scripts/perf/micro/Cargo.lock
+/scripts/perf/micro/target/
+__pycache__/
