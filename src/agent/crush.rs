@@ -697,6 +697,7 @@ pub async fn execute(
         text,
         usage: after.as_ref().map(|a| usage(a, before.as_ref())),
         session_id: after.map(|a| a.id),
+        rate_limits: Vec::new(),
     })
 }
 

@@ -1101,6 +1101,8 @@ fn add_project(app: &App, name: &str) {
             default_agent: None,
             models: hashi::projects::ModelMap::new(),
             note: None,
+            account_strategy: None,
+            rotate_at: None,
             created_at: 0,
         })
         .unwrap();

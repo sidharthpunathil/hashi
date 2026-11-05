@@ -173,6 +173,7 @@ async fn start_with(tweak: impl FnOnce(&mut ServerConfig)) -> anyhow::Result<Wor
         tunnel_token: None,
         update_check: false,
         account_cooldown: std::time::Duration::from_secs(3600),
+        usage: Default::default(),
         tailscale: None,
         helpers: server::Helpers {
             tailscale_port: 443,

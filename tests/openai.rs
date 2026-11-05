@@ -99,6 +99,7 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         tailscale: None,
         helpers: Default::default(),
         account_cooldown: std::time::Duration::from_secs(3600),
+        usage: Default::default(),
     };
     tweak(&mut cfg);
 

@@ -201,7 +201,7 @@ pub struct Usage {
 }
 
 /// The useful result of one agent run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentOutput {
     /// Final assistant message.
     pub text: String,
@@ -209,6 +209,33 @@ pub struct AgentOutput {
     pub session_id: Option<String>,
     /// Token accounting.
     pub usage: Option<Usage>,
+    /// Plan rate-limit figures the run reported (Claude Code's
+    /// `rate_limit_event`), in order.
+    pub rate_limits: Vec<RateLimit>,
+}
+
+/// What a plan rate limit said during a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitStatus {
+    /// Under the limit.
+    Allowed,
+    /// Close to it.
+    Warning,
+    /// At it: the request was refused.
+    Rejected,
+}
+
+/// One rate-limit figure a run reported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimit {
+    /// The window, such as `five_hour` or `seven_day_opus`.
+    pub kind: Option<String>,
+    /// Its status.
+    pub status: RateLimitStatus,
+    /// Share used, 0 to 100, when reported.
+    pub used_percent: Option<f64>,
+    /// When it resets, Unix ms.
+    pub resets_at: Option<i64>,
 }
 
 /// Everything that can go wrong while running an agent.
@@ -252,6 +279,17 @@ pub enum AgentError {
     /// The agent ran but reported a failure of its own.
     #[error("{0}")]
     Reported(String),
+    /// The agent said, in its structured output, that the account is at its
+    /// plan limit. Preferred over matching the message text.
+    #[error("{message}")]
+    Limited {
+        /// The agent's own message.
+        message: String,
+        /// When the limit resets, Unix ms, when it said.
+        resets_at: Option<i64>,
+        /// The rate-limit figures the run reported.
+        rate_limits: Vec<RateLimit>,
+    },
     /// The output could not be understood.
     #[error("could not parse agent output: {0}")]
     Parse(String),
@@ -361,8 +399,7 @@ pub async fn execute_in(
         AgentKind::Cursor => cursor::parse_output(&raw.stdout),
         AgentKind::Crush => crush::parse_output(&raw.stdout).map(|text| AgentOutput {
             text,
-            session_id: None,
-            usage: None,
+            ..AgentOutput::default()
         }),
     };
     match parsed {

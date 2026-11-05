@@ -25,7 +25,8 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 | `DELETE` | `/v1/invites/{id}` | admin | Cancel a pending invite |
 | `POST` | `/v1/claim/preview`, `/v1/claim/redeem` | invite code | What an invite grants; use it once |
 | `GET` | `/v1/audit` | admin | Recent sharing and access changes |
-| `GET` | `/v1/accounts` | admin | Accounts per agent, their state and use |
+| `GET` | `/v1/accounts` | admin | Accounts per agent, their state, use and quota left |
+| `POST` | `/v1/accounts/{agent}/{name}/refresh` | admin | Read an account's quota now (at most once a minute) |
 | `GET` `POST` | `/v1/projects` | admin | List projects with their use, or add one |
 | `PATCH` `DELETE` | `/v1/projects/{name}` | admin | Change or remove a project (never its folder) |
 | `POST` | `/mcp` | token | MCP server (JSON-RPC over streamable HTTP). `GET /mcp` answers 405 |
@@ -153,6 +154,8 @@ Admin only. A project is a folder with its own agents, accounts and defaults tha
 | `defaultAgent` | an agent the project allows | the server's default agent |
 | `models` | object, agent to a model name | none |
 | `note` | string, up to 200 chars | none |
+| `accountStrategy` | `in-order`, `most-left` or `soonest-reset` | the server's `--account-strategy` |
+| `rotateAt` | percent used, `50` to `99`, at which runs move off an account | the server's `--rotate-at` |
 
 The path is resolved through symlinks and stored as the real folder. A missing folder, a file, the file system root, a folder inside the Hashi home, an unknown account and a model with unsafe characters are refused with `400`; a taken name with `409`. At most 100 projects can exist.
 
@@ -175,29 +178,60 @@ The path is resolved through symlinks and stored as the real folder. A missing f
 }
 ```
 
-`stats` counts the requests sent by tokens bound to the project and their reported spend, today and this month (UTC). `PATCH /v1/projects/{name}` accepts `path`, `agents`, `accounts`, `defaultAgent` (`null` removes it), `models` and `note`, checked as on create. An edit that would leave a bound token or pending invite with accounts outside the project answers `409 project_in_use`. `DELETE /v1/projects/{name}` answers `409 project_in_use` while tokens or pending invites are bound; `?unbind=true` puts them back on their own workspace first. Neither ever touches the folder.
+`stats` counts the requests sent by tokens bound to the project and their reported spend, today and this month (UTC). `PATCH /v1/projects/{name}` accepts `path`, `agents`, `accounts`, `defaultAgent` (`null` removes it), `models`, `note`, `accountStrategy` and `rotateAt` (`null` goes back to the server's default for either), checked as on create. An edit that would leave a bound token or pending invite with accounts outside the project answers `409 project_in_use`. `DELETE /v1/projects/{name}` answers `409 project_in_use` while tokens or pending invites are bound; `?unbind=true` puts them back on their own workspace first. Neither ever touches the folder.
 
 When a request names no `model`, the project's model for that agent is used, and when it names no `agent`, the project's `defaultAgent`. `GET /v1/ask/{id}` shows the `project` a request ran in.
 
 ## `GET /v1/accounts`
 
-Admin only. Lists every account with its state and use; keys and login files are never part of it.
+Admin only. Lists every account with its state, use and quota; keys, access tokens and login files are never part of it.
 
 ```json
 {
   "accounts": [
     {
       "agent": "claude", "name": "work", "kind": "login",
-      "state": "limited", "limitedUntil": "2026-11-06T15:00:00Z",
+      "state": "ready", "limitedUntil": null,
       "lastUsed": "2026-11-06T14:02:11Z", "createdAt": "2026-11-01T09:00:00Z",
-      "runsToday": 12, "runs": 140, "tokens": 3
+      "runsToday": 12, "runs": 140, "tokens": 3,
+      "usage": [
+        {
+          "key": "five_hour", "label": "5 hours", "usedPercent": 31.0,
+          "resetsAt": "2026-11-06T16:00:00Z", "windowMins": 300,
+          "source": "poll", "observedAt": "2026-11-06T14:05:00Z"
+        },
+        {
+          "key": "seven_day", "label": "week", "usedPercent": 72.0,
+          "resetsAt": "2026-11-09T09:00:00Z", "windowMins": 10080,
+          "source": "run", "observedAt": "2026-11-06T14:02:11Z"
+        }
+      ],
+      "summary": {
+        "headroom": 28, "binding": "week", "state": "ok", "limitedUntil": null,
+        "nextReset": "2026-11-06T16:00:00Z", "weeklyReset": "2026-11-09T09:00:00Z",
+        "plan": "max", "source": "poll", "observedAt": "2026-11-06T14:05:00Z",
+        "note": null, "polledAt": "2026-11-06T14:05:00Z",
+        "costToday": 1.42, "tokensToday": 184000
+      }
     }
   ],
-  "perAgent": { "claude": 1, "codex": 0, "gemini": 0, "opencode": 0, "qwen": 0, "cursor": 0 }
+  "perAgent": { "claude": 1, "codex": 0, "gemini": 0, "opencode": 0, "qwen": 0, "cursor": 0 },
+  "strategy": "in-order",
+  "rotateAt": 90
 }
 ```
 
-`kind` is `login`, `api-key`, `oauth-token` or `default` (your own login, listed once a token that names it has used it). `state` is `ready`, `limited` (with `limitedUntil`) or `disabled`. `tokens` counts the tokens whose list includes the account, and `perAgent` the accounts each agent has besides `default`.
+`kind` is `login`, `api-key`, `oauth-token` or `default` (your own login, listed once a token that names it has used it, or once its quota has been read). `state` is `ready`, `limited` (with `limitedUntil`) or `disabled`. `tokens` counts the tokens whose list includes the account, and `perAgent` the accounts each agent has besides `default`. `strategy` and `rotateAt` are the server's defaults.
+
+`usage` has one entry per quota window, with `source` `poll` (a read of the live quota), `run` (a Claude Code run's `rate_limit_event`) or `error` (a run that failed at the limit, counted as fully used until `resetsAt`). In `summary`, `headroom` is 100 minus the highest `usedPercent` (whole percent, `null` when nothing is known), `binding` names that window, and `state` is `ok`, `warning` (at or above the server's `rotateAt`), `limited` (until `limitedUntil`) or `unknown`. `note` says why there are no figures, such as "unknown, refreshes on its next run". `costToday` and `tokensToday` are what this account's runs reported today (UTC).
+
+None of this is shown to token holders: `/v1/me`, the MCP tools and the OpenAI-compatible responses have no usage fields.
+
+## `POST /v1/accounts/{agent}/{name}/refresh`
+
+Admin only. Reads a Claude Code or Codex sign-in's quota now (the default account or a login account), records it and answers `{"ok": true, "account": {...}}` with the account as `GET /v1/accounts` shows it. A read that gives no figures still answers `200`, with `"ok": false`, an `error` on the account and its `summary.note`. Each account is read at most once a minute: sooner answers `429 rate_limited`. A run on the account in progress answers `409 account_busy`; an unknown agent, an API-key account or an agent without live quota answers `400`. The token used for the read is never refreshed, logged or returned. Refreshes are audited as `account.refresh`.
+
+`GET /v1/tokens` lists each token's `conversations`: `[{"agent", "account", "project", "updatedAt"}]`, most recent first, so admins see which account each stateful conversation is on.
 
 ## MCP
 

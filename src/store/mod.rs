@@ -18,11 +18,13 @@ mod audit;
 mod cancel;
 mod invites;
 mod projects;
+mod usage;
 
 pub use accounts::{AccountState, AccountStatus};
 pub use audit::AuditEntry;
 pub use invites::{INVITE_PREFIX, Invite, InviteState, NewInvite, Redeemed};
 pub use projects::{ProjectStats, RemovedProject};
+pub use usage::{Conversation, PollStatus, Spend};
 
 use crate::accounts::{self as acct, AccountMap};
 use crate::agent::{AgentKind, Usage};
@@ -482,7 +484,39 @@ DROP TABLE sessions;
 ALTER TABLE sessions_v5 RENAME TO sessions;
 ";
 
-const MIGRATIONS: [&str; 5] = [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5];
+/// Version 6: usage limits. Each account's quota windows as last seen
+/// (from a poll, a run or a limit error), the state of the last read of its
+/// live usage, and each project's account strategy and rotate threshold
+/// (`NULL` uses the server's default).
+const SCHEMA_V6: &str = r"
+CREATE TABLE IF NOT EXISTS usage (
+    agent        TEXT NOT NULL,
+    account      TEXT NOT NULL,
+    window       TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    used_percent REAL NOT NULL,
+    resets_at    INTEGER,
+    window_mins  INTEGER,
+    source       TEXT NOT NULL,
+    observed_at  INTEGER NOT NULL,
+    PRIMARY KEY (agent, account, window)
+);
+CREATE TABLE IF NOT EXISTS usage_polls (
+    agent        TEXT NOT NULL,
+    account      TEXT NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    ok_at        INTEGER,
+    plan         TEXT,
+    note         TEXT,
+    PRIMARY KEY (agent, account)
+);
+ALTER TABLE projects ADD COLUMN account_strategy TEXT;
+ALTER TABLE projects ADD COLUMN rotate_at INTEGER;
+";
+
+const MIGRATIONS: [&str; 6] = [
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6,
+];
 
 /// Usage of token `?1` since day start `?2` and month start `?3`. Every
 /// column it touches is in `idx_requests_usage`.
@@ -1582,7 +1616,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         // Opening again is a no-op.
         drop(s);
         assert!(Store::open(&path).is_ok());
@@ -1621,7 +1655,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 2).unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 5);
+        assert_eq!(s.schema_version().unwrap(), 6);
         let conn = s.conn().unwrap();
         let mode: i64 = conn
             .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
@@ -1671,7 +1705,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 5);
+        assert_eq!(s.schema_version().unwrap(), 6);
         let t = s.get_token("t1").unwrap().unwrap();
         assert!(t.accounts.is_empty());
         assert_eq!(
@@ -1739,7 +1773,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 5);
+        assert_eq!(s.schema_version().unwrap(), 6);
         let t = s.get_token("t1").unwrap().unwrap();
         assert_eq!(t.project, None);
         assert_eq!(t.accounts[&AgentKind::Claude], ["work"]);
@@ -1768,6 +1802,104 @@ mod tests {
             .execute("DELETE FROM tokens WHERE id = 't1'", [])
             .unwrap();
         assert!(s.session("t1", AgentKind::Claude).unwrap().is_none());
+        drop(s);
+        assert!(Store::open(&path).is_ok(), "opening again is a no-op");
+    }
+
+    #[test]
+    fn migrates_v5_database_to_v6_with_usage_tables_and_project_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for sql in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5] {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.pragma_update(None, "user_version", 5).unwrap();
+            conn.execute(
+                "INSERT INTO projects (name, path, agents, accounts, created_at)
+                 VALUES ('api', '/srv/api', 'claude', '{\"claude\":[\"work\"]}', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO accounts (agent, name, kind, created_at)
+                 VALUES ('claude', 'work', 'login', 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, created_at,
+                     project)
+                 VALUES ('t1', 'old', ?1, 'hashi_old', 'user', 'stateful', 'claude', 1, 'api')",
+                [token::hash("hashi_old_secret")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (token_id, agent, account, project, agent_session_id,
+                     updated_at)
+                 VALUES ('t1', 'claude', 'work', 'api', 'sess-w', 5)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.schema_version().unwrap(), 6);
+        // Existing projects keep the server's defaults.
+        let p = s.get_project("api").unwrap().unwrap();
+        assert_eq!((p.account_strategy, p.rotate_at), (None, None));
+        assert_eq!(p.accounts[&AgentKind::Claude], ["work"]);
+        // The new columns and tables work.
+        let mut p2 = p;
+        p2.account_strategy = Some(crate::usage::Strategy::SoonestReset);
+        p2.rotate_at = Some(75);
+        assert!(s.save_project(&p2).unwrap());
+        let back = s.get_project("api").unwrap().unwrap();
+        assert_eq!(
+            (back.account_strategy, back.rotate_at),
+            (Some(crate::usage::Strategy::SoonestReset), Some(75))
+        );
+        assert!(
+            s.usage_windows(AgentKind::Claude, "work")
+                .unwrap()
+                .is_empty()
+        );
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[crate::usage::Window::new(
+                "five_hour",
+                "5 hours",
+                12.0,
+                None,
+                Some(300),
+                crate::usage::Source::Poll,
+            )],
+        )
+        .unwrap();
+        assert_eq!(s.usage_windows(AgentKind::Claude, "work").unwrap().len(), 1);
+        // Sessions and accounts are untouched.
+        assert_eq!(
+            s.project_session("t1", AgentKind::Claude, "work", "api")
+                .unwrap()
+                .as_deref(),
+            Some("sess-w")
+        );
+        assert_eq!(
+            s.latest_conversation("t1", AgentKind::Claude, "api", &["work".to_owned()])
+                .unwrap()
+                .as_deref(),
+            Some("work")
+        );
+        // Removing the account takes its usage with it.
+        s.remove_account(AgentKind::Claude, "work").unwrap();
+        assert!(
+            s.usage_windows(AgentKind::Claude, "work")
+                .unwrap()
+                .is_empty()
+        );
         drop(s);
         assert!(Store::open(&path).is_ok(), "opening again is a no-op");
     }

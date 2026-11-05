@@ -1,11 +1,13 @@
-//! Claude Code backend: `claude -p --output-format json`.
+//! Claude Code backend: `claude -p --output-format stream-json --verbose`.
 
 use std::ffi::OsString;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::{
-    AgentConfig, AgentError, AgentOutput, Invocation, Usage, has_flag, neutralize_slash_command,
+    AgentConfig, AgentError, AgentOutput, Invocation, RateLimit, RateLimitStatus, Usage, has_flag,
+    neutralize_slash_command,
 };
 
 /// Extra environment for the child. None needed.
@@ -37,7 +39,8 @@ pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "-p".into(),
         "--output-format".into(),
-        "json".into(),
+        "stream-json".into(),
+        "--verbose".into(),
         "--max-turns".into(),
         cfg.max_turns.to_string().into(),
     ];
@@ -95,20 +98,92 @@ struct RawUsage {
     output_tokens: u64,
 }
 
-/// Parses the single JSON result object Claude prints in `json` output mode.
+/// `rate_limit_event.rate_limit_info`, as the Agent SDK types declare it
+/// (`SDKRateLimitInfo`). Only the fields Hashi reads.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawRateLimit {
+    status: Option<String>,
+    /// Unix seconds.
+    resets_at: Option<f64>,
+    rate_limit_type: Option<String>,
+    utilization: Option<f64>,
+}
+
+/// A `rate_limit_event`'s figures. Claude Code builds the event from the
+/// `anthropic-ratelimit-unified-*-utilization` response headers, which are
+/// fractions from 0 to 1, so `utilization` is scaled to a percent. (The
+/// separate usage endpoint reports 0 to 100; see `usage::claude`.)
+fn rate_limit(info: &Value) -> Option<RateLimit> {
+    let raw: RawRateLimit = serde_json::from_value(info.clone()).ok()?;
+    let status = match raw.status.as_deref()? {
+        "allowed" => RateLimitStatus::Allowed,
+        "allowed_warning" => RateLimitStatus::Warning,
+        "rejected" => RateLimitStatus::Rejected,
+        _ => return None,
+    };
+    let used_percent = raw
+        .utilization
+        .filter(|u| u.is_finite() && *u >= 0.0)
+        .map(|u| (u * 100.0).min(100.0));
+    #[allow(clippy::cast_possible_truncation)]
+    let resets_at = raw
+        .resets_at
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| (s * 1_000.0) as i64);
+    Some(RateLimit {
+        kind: raw.rate_limit_type.filter(|k| super::is_safe_arg(k)),
+        status,
+        used_percent,
+        resets_at,
+    })
+}
+
+/// Parses Claude Code's `stream-json` output: one JSON message per line.
+///
+/// The answer, session and usage come from the `result` message, exactly
+/// as they did from the single object of `json` output (which still
+/// parses: a line without a `type` counts as the result). Each
+/// `rate_limit_event` becomes one of [`AgentOutput::rate_limits`]. A failed
+/// run whose stream has a `rejected` rate limit, or an assistant message
+/// with `error: "rate_limit"`, is [`AgentError::Limited`] with the reset
+/// time.
 ///
 /// # Errors
 ///
-/// Returns [`AgentError::Parse`] for malformed output and
+/// Returns [`AgentError::Parse`] for output without a result,
+/// [`AgentError::Limited`] for a run refused at the plan limit and
 /// [`AgentError::Reported`] when Claude flags the run as an error.
 pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
-    // Some versions print diagnostics before the result; the result object is
-    // always the last JSON line.
-    let line = stdout
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| l.starts_with('{'))
+    let mut result: Option<&str> = None;
+    let mut untyped: Option<&str> = None;
+    let mut rate_limits = Vec::new();
+    let mut assistant_limited = false;
+    // Diagnostics may come before or between the messages; only JSON
+    // objects count.
+    for line in stdout.lines().map(str::trim).filter(|l| l.starts_with('{')) {
+        let Ok(msg) = serde_json::from_str::<Value>(line) else {
+            untyped = Some(line);
+            continue;
+        };
+        match msg.get("type").and_then(Value::as_str) {
+            Some("result") => result = Some(line),
+            Some("rate_limit_event") => {
+                if let Some(l) = msg.get("rate_limit_info").and_then(rate_limit) {
+                    rate_limits.push(l);
+                }
+            }
+            Some("assistant") => {
+                if msg.get("error").and_then(Value::as_str) == Some("rate_limit") {
+                    assistant_limited = true;
+                }
+            }
+            Some(_) => {}
+            None => untyped = Some(line),
+        }
+    }
+    let line = result
+        .or(untyped)
         .ok_or_else(|| AgentError::Parse("no JSON result in output".to_owned()))?;
     let env: ResultEnvelope =
         serde_json::from_str(line).map_err(|e| AgentError::Parse(e.to_string()))?;
@@ -125,6 +200,19 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
             .filter(|r| !r.trim().is_empty())
             .or(env.subtype)
             .unwrap_or_else(|| "Claude reported an error".to_owned());
+        let rejected = rate_limits
+            .iter()
+            .filter(|l| l.status == RateLimitStatus::Rejected);
+        let limited_reset = rejected.clone().filter_map(|l| l.resets_at).max();
+        if assistant_limited || rejected.count() > 0 {
+            let resets_at =
+                limited_reset.or_else(|| rate_limits.iter().filter_map(|l| l.resets_at).max());
+            return Err(AgentError::Limited {
+                message: reason,
+                resets_at,
+                rate_limits,
+            });
+        }
         return Err(AgentError::Reported(reason));
     }
 
@@ -132,6 +220,7 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
         text: env.result.unwrap_or_default(),
         session_id: env.session_id,
         usage,
+        rate_limits,
     })
 }
 
@@ -219,7 +308,8 @@ mod tests {
             [
                 "-p",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--max-turns",
                 "10",
                 "--setting-sources",
@@ -316,6 +406,98 @@ mod tests {
         let usage = out.usage.unwrap();
         assert_eq!(usage.output_tokens, 4);
         assert_eq!(usage.input_tokens, 2 + 21_083 + 11_873);
+    }
+
+    const STREAM: &str = include_str!("../../tests/fixtures/claude_stream_success.jsonl");
+    const REJECTED: &str = include_str!("../../tests/fixtures/claude_stream_rejected.jsonl");
+
+    #[test]
+    fn a_stream_gives_the_same_answer_and_usage_as_json_output() {
+        let json = parse_output(SUCCESS).unwrap();
+        let stream = parse_output(STREAM).unwrap();
+        assert_eq!(stream.text, json.text);
+        assert_eq!(stream.session_id, json.session_id);
+        assert_eq!(stream.usage, json.usage);
+        assert!(json.rate_limits.is_empty());
+        // A message after the result (session state) does not hide it.
+        assert_eq!(stream.text, "pong");
+    }
+
+    #[test]
+    fn rate_limit_events_are_read() {
+        let out = parse_output(STREAM).unwrap();
+        assert_eq!(out.rate_limits.len(), 2);
+        let five = &out.rate_limits[0];
+        assert_eq!(five.kind.as_deref(), Some("five_hour"));
+        assert_eq!(five.status, RateLimitStatus::Warning);
+        assert!((five.used_percent.unwrap() - 82.0).abs() < 1e-9);
+        assert_eq!(five.resets_at, Some(1_800_018_000_000));
+        assert_eq!(out.rate_limits[1].kind.as_deref(), Some("seven_day"));
+        assert_eq!(out.rate_limits[1].status, RateLimitStatus::Allowed);
+    }
+
+    #[test]
+    fn a_rejected_stream_is_a_limit_with_its_reset() {
+        match parse_output(REJECTED).unwrap_err() {
+            AgentError::Limited {
+                message,
+                resets_at,
+                rate_limits,
+            } => {
+                assert!(message.contains("hit your session limit"), "{message}");
+                assert_eq!(resets_at, Some(1_800_018_000_000));
+                assert_eq!(rate_limits[0].status, RateLimitStatus::Rejected);
+                assert_eq!(rate_limits[0].used_percent, Some(100.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        // The text still reads as a limit message for the fallback path.
+        assert!(limit_hit(&parse_output(REJECTED).unwrap_err().to_string()).is_some());
+    }
+
+    #[test]
+    fn an_assistant_rate_limit_error_alone_is_a_limit() {
+        let stream = concat!(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]},"error":"rate_limit","session_id":"s"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: Request rejected (429)","session_id":"s"}"#,
+        );
+        assert!(matches!(
+            parse_output(stream),
+            Err(AgentError::Limited {
+                resets_at: None,
+                ..
+            })
+        ));
+        // Other assistant errors stay ordinary failures.
+        let other = stream.replace("rate_limit", "authentication_failed");
+        assert!(matches!(parse_output(&other), Err(AgentError::Reported(_))));
+    }
+
+    #[test]
+    fn utilization_fraction_becomes_a_percent_and_bogus_events_are_skipped() {
+        let stream = concat!(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day_opus","utilization":0.645}}"#,
+            "\n",
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"bogus"}}"#,
+            "\n",
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","rateLimitType":"five_hour","utilization":3.0}}"#,
+            "\n",
+            r#"{"type":"result","is_error":false,"result":"ok","session_id":"s"}"#,
+        );
+        let out = parse_output(stream).unwrap();
+        assert_eq!(out.rate_limits.len(), 2);
+        let first = out.rate_limits[0].used_percent.unwrap();
+        assert!((first - 64.5).abs() < 1e-9, "{first}");
+        assert_eq!(out.rate_limits[0].resets_at, None);
+        // Out-of-range values are clamped rather than trusted.
+        assert_eq!(out.rate_limits[1].used_percent, Some(100.0));
+    }
+
+    #[test]
+    fn a_stream_without_a_result_is_a_parse_error() {
+        let stream = r#"{"type":"system","subtype":"init","session_id":"s"}"#;
+        assert!(matches!(parse_output(stream), Err(AgentError::Parse(_))));
     }
 
     #[test]

@@ -198,6 +198,7 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
             output_tokens: u.output_tokens,
             cost_usd: None,
         }),
+        rate_limits: Vec::new(),
     })
 }
 

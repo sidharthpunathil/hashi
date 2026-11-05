@@ -15,6 +15,7 @@ use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
 use crate::projects::{self as proj, ModelMap, Project};
 use crate::store::{RemovedProject, Store};
+use crate::usage::Strategy;
 use crate::util::{now_ms, rfc3339};
 
 /// Body of `POST /v1/projects`.
@@ -40,6 +41,13 @@ pub struct CreateProjectBody {
     /// Who or what the project is for.
     #[serde(default)]
     pub note: Option<String>,
+    /// How runs choose among an agent's accounts. Default: the server's.
+    #[serde(default)]
+    pub account_strategy: Option<Strategy>,
+    /// Percent used, 50 to 99, at which runs move off an account. Default:
+    /// the server's.
+    #[serde(default)]
+    pub rotate_at: Option<u8>,
 }
 
 /// Body of `PATCH /v1/projects/{name}`. Omitted fields are left as they are.
@@ -64,6 +72,12 @@ pub struct UpdateProjectBody {
     /// New note; an empty string clears it.
     #[serde(default)]
     pub note: Option<String>,
+    /// New account strategy; `null` goes back to the server's default.
+    #[serde(default, deserialize_with = "super::tokens::present")]
+    pub account_strategy: Option<Option<Strategy>>,
+    /// New rotate threshold; `null` goes back to the server's default.
+    #[serde(default, deserialize_with = "super::tokens::present")]
+    pub rotate_at: Option<Option<u8>>,
 }
 
 /// Query of `DELETE /v1/projects/{name}`.
@@ -251,6 +265,8 @@ pub(super) async fn create(
         default_agent: body.default_agent,
         models: body.models.unwrap_or_default(),
         note: body.note,
+        account_strategy: body.account_strategy,
+        rotate_at: body.rotate_at,
         created_at: now_ms(),
     };
     let home = state.store.data_dir();
@@ -346,6 +362,20 @@ pub fn apply_update(
         p.note = Some(note);
         changes.push("note".to_owned());
     }
+    if let Some(strategy) = body.account_strategy {
+        p.account_strategy = strategy;
+        changes.push(format!(
+            "account strategy {}",
+            strategy.map_or("server default", Strategy::as_str)
+        ));
+    }
+    if let Some(pct) = body.rotate_at {
+        p.rotate_at = pct;
+        changes.push(match pct {
+            Some(n) => format!("rotate at {n}%"),
+            None => "rotate at server default".to_owned(),
+        });
+    }
     if changes.is_empty() {
         return Err(ApiError::BadRequest("nothing to update".to_owned()));
     }
@@ -409,6 +439,8 @@ mod tests {
             default_agent: None,
             models: ModelMap::new(),
             note: None,
+            account_strategy: None,
+            rotate_at: None,
             created_at: 0,
         }
     }

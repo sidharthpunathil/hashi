@@ -281,3 +281,132 @@ fn tokens_and_invites_take_accounts_and_removal_takes_them_off() {
         .collect();
     assert!(audit.iter().any(|a| a == "account.remove"), "{audit:?}");
 }
+
+#[test]
+fn account_usage_shows_bars_resets_and_unknowns_without_reading_anything() {
+    use hashi::agent::AgentKind;
+    use hashi::usage::{Source, Window};
+    let cli = Cli::new();
+    assert!(
+        cli.ok(&["account", "usage"]).contains("no usage yet"),
+        "nothing read yet"
+    );
+    cli.ok(&["account", "add", "claude", "work", "--yes"]);
+    cli.ok(&["account", "add", "claude", "home", "--yes"]);
+    let store = hashi::server::open_store(&cli.home()).unwrap();
+    let in_2h = hashi::util::now_ms() + 2 * 3_600_000 + 60_000;
+    store
+        .replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[
+                Window::new(
+                    "five_hour",
+                    "5 hours",
+                    31.0,
+                    Some(in_2h),
+                    Some(300),
+                    Source::Poll,
+                ),
+                Window::new("seven_day", "week", 92.0, None, Some(10_080), Source::Poll),
+            ],
+        )
+        .unwrap();
+    store
+        .set_poll_status(AgentKind::Claude, "work", true, Some("max"), None)
+        .unwrap();
+    store
+        .set_poll_status(
+            AgentKind::Claude,
+            "home",
+            false,
+            None,
+            Some("unknown, refreshes on its next run"),
+        )
+        .unwrap();
+    drop(store);
+
+    let out = cli.ok(&["account", "usage"]);
+    assert!(
+        out.contains("claude:work  max  8% left (warning)  (poll,"),
+        "{out}"
+    );
+    assert!(out.contains("5 hours"), "{out}");
+    assert!(out.contains("31%") && out.contains("resets in 2h"), "{out}");
+    assert!(out.contains("week") && out.contains("92%"), "{out}");
+    assert!(out.contains("claude:home  unknown"), "{out}");
+    assert!(out.contains("refreshes on its next run"), "{out}");
+    assert!(out.contains("0 run(s) today"), "{out}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&cli.ok(&["account", "usage", "--json", "--agent", "claude"]))
+            .unwrap();
+    let work = json["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "work")
+        .unwrap();
+    assert_eq!(work["summary"]["headroom"], 8);
+    assert_eq!(work["summary"]["state"], "warning");
+    assert_eq!(work["usage"].as_array().unwrap().len(), 2);
+    let other = cli.ok(&["account", "usage", "--agent", "codex"]);
+    assert!(other.contains("no usage yet"), "{other}");
+
+    let list = cli.ok(&["account", "list"]);
+    assert!(
+        list.contains("USAGE") && list.contains("8% left (warning)"),
+        "{list}"
+    );
+    assert!(list.contains("unknown"), "{list}");
+}
+
+#[test]
+fn projects_take_a_strategy_and_threshold() {
+    let cli = Cli::new();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().display().to_string();
+    let out = cli.ok(&[
+        "project",
+        "add",
+        "api",
+        &path,
+        "--agents",
+        "claude",
+        "--account-strategy",
+        "most-left",
+        "--rotate-at",
+        "80",
+    ]);
+    assert!(out.contains("added project api"), "{out}");
+    let list = cli.ok(&["project", "list"]);
+    assert!(list.contains("most-left at 80%"), "{list}");
+    let out = cli.ok(&["project", "update", "api", "--clear-rotate-at"]);
+    assert!(out.contains("rotate at server default"), "{out}");
+    assert!(
+        cli.ok(&["project", "list"])
+            .contains("most-left at default")
+    );
+    let out = cli.ok(&[
+        "project",
+        "update",
+        "api",
+        "--account-strategy",
+        "soonest-reset",
+    ]);
+    assert!(out.contains("account strategy soonest-reset"), "{out}");
+    assert!(
+        cli.fails(&["project", "update", "api", "--rotate-at", "40"])
+            .contains("40")
+    );
+    assert!(
+        cli.fails(&["project", "update", "api", "--account-strategy", "random"])
+            .contains("unknown account strategy")
+    );
+    let store = hashi::server::open_store(&cli.home()).unwrap();
+    let p = store.get_project("api").unwrap().unwrap();
+    assert_eq!(
+        (p.account_strategy, p.rotate_at),
+        (Some(hashi::usage::Strategy::SoonestReset), None)
+    );
+}

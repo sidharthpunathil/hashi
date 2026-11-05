@@ -35,6 +35,9 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--queue-limit` | `HASHI_QUEUE_LIMIT` | `100` pending requests |
 | `--retention-days` | `HASHI_RETENTION_DAYS` | `14` |
 | `--account-cooldown` | `HASHI_ACCOUNT_COOLDOWN` | `60` minutes. How long an account that hit its usage limit is skipped when the agent's message gives no reset time (1 to 10080) |
+| `--account-strategy` | `HASHI_ACCOUNT_STRATEGY` | `in-order`. How runs choose among a token's accounts when its project sets nothing: `in-order`, `most-left` or `soonest-reset`. See [usage and strategies](#usage-and-strategies) |
+| `--rotate-at` | `HASHI_ROTATE_AT` | `90` percent used, `50` to `99`. Runs move off an account at this point, when its project sets nothing |
+| `--no-usage-poll` | `HASHI_USAGE_POLL=0` | off. Stop reading Claude Code and Codex quota in the background. Runs and their limit errors are still recorded |
 | `--claude-bin` | `HASHI_CLAUDE_BIN` | found on `PATH` |
 | `--codex-bin` | `HASHI_CODEX_BIN` | found on `PATH` |
 | `--gemini-bin`, `--opencode-bin`, `--qwen-bin`, `--cursor-bin` | `HASHI_GEMINI_BIN`, `HASHI_OPENCODE_BIN`, `HASHI_QWEN_BIN`, `HASHI_CURSOR_BIN` | found on `PATH` |
@@ -132,6 +135,44 @@ Limits are tracked only for tokens that list accounts for the agent.
 
 **Seeing it.** Admins see the account that ran each request in `GET /v1/ask/{id}` and the dashboard's request detail, each token's accounts at the foot of the tokens view, and the number of accounts on each agent card. `GET /v1/accounts` returns the list with its state and counts.
 
+### Usage and strategies
+
+```bash
+hashi account usage                    # a bar per window with its percent and reset, the plan, source and age, the state
+hashi account usage --agent codex      # one agent
+hashi account usage --refresh          # read Claude Code and Codex quota now first
+hashi account usage --json             # each account as GET /v1/accounts shows it
+hashi account list                     # the USAGE column: "62% left", "8% left (warning)", "limited until ..." or "unknown"
+```
+
+**Where the figures come from.** Each window an account has (Claude Code's 5 hours, week, week for Opus and Sonnet, and the per-model weekly ones; Codex's primary and secondary windows) is kept with its used percent, reset time and source:
+
+- `poll`: a read of the plan's live quota. While `hashi serve` runs, each Claude Code and Codex account that can take runs (the default account, and every enabled login account bound to a token or project) is read every five minutes plus up to a minute of jitter, and again about a minute after each run on it, never more than once a minute. Claude Code is read from its OAuth usage endpoint with the account's own token (see the [security model](security-model.md#usage-limits)); Codex through a short-lived `codex app-server` started with the account's `CODEX_HOME`, which must report that same directory back. A Codex read is skipped while a run on the account is active, so two token refreshes never race. A 429 or 403 waits for `retry-after` (five minutes without one, an hour at most), and a rejected sign-in waits an hour.
+- `run`: Claude Code runs use `--output-format stream-json --verbose`, and each `rate_limit_event` updates the account. A `rejected` limit, or an assistant message with `error: "rate_limit"`, marks the account limited until the event's reset time, which is preferred over reading the message text.
+- `error`: a run that failed with the agent's limit message counts as fully used until its reset.
+
+Accounts without live figures (API keys, Gemini CLI, opencode, Qwen Code, Cursor CLI and Crush) show `unknown`, with their runs, tokens and reported cost today. A Claude Code sign-in whose token has expired shows "unknown, refreshes on its next run": Hashi never refreshes it, and Claude Code renews it itself when it next runs.
+
+**Summary.** The *headroom* is 100 minus the highest used percent across windows, the *binding window* is that window, and the *state* is `ok`, `warning` (at or above the rotate threshold), `limited` (until a time) or `unknown`.
+
+**Strategies.** Set per project with `--account-strategy`, or for the server with `hashi serve --account-strategy`:
+
+- `in-order` (the default): the first available account in the list, failing over on limits.
+- `most-left`: the available account with the most headroom. Unknown headroom ranks after every known account under the threshold and ahead of the ones over it. List order breaks ties.
+- `soonest-reset`: among accounts under the threshold, the one whose weekly window resets soonest, so quota that would expire unused is spent first. Without any known weekly reset it works as `most-left`.
+
+For all three, an account at or above the rotate threshold (`--rotate-at`, 90% by default) is skipped while any account is under it; when every account is over, the run goes to the one with the most headroom rather than waiting; limited and disabled accounts are never picked.
+
+```bash
+hashi project add api ~/code/api --account claude=work,personal --account-strategy most-left --rotate-at 80
+hashi project update api --account-strategy soonest-reset
+hashi project update api --clear-account-strategy --clear-rotate-at   # back to the server's defaults
+```
+
+**Sessions.** A stateful conversation stays on its account until that account reaches the threshold or its limit; only then does the next message start a fresh conversation on the newly chosen account. A new conversation always starts on the strategy's choice. `GET /v1/tokens` lists, for each token, which account each of its conversations is on.
+
+**Dashboard.** Agent cards show the best account's headroom, and the log and a toast say when an account crosses the threshold, is limited or recovers. `hashi serve --headless` prints the same lines.
+
 ### Projects
 
 A project is a folder on this machine with its own agents, accounts and defaults. Bind tokens and invites to it instead of choosing those on each one.
@@ -139,8 +180,9 @@ A project is a folder on this machine with its own agents, accounts and defaults
 | Command | What it does |
 |---|---|
 | `hashi project add <name> <path> [--agents claude,codex] [--account claude=work,personal]... [--default-agent claude] [--model claude=sonnet]... [--note ..]` | Add a project. `<path>` must be an existing folder, outside the Hashi home; symlinks are resolved. Without `--agents`, the installed agents |
-| `hashi project update <name> [--path ..] [--agents ..] [--account ..]... [--clear-accounts] [--default-agent ..] [--clear-default-agent] [--model ..]... [--clear-models] [--note ..]` | Change a project. Refused if a bound token or pending invite would be left with accounts outside it |
-| `hashi project list` | Projects with their bound tokens, prompts today and this month, spend this month, agents, accounts, models and folder |
+| `hashi project update <name> [--path ..] [--agents ..] [--account ..]... [--clear-accounts] [--default-agent ..] [--clear-default-agent] [--model ..]... [--clear-models] [--note ..] [--account-strategy ..] [--clear-account-strategy] [--rotate-at ..] [--clear-rotate-at]` | Change a project. Refused if a bound token or pending invite would be left with accounts outside it |
+| `--account-strategy in-order\|most-left\|soonest-reset`, `--rotate-at <50-99>` | On `project add` and `project update`: how the project's runs choose accounts and when they move off one. Default: the server's. See [usage and strategies](#usage-and-strategies) |
+| `hashi project list` | Projects with their bound tokens, prompts today and this month, spend this month, agents, accounts, models, strategy and folder |
 | `hashi project remove <name> [--unbind]` | Remove a project. Refused while tokens or pending invites are bound, unless `--unbind` puts them back on their own workspace. The folder is never touched |
 | `hashi token create <name> --project <name>` | Bind a new token. Also on `hashi share` |
 | `hashi token update <id> --project <name>` or `--clear-project` | Bind a token, or put it back on its own workspace |

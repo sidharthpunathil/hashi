@@ -17,7 +17,8 @@
 //! | `PATCH`  | `/v1/tokens/{id}`     | admin | Pause, resume, extend, set limits  |
 //! | `DELETE` | `/v1/tokens/{id}`     | admin | Revoke a token                     |
 //! | `GET`    | `/v1/audit`           | admin | Recent sharing and access changes  |
-//! | `GET`    | `/v1/accounts`        | admin | Accounts per agent and their state |
+//! | `GET`    | `/v1/accounts`        | admin | Accounts, their state and usage    |
+//! | `POST`   | `/v1/accounts/{agent}/{name}/refresh` | admin | Read usage now |
 //! | `GET`    | `/v1/projects`        | admin | Projects with their use today      |
 //! | `POST`   | `/v1/projects`        | admin | Add a project                      |
 //! | `PATCH`  | `/v1/projects/{name}` | admin | Change a project                   |
@@ -255,6 +256,7 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
         )
         .route("/v1/audit", get(tokens::audit))
         .route("/v1/accounts", get(accounts))
+        .route("/v1/accounts/{agent}/{name}/refresh", post(refresh_account))
         .route("/v1/projects", get(projects::list).post(projects::create))
         .route(
             "/v1/projects/{name}",
@@ -668,9 +670,47 @@ pub fn account_json(
     a: &crate::store::AccountState,
     now: i64,
 ) -> ApiResult<serde_json::Value> {
+    account_json_with(store, a, now, crate::usage::DEFAULT_ROTATE_AT)
+}
+
+/// [`account_json`] with the rotate threshold that decides `warning`:
+/// the account's state and counts, its `usage` windows, its usage
+/// `summary` (headroom, binding window, next reset, state, plan, source
+/// and age) and its spend today.
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub fn account_json_with(
+    store: &Store,
+    a: &crate::store::AccountState,
+    now: i64,
+    rotate_at: u8,
+) -> ApiResult<serde_json::Value> {
     let status = a.status(now);
     let (today, total) = store.account_runs(a.agent, &a.name, now)?;
+    let windows = store.usage_windows(a.agent, &a.name)?;
+    let summary = crate::usage::summarize(&windows, a.limited_until, rotate_at, now);
+    let poll = store.poll_status(a.agent, &a.name)?;
+    let newest = windows.iter().max_by_key(|w| w.observed_at);
+    let spend = store.account_spend_today(a.agent, &a.name, now)?;
     Ok(json!({
+        "usage": windows,
+        "summary": {
+            "headroom": summary.headroom_pct(),
+            "binding": summary.binding,
+            "nextReset": summary.next_reset.and_then(crate::util::rfc3339),
+            "weeklyReset": summary.weekly_reset.and_then(crate::util::rfc3339),
+            "state": summary.state,
+            "limitedUntil": summary.limited_until.and_then(crate::util::rfc3339),
+            "plan": poll.as_ref().and_then(|p| p.plan.clone()),
+            "source": newest.map(|w| w.source),
+            "observedAt": newest.and_then(|w| w.observed_at).and_then(crate::util::rfc3339),
+            "note": poll.as_ref().and_then(|p| p.note.clone()),
+            "polledAt": poll.as_ref().and_then(|p| crate::util::rfc3339(p.attempted_at)),
+            "costToday": spend.cost_usd,
+            "tokensToday": spend.tokens,
+        },
         "agent": a.agent,
         "name": a.name,
         "kind": a.kind,
@@ -687,17 +727,46 @@ pub fn account_json(
     }))
 }
 
-/// `GET /v1/accounts`: every account with its state and counts, plus how
-/// many accounts each agent has besides its default. Never any credential.
+/// Every account with a row, plus each default account that has usage
+/// figures but no row yet (a default account gets one only once used).
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub fn accounts_with_usage(store: &Store) -> ApiResult<Vec<crate::store::AccountState>> {
+    let mut all = store.list_accounts()?;
+    for (agent, name) in store.usage_accounts()? {
+        if name == crate::accounts::DEFAULT
+            && !all.iter().any(|a| a.agent == agent && a.name == name)
+        {
+            all.push(crate::store::AccountState {
+                agent,
+                name,
+                kind: crate::accounts::AccountKind::Default,
+                disabled: false,
+                limited_until: None,
+                last_used: None,
+                created_at: now_ms(),
+            });
+        }
+    }
+    all.sort_by(|a, b| (a.agent, &a.name).cmp(&(b.agent, &b.name)));
+    Ok(all)
+}
+
+/// `GET /v1/accounts`: every account with its state, counts and usage,
+/// plus how many accounts each agent has besides its default. Never any
+/// credential.
 async fn accounts(
     State(state): State<AppState>,
     Admin(_): Admin,
 ) -> ApiResult<Json<serde_json::Value>> {
     let now = now_ms();
-    let all = state.store.list_accounts()?;
+    let rotate_at = state.dispatcher.usage().policy().rotate_at;
+    let all = accounts_with_usage(&state.store)?;
     let mut list = Vec::with_capacity(all.len());
     for a in &all {
-        list.push(account_json(&state.store, a, now)?);
+        list.push(account_json_with(&state.store, a, now, rotate_at)?);
     }
     let per_agent: serde_json::Map<String, serde_json::Value> = AgentKind::ALL
         .iter()
@@ -709,7 +778,76 @@ async fn accounts(
             (k.as_str().to_owned(), json!(n))
         })
         .collect();
-    Ok(Json(json!({ "accounts": list, "perAgent": per_agent })))
+    let policy = state.dispatcher.usage().policy();
+    Ok(Json(json!({
+        "accounts": list,
+        "perAgent": per_agent,
+        "strategy": policy.strategy,
+        "rotateAt": policy.rotate_at,
+    })))
+}
+
+/// `POST /v1/accounts/{agent}/{name}/refresh`: reads the account's live
+/// usage now (Claude Code and Codex sign-ins only), at most once a minute
+/// per account, and returns the account as `GET /v1/accounts` shows it.
+async fn refresh_account(
+    State(state): State<AppState>,
+    Admin(admin): Admin,
+    axum::extract::Path((agent, name)): axum::extract::Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let agent: AgentKind = agent
+        .parse()
+        .map_err(|e: crate::agent::UnknownAgent| ApiError::BadRequest(e.to_string()))?;
+    crate::accounts::check_name(&name, true).map_err(ApiError::BadRequest)?;
+    let poller = state
+        .dispatcher
+        .usage()
+        .poller()
+        .ok_or_else(|| ApiError::Unavailable("usage reads are not set up".to_owned()))?;
+    let result = poller.poll(agent, &name).await;
+    match &result {
+        Err(crate::usage::poller::PollError::TooSoon(_)) => {
+            return Err(ApiError::TooManyRequests(
+                "this account was read less than a minute ago",
+            ));
+        }
+        Err(crate::usage::poller::PollError::NotSupported(why)) => {
+            return Err(ApiError::BadRequest(why.clone()));
+        }
+        Err(crate::usage::poller::PollError::Busy) => {
+            return Err(ApiError::coded(
+                StatusCode::CONFLICT,
+                "account_busy",
+                "a run on this account is active; it is read after the run",
+            ));
+        }
+        _ => {}
+    }
+    state.store.audit(
+        &admin.name,
+        "account.refresh",
+        &format!("{agent}:{name}"),
+        "",
+    )?;
+    let now = now_ms();
+    let a = accounts_with_usage(&state.store)?
+        .into_iter()
+        .find(|a| a.agent == agent && a.name == name)
+        .unwrap_or(crate::store::AccountState {
+            agent,
+            name: name.clone(),
+            kind: crate::accounts::AccountKind::Default,
+            disabled: false,
+            limited_until: None,
+            last_used: None,
+            created_at: now,
+        });
+    let rotate_at = state.dispatcher.usage().policy().rotate_at;
+    let mut v = account_json_with(&state.store, &a, now, rotate_at)?;
+    if let (Some(obj), Err(e)) = (v.as_object_mut(), &result) {
+        obj.insert("error".into(), json!(e.to_string()));
+    }
+    Ok(Json(json!({ "account": v, "ok": result.is_ok() })))
 }
 
 #[cfg(test)]

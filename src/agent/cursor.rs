@@ -140,6 +140,7 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
         text,
         session_id: env.session_id.filter(|s| !s.trim().is_empty()),
         usage: None,
+        rate_limits: Vec::new(),
     })
 }
 

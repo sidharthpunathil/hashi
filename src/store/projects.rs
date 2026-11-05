@@ -48,14 +48,16 @@ pub enum RemovedProject {
     },
 }
 
-const PROJECT_COLUMNS: &str =
-    "name, path, agents, accounts, default_agent, models, note, created_at";
+const PROJECT_COLUMNS: &str = "name, path, agents, accounts, default_agent, models, note, created_at, account_strategy, \
+     rotate_at";
 
 fn row_to_project(r: &Row<'_>) -> rusqlite::Result<Result<Project>> {
     let agents: String = r.get(2)?;
     let accounts: String = r.get(3)?;
     let default_agent: Option<String> = r.get(4)?;
     let models: String = r.get(5)?;
+    let strategy: Option<String> = r.get(8)?;
+    let rotate_at: Option<i64> = r.get(9)?;
     let build = || -> Result<Project> {
         Ok(Project {
             name: r.get(0)?,
@@ -71,6 +73,10 @@ fn row_to_project(r: &Row<'_>) -> rusqlite::Result<Result<Project>> {
             models: proj::decode_models(&models),
             note: r.get(6)?,
             created_at: r.get(7)?,
+            account_strategy: strategy
+                .map(|s| s.parse().map_err(StoreError::Corrupt))
+                .transpose()?,
+            rotate_at: rotate_at.and_then(|n| u8::try_from(n).ok()),
         })
     };
     Ok(build())
@@ -86,8 +92,8 @@ impl Store {
     pub fn add_project(&self, p: &Project) -> Result<bool> {
         let n = self.conn()?.execute(
             "INSERT INTO projects (name, path, agents, accounts, default_agent, models, note,
-                 created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 created_at, account_strategy, rotate_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(name) DO NOTHING",
             params![
                 p.name,
@@ -98,6 +104,8 @@ impl Store {
                 proj::encode_models(&p.models),
                 p.note,
                 p.created_at,
+                p.account_strategy.map(crate::usage::Strategy::as_str),
+                p.rotate_at,
             ],
         )?;
         Ok(n == 1)
@@ -112,7 +120,7 @@ impl Store {
     pub fn save_project(&self, p: &Project) -> Result<bool> {
         let n = self.conn()?.execute(
             "UPDATE projects SET path = ?2, agents = ?3, accounts = ?4, default_agent = ?5,
-                 models = ?6, note = ?7
+                 models = ?6, note = ?7, account_strategy = ?8, rotate_at = ?9
              WHERE name = ?1",
             params![
                 p.name,
@@ -122,6 +130,8 @@ impl Store {
                 p.default_agent.map(|a| a.as_str()),
                 proj::encode_models(&p.models),
                 p.note,
+                p.account_strategy.map(crate::usage::Strategy::as_str),
+                p.rotate_at,
             ],
         )?;
         Ok(n == 1)
@@ -287,6 +297,8 @@ mod tests {
             default_agent: Some(AgentKind::Codex),
             models: proj::ModelMap::from([(AgentKind::Claude, "sonnet".to_owned())]),
             note: Some("the api".into()),
+            account_strategy: Some(crate::usage::Strategy::MostLeft),
+            rotate_at: Some(80),
             created_at: 1,
         }
     }

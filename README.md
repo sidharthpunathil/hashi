@@ -143,6 +143,24 @@ hashi share alice --account claude=work,default
 
 Each login account lives in `~/.hashi/accounts/<agent>/<name>/`, and the agent CLI signs in and refreshes its tokens there itself; your normal login is never touched. A token uses the first account in its list that is enabled and not at its limit. When a run hits the agent's usage limit, that account is skipped until the time the message gives (or for `--account-cooldown`, 60 minutes by default) and the prompt runs again on the next one. A stateful conversation starts fresh on the new account. People you share with never see account names. `hashi account list` shows each account's state, and `hashi doctor` lists them too. See [accounts](docs/configuration.md#accounts).
 
+### Know what's left
+
+While the server runs, Hashi reads how much of each Claude Code and Codex plan is left, every five minutes and after each run, without spending a token or refreshing a login:
+
+```console
+$ hashi account usage
+claude:work  max  28% left  (poll, 2m ago)
+  5 hours        ██████░░░░░░░░░░░░░░  31%  resets in 2h 9m (2026-11-06T23:37:22Z)
+  week           ██████████████░░░░░░  72%  resets in 3d 11h (2026-11-09T09:27:22Z)
+codex:default  plus  9% left (warning)  (poll, 1m ago)
+  5 hours        ██████████████████░░  91%  resets in 49m (2026-11-06T22:17:22Z)
+  week           ████████░░░░░░░░░░░░  40%  resets in 4d 15h (2026-11-10T12:34:02Z)
+claude:default  unknown
+  unknown, refreshes on its next run; 0 run(s) today, 0 tokens, $0.00 reported
+```
+
+Runs move off an account once it is 90% used (`--rotate-at`), and a project can pick its accounts by `--account-strategy most-left` (the most quota left) or `soonest-reset` (spend the quota that is about to reset unused) instead of list order. A conversation stays on its account until that account reaches the threshold. Add `--refresh` to read now, `--json` for scripts, or `--no-usage-poll` on `hashi serve` to turn the reads off. See [usage and strategies](docs/configuration.md#usage-and-strategies).
+
 ## Supported agents
 
 Hashi drives whichever of these you have installed and signed in to. Each runs headless with its safest unattended setting, so a prompt cannot make it approve its own tool use.

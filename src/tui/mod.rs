@@ -4,6 +4,7 @@ pub mod app;
 mod clipboard;
 pub mod theme;
 pub mod ui;
+pub mod usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

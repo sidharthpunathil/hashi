@@ -92,6 +92,7 @@ async fn harness_with(claude: &str) -> Harness {
         tailscale: None,
         helpers: Default::default(),
         account_cooldown: std::time::Duration::from_secs(3600),
+        usage: Default::default(),
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
     let base = running.state.runtime.local_url.clone();

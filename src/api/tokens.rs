@@ -230,9 +230,25 @@ pub(super) async fn list(State(state): State<AppState>, Admin(_): Admin) -> ApiR
         .into_iter()
         .map(|t| {
             let status = t.status(now);
+            // Which account each stateful conversation is on. Admins only.
+            let conversations: Vec<Value> = state
+                .store
+                .conversations(&t.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "agent": c.agent,
+                        "account": c.account,
+                        "project": c.project,
+                        "updatedAt": crate::util::rfc3339(c.updated_at),
+                    })
+                })
+                .collect();
             let mut v = serde_json::to_value(&t).unwrap_or(Value::Null);
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("status".into(), json!(status));
+                obj.insert("conversations".into(), json!(conversations));
             }
             v
         })
