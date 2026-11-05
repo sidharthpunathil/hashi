@@ -842,6 +842,45 @@ impl Store {
             .query_row([], |r| r.get(0))?)
     }
 
+    /// Records the instance id the bridge behind remote account `name` of
+    /// `agent` reported when the account was added, or forgets it with
+    /// `None`. Each forward checks the bridge still reports it.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_remote_instance(
+        &self,
+        agent: AgentKind,
+        name: &str,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let key = remote_instance_key(agent, name);
+        let conn = self.conn()?;
+        match instance {
+            Some(id) => conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = ?2",
+                params![key, id],
+            )?,
+            None => conn.execute("DELETE FROM meta WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
+
+    /// The instance id recorded by [`Store::set_remote_instance`].
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn remote_instance(&self, agent: AgentKind, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn()?
+            .prepare_cached("SELECT value FROM meta WHERE key = ?1")?
+            .query_row([remote_instance_key(agent, name)], |r| r.get(0))
+            .optional()?)
+    }
+
     /// A token's use in the UTC day and month containing `now_ms`. Served
     /// entirely from `idx_requests_usage`, so it never reads request bodies.
     ///
@@ -1626,6 +1665,10 @@ fn enable_wal(conn: &Connection) -> Result<()> {
             r => return Ok(r?),
         }
     }
+}
+
+fn remote_instance_key(agent: AgentKind, name: &str) -> String {
+    format!("remote_instance:{}:{name}", agent.as_str())
 }
 
 fn user_version(conn: &Connection) -> Result<i64> {

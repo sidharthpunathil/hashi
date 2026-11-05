@@ -60,6 +60,9 @@ pub struct Target {
     token: String,
     /// The agent asked for on the bridge.
     pub agent: AgentKind,
+    /// The bridge's instance id when the account was added, which each
+    /// forward checks first.
+    pub instance: Option<String>,
 }
 
 impl std::fmt::Debug for Target {
@@ -68,6 +71,7 @@ impl std::fmt::Debug for Target {
             .field("remote", &self.remote)
             .field("base_url", &self.base_url)
             .field("agent", &self.agent)
+            .field("instance", &self.instance)
             .finish_non_exhaustive()
     }
 }
@@ -81,7 +85,16 @@ impl Target {
             base_url: remote.base_url.trim_end_matches('/').to_owned(),
             token: remote.token.clone(),
             agent,
+            instance: None,
         }
+    }
+
+    /// The same target, bound to the bridge with instance id `instance`
+    /// (as recorded when the account was added). `None` checks nothing.
+    #[must_use]
+    pub fn expecting(mut self, instance: Option<String>) -> Self {
+        self.instance = instance;
+        self
     }
 
     /// The target for the saved remote called `name` in `home`.
@@ -297,6 +310,7 @@ fn remaining(deadline: Instant) -> Option<Duration> {
 ///
 /// See [`Failure`].
 pub fn forward(target: &Target, call: &Call<'_>, handle: &Handle) -> Result<Reply, Failure> {
+    check_instance(target, instance_id)?;
     let auth = format!("Bearer {}", target.token);
     let hops = call.hops.saturating_add(1).to_string();
     let wait_for =
@@ -398,6 +412,36 @@ pub fn cancel(target: &Target, id: &str) {
                                 "the bridge did not cancel the forwarded request"),
         Err(e) => tracing::info!(remote = %target.remote, error = %e,
                                  "could not cancel the forwarded request on the bridge"),
+    }
+}
+
+/// Checks that the bridge behind `target` is still the one its account was
+/// added for. `lookup` is [`instance_id`]; tests pass their own. A different
+/// id (or none, from a bridge that reported one before) switches the account
+/// off; a bridge that cannot be reached is retried.
+///
+/// # Errors
+///
+/// [`Failure::Disabled`] on a mismatch, [`Failure::Retryable`] when the
+/// bridge cannot be asked.
+pub fn check_instance(
+    target: &Target,
+    lookup: impl FnOnce(&str) -> Result<Option<String>, String>,
+) -> Result<(), Failure> {
+    let Some(expected) = &target.instance else {
+        return Ok(());
+    };
+    match lookup(&target.base_url) {
+        Ok(Some(id)) if &id == expected => Ok(()),
+        Ok(_) => Err(Failure::Disabled(format!(
+            "the remote {} is no longer the bridge this account was added for; if that is \
+             intended, remove the account and add it again",
+            target.remote
+        ))),
+        Err(e) => Err(Failure::Retryable(format!(
+            "could not check the bridge behind {}: {e}",
+            target.remote
+        ))),
     }
 }
 
@@ -584,6 +628,36 @@ pub fn me_windows(me: &Value, agent: AgentKind, remote: &str) -> MeReading {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forward_checks_the_bridge_is_the_one_the_account_was_added_for() {
+        let remote = crate::remote::Remote {
+            name: "bob".into(),
+            base_url: "https://bob.example".into(),
+            token: "hashi_x".into(),
+        };
+        let unbound = Target::new(&remote, AgentKind::Claude);
+        assert!(check_instance(&unbound, |_| unreachable!("nothing to check")).is_ok());
+        let bound = unbound.expecting(Some("abc".into()));
+        assert!(
+            check_instance(&bound, |url| {
+                assert_eq!(url, "https://bob.example");
+                Ok(Some("abc".into()))
+            })
+            .is_ok()
+        );
+        for answer in [Ok(Some("other".to_owned())), Ok(None)] {
+            let r = check_instance(&bound, |_| answer.clone());
+            assert!(
+                matches!(&r, Err(Failure::Disabled(why)) if why.contains("no longer the bridge")),
+                "{r:?}"
+            );
+        }
+        assert!(matches!(
+            check_instance(&bound, |_| Err("refused".into())),
+            Err(Failure::Retryable(_))
+        ));
+    }
 
     #[test]
     fn refusals_map_to_what_the_account_should_do() {

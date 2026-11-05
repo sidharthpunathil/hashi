@@ -898,3 +898,44 @@ async fn remote_tokens_never_reach_logs_or_api_output() {
         assert!(!out.contains(secret), "the remote token leaked: {out}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_name_reused_for_another_bridge_does_not_take_the_account_over() {
+    let (far, near, _, _) = pair(json!({"name": "near-owner"})).await;
+    // As `hashi account add --remote` records it.
+    let far_id = far.store().instance_id().unwrap();
+    near.store()
+        .set_remote_instance(AgentKind::Claude, "bob-claude", Some(&far_id))
+        .unwrap();
+    let (token, _) = near
+        .token(json!({"name": "friend", "accounts": {"claude": ["bob-claude", "default"]}}))
+        .await;
+    let v = near.ask(&token, "one").await;
+    assert_eq!(v["response"], "far one on default", "{v}");
+
+    // `bob` now names another bridge, without `hashi remote remove`.
+    let other = server(FAR_CLAUDE, Duration::from_secs(60)).await;
+    let (other_token, _) = other.token(json!({"name": "stranger"})).await;
+    near.save_remotes(&[("bob", &other.base, &other_token)]);
+    let v = near.ask(&token, "two").await;
+    assert_eq!(v["response"], "near two", "{v}");
+    assert!(other.store().recent_requests(5).unwrap().is_empty());
+    let a = near.account("bob-claude");
+    assert!(a.disabled);
+    assert!(
+        a.disabled_reason
+            .unwrap()
+            .contains("no longer the bridge this account was added for")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_remote_switches_its_accounts_off() {
+    let (_far, near, _, _) = pair(json!({"name": "near-owner"})).await;
+    near.add_login("work");
+    hashi::remote::forget(&near.home(), "bob").unwrap();
+    let a = near.account("bob-claude");
+    assert!(a.disabled);
+    assert!(a.disabled_reason.unwrap().contains("was removed"));
+    assert!(!near.account("work").disabled);
+}

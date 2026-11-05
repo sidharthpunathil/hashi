@@ -134,11 +134,15 @@ pub fn add_remote(
     // A remote account that points back here would only forward prompts
     // to itself.
     let ours = store.instance_id()?;
+    let mut instance = None;
     let warning = match crate::forward::instance_id(&saved.base_url) {
         Ok(Some(theirs)) if theirs == ours => bail!(
             "the remote {remote} is this same Hashi; a remote account must point at a friend's bridge"
         ),
-        Ok(_) => None,
+        Ok(theirs) => {
+            instance = theirs;
+            None
+        }
         Err(e) => Some(format!(
             "could not reach {} to check it ({}); runs check again and refuse a loop",
             crate::diagnostics::terminal_safe(&saved.base_url),
@@ -148,6 +152,9 @@ pub fn add_remote(
     // A row left by a limit mark on a since removed account.
     store.remove_account(agent, name)?;
     store.add_remote_account(agent, name, remote, remote_agent)?;
+    // Forwards check the bridge is still this one, so a remote removed and
+    // saved again under the same name cannot take the account over.
+    store.set_remote_instance(agent, name, instance.as_deref())?;
     store.audit(
         actor,
         "account.add",
