@@ -126,3 +126,19 @@ input[type="password"] {
 .meter .fill { height: 100%; background: linear-gradient(90deg, var(--violet), var(--pink)); }
 a { color: var(--purple); }
 @media (prefers-reduced-motion: no-preference) { button { transition: border-color 120ms ease; } }
+[hidden] { display: none !important; }
+.terminal { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.terminal h2 { margin: 0 0 4px; font-size: 1.05rem; }
+.terminal p { margin: 8px 0 4px; }
+.install { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+a.button {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 14px;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+}
+a.button:hover { border-color: var(--purple); }
+a.button:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }

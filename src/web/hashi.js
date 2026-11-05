@@ -48,6 +48,23 @@ async function copy(text, button) {
   setTimeout(() => { button.textContent = "Copy"; }, 1800);
 }
 
+// The terminal setup commands put the invite link inside single quotes. Only
+// an origin and a code of exactly these shapes are used, so nothing in the
+// link can close the quotes early in sh or PowerShell. Plain http is only
+// offered for loopback, matching what `hashi connect` accepts.
+const SAFE_ORIGIN = /^(?:https:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])|http:\/\/(?:localhost|127(?:\.[0-9]{1,3}){3}|\[::1\]))(?::[0-9]{1,5})?$/;
+const SAFE_CODE = /^hashi_inv_[0-9a-f]{16,118}$/;
+const INSTALLERS = "https://raw.githubusercontent.com/sidharthpunathil/hashi/main";
+
+function setupCommands(origin, code) {
+  if (!SAFE_ORIGIN.test(origin) || !SAFE_CODE.test(code)) return null;
+  const link = `${origin}/claim/${code}`;
+  return {
+    sh: `curl -fsSL ${INSTALLERS}/install.sh | HASHI_CONNECT='${link}' sh`,
+    ps: `$env:HASHI_CONNECT='${link}'; irm ${INSTALLERS}/install.ps1 | iex`,
+  };
+}
+
 function claimPage() {
   const code = decodeURIComponent(location.pathname.split("/claim/")[1] || "");
   const fail = (msg) => { show("loading", false); show("preview", false); $("error-text").textContent = msg; show("error"); };
@@ -62,6 +79,12 @@ function claimPage() {
       $("lifetime").textContent = p.tokenExpiresInDays ? `${p.tokenExpiresInDays} day(s) after you claim it` : "Until the owner revokes it";
       $("link-expires").textContent = when(p.linkExpiresAt);
       $("notice").textContent = p.notice;
+      const setup = setupCommands(location.origin, code);
+      if (setup) {
+        $("setup-sh").textContent = setup.sh;
+        $("setup-ps").textContent = setup.ps;
+        show("terminal");
+      }
       show("loading", false);
       show("preview");
     })
@@ -75,6 +98,14 @@ function claimPage() {
       history.replaceState(null, "", "/claim/used");
       $("token").textContent = r.token;
       $("me-link").href = r.meUrl;
+      const links = r.installLinks || {};
+      const cursorOk = typeof links.cursor === "string" && links.cursor.startsWith("cursor://anysphere.cursor-deeplink/mcp/install?");
+      const vscodeOk = typeof links.vscode === "string" && links.vscode.startsWith("vscode:mcp/install?");
+      if (cursorOk) $("cursor-link").href = links.cursor;
+      if (vscodeOk) $("vscode-link").href = links.vscode;
+      show("cursor-link", cursorOk);
+      show("vscode-link", vscodeOk);
+      show("install-links", cursorOk || vscodeOk);
       const select = (name) => {
         document.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === name)));
         $("snippet").textContent = r.snippets[name];

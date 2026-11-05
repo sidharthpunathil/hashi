@@ -38,16 +38,31 @@
       <p class="notice" id="notice"></p>
       <button id="claim" class="primary">Get my access</button>
       <p class="muted small">The link works once. Your token is shown a single time on the next screen.</p>
+
+      <section id="terminal" class="terminal" hidden>
+        <h2>Set up from a terminal</h2>
+        <p class="muted small">Installs Hashi from GitHub, then connects it with this link and saves your token for you.</p>
+        <p class="small">macOS and Linux</p>
+        <div class="snippet"><pre><code id="setup-sh"></code></pre><button data-copy="setup-sh">Copy</button></div>
+        <p class="small">Windows PowerShell</p>
+        <div class="snippet"><pre><code id="setup-ps"></code></pre><button data-copy="setup-ps">Copy</button></div>
+        <p class="muted small">The link works once, whichever way you use first: this page or the command.</p>
+      </section>
     </section>
 
     <section id="done" hidden>
       <p class="good">✓ You're in. Save this token now, it cannot be shown again.</p>
       <div class="secret"><code id="token"></code><button data-copy="token">Copy</button></div>
+      <div class="install" id="install-links" hidden>
+        <a class="button" id="cursor-link" href="#">Add to Cursor</a>
+        <a class="button" id="vscode-link" href="#">Add to VS Code</a>
+      </div>
       <div class="tabs" role="tablist">
         <button role="tab" data-tab="curl" aria-selected="true">curl</button>
         <button role="tab" data-tab="python">Python</button>
         <button role="tab" data-tab="typescript">TypeScript</button>
         <button role="tab" data-tab="claudeCodeMcp">Claude Code MCP</button>
+        <button role="tab" data-tab="codexMcp">Codex MCP</button>
         <button role="tab" data-tab="mcpJson">MCP JSON</button>
       </div>
       <div class="snippet"><pre><code id="snippet"></code></pre><button data-copy="snippet">Copy</button></div>

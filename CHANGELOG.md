@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `hashi connect <invite link>` redeems an invite from the terminal and saves the token in an owner-only `~/.hashi/remotes.json`; `--setup claude` also runs `claude mcp add`. `hashi remote list` and `hashi remote remove` manage saved bridges.
+- `hashi ask --remote [<name>] "<prompt>"` sends a prompt to a saved bridge and waits for the answer.
+- The claim page offers "Set up from a terminal": one command (sh or PowerShell) that installs Hashi and connects it with the invite link. The installers run `hashi connect "$HASHI_CONNECT"` when `HASHI_CONNECT` is set.
+- After claiming, the claim page has Add to Cursor and Add to VS Code buttons and a Codex MCP snippet (`codex mcp add --url ... --bearer-token-env-var`).
+
 ## [0.2.0] - 2026-11-05
 
 ### Added

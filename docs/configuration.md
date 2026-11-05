@@ -57,6 +57,24 @@ hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
 ```
 
+### Connecting to someone else's Hashi
+
+A person you invite does not run a server. With Hashi installed, these commands redeem the invite link and talk to your bridge:
+
+```bash
+hashi connect 'https://host/claim/hashi_inv_...'   # redeem the link and save the token
+hashi connect '<link>' --name work                 # save it under your own name
+hashi connect '<link>' --setup claude              # also run `claude mcp add` for it
+hashi remote list                                  # saved bridges: names and URLs, never tokens
+hashi remote remove work                           # forget one (the owner can still revoke the token)
+hashi ask --remote "What does this repo do?"       # one saved bridge: the name can be left out
+hashi ask --remote work "Explain main.rs" -a codex
+```
+
+- `hashi connect` accepts only `https://` links, or `http://` for `localhost` and loopback addresses, with the path `/claim/hashi_inv_<code>`. It saves `{name, baseUrl, token}` in `~/.hashi/remotes.json`, readable only by you, and prints the `claude mcp add` and `codex mcp add` commands, a first `hashi ask --remote` and your `/me` link. The name defaults to the server's name in lowercase with dashes.
+- It never runs another program unless you pass `--setup claude`, which runs `claude mcp add --transport http <name> <base>/mcp --header "Authorization: Bearer <token>"` (set `HASHI_CLAUDE_BIN` to use a different executable).
+- `hashi ask --remote` sends the prompt, waits up to 60 seconds at a time until it completes or fails, and prints the answer with control characters removed. A failure prints the server's error and exits non-zero. Without `-a`, the server's default agent answers.
+
 ## Dashboard keys
 
 Run `hashi` in a terminal and the dashboard takes over the screen. When stdout is not a terminal, or with `--headless`, Hashi prints plain log lines instead.
@@ -86,6 +104,7 @@ Running requests count up their elapsed time, and every status pairs a symbol wi
 | `HASHI_VERSION=v0.2.0` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
+| `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect` with this link instead of `hashi doctor`. The installer fails with a clear message if the link is used up or expired |
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.2.0 sh
@@ -93,6 +112,16 @@ curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install
 
 ```powershell
 $env:HASHI_VERSION = "v0.2.0"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+```
+
+The claim page builds the one-command setup for an invited person from its own link:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_CONNECT='https://host/claim/hashi_inv_...' sh
+```
+
+```powershell
+$env:HASHI_CONNECT='https://host/claim/hashi_inv_...'; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
 ## Reporting a bug
