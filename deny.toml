@@ -20,6 +20,8 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "MPL-2.0",
+    # webpki-roots ships the Mozilla root store under this permissive data licence.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
