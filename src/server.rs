@@ -975,22 +975,23 @@ pub fn ensure_admin(store: &Store) -> Result<Option<String>> {
     Ok(Some(secret.raw))
 }
 
-/// Probes each configured agent for its version.
+/// Probes each configured agent for its version, all at once, so startup
+/// waits for the slowest CLI rather than for the sum of them. The result is
+/// in [`AgentKind::ALL`] order.
 pub async fn discover_agents(agents: &HashMap<AgentKind, AgentConfig>) -> Vec<AgentInfo> {
-    let mut out = Vec::new();
-    for kind in AgentKind::ALL {
-        let Some(cfg) = agents.get(&kind) else {
-            continue;
-        };
-        let version = agent::probe_version(&cfg.bin).await;
-        out.push(AgentInfo {
-            agent: kind,
-            available: version.is_some(),
-            version,
-            path: cfg.bin.display().to_string(),
-        });
-    }
-    out
+    let probes = AgentKind::ALL.into_iter().filter_map(|kind| {
+        let cfg = agents.get(&kind)?;
+        Some(async move {
+            let version = agent::probe_version(&cfg.bin).await;
+            AgentInfo {
+                agent: kind,
+                available: version.is_some(),
+                version,
+                path: cfg.bin.display().to_string(),
+            }
+        })
+    });
+    futures::future::join_all(probes).await
 }
 
 /// Starts the API, workers and (optionally) the tunnel, with the default
