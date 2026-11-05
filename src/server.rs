@@ -576,11 +576,14 @@ fn launch_tailscale(
             bus.emit(Event::TunnelDown(why));
             return;
         }
-        let off = crate::tailscale::stop(&bin, mode, port).await;
+        let off = crate::tailscale::stop_if_ours(&bin, mode, port, s.local_port).await;
         runtime.tailscale.set_down(TunnelStatus::Off);
         match off {
-            Ok(()) if s.cancel.is_cancelled() => {}
-            Ok(()) => bus.emit(Event::TunnelDown(format!("Tailscale {mode} is turned off"))),
+            Ok(_) if s.cancel.is_cancelled() => {}
+            Ok(true) => bus.emit(Event::TunnelDown(format!("Tailscale {mode} is turned off"))),
+            Ok(false) => bus.emit(Event::TunnelDown(format!(
+                "Tailscale {mode} port {port} no longer points at Hashi, so it was left on"
+            ))),
             Err(e) => bus.log(format!(
                 "could not turn Tailscale {mode} off ({e}); run: {}",
                 crate::tailscale::off_command(mode, port)

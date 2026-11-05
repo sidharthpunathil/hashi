@@ -241,6 +241,17 @@ fn header_shows_an_available_update() {
 }
 
 #[test]
+fn header_warns_about_a_bind_outside_loopback() {
+    let mut app = App::new(state(), None, false);
+    assert!(!draw(&mut app, 140, 40).contains("! exposed"));
+    let mut st = state();
+    let rt = Arc::get_mut(&mut st.runtime).unwrap();
+    rt.listen = hashi::net::Listen::switchable("0.0.0.0:7878".parse().unwrap(), false).0;
+    let mut app = App::new(st, None, false);
+    assert!(draw(&mut app, 140, 40).contains("! exposed, no TLS"));
+}
+
+#[test]
 fn compact_layout_fits_small_terminals() {
     let mut app = App::new(state(), None, false);
     let out = draw(&mut app, 80, 24);

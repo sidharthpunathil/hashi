@@ -451,16 +451,32 @@ fn drain(mut lines: Lines) {
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 }
 
-/// Pulls a `https://*.trycloudflare.com` URL out of a log line.
+/// Pulls a quick-tunnel URL out of a log line: exactly
+/// `https://<label>.trycloudflare.com`, one DNS label, with no port, path,
+/// query or userinfo. A trailing `/` is dropped.
 #[must_use]
 pub fn extract_url(line: &str) -> Option<String> {
-    let start = line.find("https://")?;
-    let rest = &line[start..];
-    let end = rest
-        .find(|c: char| c.is_whitespace() || c == '|' || c == '"')
-        .unwrap_or(rest.len());
-    let url = &rest[..end];
-    url.ends_with(".trycloudflare.com").then(|| url.to_owned())
+    line.match_indices("https://").find_map(|(start, _)| {
+        let rest = &line[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c.is_control() || c == '|' || c == '"')
+            .unwrap_or(rest.len());
+        quick_tunnel_url(&rest[..end])
+    })
+}
+
+fn quick_tunnel_url(url: &str) -> Option<String> {
+    let host = url.strip_prefix("https://")?;
+    let host = host.strip_suffix('/').unwrap_or(host);
+    let label = host.strip_suffix(".trycloudflare.com")?;
+    let ok = !label.is_empty()
+        && label.len() <= 63
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok.then(|| format!("https://{host}"))
 }
 
 #[cfg(test)]
@@ -616,6 +632,34 @@ mod tests {
         assert_eq!(
             extract_url("see https://developers.cloudflare.com/docs"),
             None
+        );
+    }
+
+    #[test]
+    fn extract_url_needs_exactly_one_label_under_trycloudflare() {
+        for bad in [
+            "INF https://evil.example/x.trycloudflare.com",
+            "INF https://evil.example?.trycloudflare.com",
+            "INF https://evil.example#.trycloudflare.com",
+            "INF https://user@x.trycloudflare.com",
+            "INF https://a.b.trycloudflare.com",
+            "INF https://x.trycloudflare.com:8443",
+            "INF https://x.trycloudflare.com/path",
+            "INF https://.trycloudflare.com",
+            "INF https://-x.trycloudflare.com",
+            "INF http://x.trycloudflare.com",
+            "INF https://trycloudflare.com",
+        ] {
+            assert_eq!(extract_url(bad), None, "{bad}");
+        }
+        assert_eq!(
+            extract_url("INF https://calm-river.trycloudflare.com/").as_deref(),
+            Some("https://calm-river.trycloudflare.com")
+        );
+        // A bad candidate does not hide a good one later on the line.
+        assert_eq!(
+            extract_url("https://evil.example/ https://ok-1.trycloudflare.com").as_deref(),
+            Some("https://ok-1.trycloudflare.com")
         );
     }
 }

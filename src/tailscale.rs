@@ -288,16 +288,43 @@ pub fn port_use(json: &str, port: u16, local_port: u16) -> Result<PortUse, Strin
     Ok(port_use_in(&v, port, &target))
 }
 
-/// Pulls the first `https://` URL out of a line of CLI output.
+/// Pulls the first `https://` URL out of a line of CLI output. It ends at
+/// whitespace, a control character, a quote or an angle bracket.
 #[must_use]
 pub fn find_url(line: &str) -> Option<String> {
     let start = line.find("https://")?;
     let rest = &line[start..];
     let end = rest
-        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '<' || c == '>')
+        .find(|c: char| c.is_whitespace() || c.is_control() || matches!(c, '"' | '\'' | '<' | '>'))
         .unwrap_or(rest.len());
     let url = rest[..end].trim_end_matches(['.', ',', ')']);
     (url.len() > "https://".len()).then(|| url.to_owned())
+}
+
+/// The host Tailscale's approval links point at.
+pub const LOGIN_HOST: &str = "login.tailscale.com";
+
+/// Environment variable naming a self-hosted control server's host (for
+/// example `headscale.example.com`), whose approval links are accepted too.
+pub const CONTROL_HOST_ENV: &str = "HASHI_TAILSCALE_CONTROL_HOST";
+
+/// The approval link in a line of CLI output, if it has one Hashi may show:
+/// `https://login.tailscale.com/...`, or `https://<control_host>/...` when a
+/// control server is configured. No userinfo, and made [`terminal_safe`]
+/// for the dashboard.
+///
+/// [`terminal_safe`]: crate::diagnostics::terminal_safe
+#[must_use]
+pub fn approval_url(line: &str, control_host: Option<&str>) -> Option<String> {
+    let url = find_url(line)?;
+    let rest = url.strip_prefix("https://")?;
+    let (authority, path) = rest.split_at(rest.find(['/', '?', '#'])?);
+    if !path.starts_with('/') || authority.contains('@') {
+        return None;
+    }
+    let allowed = authority.eq_ignore_ascii_case(LOGIN_HOST)
+        || control_host.is_some_and(|c| !c.is_empty() && authority.eq_ignore_ascii_case(c.trim()));
+    allowed.then(|| crate::diagnostics::terminal_safe(&url))
 }
 
 /// Why a Tailscale route could not be started or stopped.
@@ -489,11 +516,11 @@ pub async fn start(
     drop(tx);
 
     let url = url_for(&host, https_port);
+    let control = std::env::var(CONTROL_HOST_ENV).ok();
     let mut seen: Option<String> = None;
     let mut tail: Vec<String> = Vec::new();
     let mut note = |line: String, seen: &mut Option<String>, tail: &mut Vec<String>| {
-        if let Some(u) = find_url(&line)
-            && crate::net::url_host(&u).as_deref() != Some(host.as_str())
+        if let Some(u) = approval_url(&line, control.as_deref())
             && seen.as_deref() != Some(u.as_str())
         {
             *seen = Some(u.clone());
@@ -570,6 +597,25 @@ pub async fn stop(bin: &Path, mode: Mode, https_port: u16) -> Result<(), TsError
     let args = off_args(mode, https_port);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     query(bin, &args).await.map(drop)
+}
+
+/// Turns the listener off only while the port still points at this server
+/// ([`PortUse::Ours`]). Returns whether it ran `off`; a port something else
+/// took over in the meantime is left alone.
+///
+/// # Errors
+///
+/// Fails when the config cannot be read or the `off` command fails.
+pub async fn stop_if_ours(
+    bin: &Path,
+    mode: Mode,
+    https_port: u16,
+    local_port: u16,
+) -> Result<bool, TsError> {
+    if current_use(bin, https_port, local_port).await? != PortUse::Ours {
+        return Ok(false);
+    }
+    stop(bin, mode, https_port).await.map(|()| true)
 }
 
 /// Whether the route is still in Tailscale's config. `None` when that
@@ -897,6 +943,40 @@ mod tests {
         );
         assert_eq!(find_url("no url here"), None);
         assert_eq!(find_url("https://"), None);
+        // A control character ends the URL.
+        assert_eq!(
+            find_url("https://login.tailscale.com/a\u{1b}[2Jb").as_deref(),
+            Some("https://login.tailscale.com/a")
+        );
+    }
+
+    #[test]
+    fn only_tailscale_approval_links_are_shown() {
+        let ok = "https://login.tailscale.com/f/funnel?node=abc";
+        assert_eq!(approval_url(&format!("  {ok}"), None).as_deref(), Some(ok));
+        for bad in [
+            "approve: https://phish.example/login.tailscale.com",
+            "https://login.tailscale.com.evil.example/f",
+            "https://login.tailscale.com@evil.example/f",
+            "https://user@login.tailscale.com/f",
+            "https://login.tailscale.com?x=1",
+            "https://laptop.tail1234.ts.net/",
+            "http://login.tailscale.com/f",
+        ] {
+            assert_eq!(approval_url(bad, None), None, "{bad}");
+        }
+        assert_eq!(
+            approval_url("https://login.tailscale.com/a\u{1b}[2Jb", None).as_deref(),
+            Some("https://login.tailscale.com/a")
+        );
+        // A self-hosted control server's links, only when it is configured.
+        let own = "https://headscale.example.com/register/abc";
+        assert_eq!(approval_url(own, None), None);
+        assert_eq!(
+            approval_url(own, Some("headscale.example.com")).as_deref(),
+            Some(own)
+        );
+        assert_eq!(approval_url(own, Some("")), None);
     }
 
     fn settings(bin: Option<PathBuf>, unreachable: Option<&str>) -> Settings {

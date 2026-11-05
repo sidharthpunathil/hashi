@@ -211,6 +211,14 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("local   ", t::muted()),
             Span::styled(rt.local_url(), plain()),
+            Span::styled(
+                rt.listen
+                    .addr()
+                    .and_then(|a| crate::settings::exposure_note(a.ip(), rt.listen.tls()))
+                    .map(|n| format!("  {n}"))
+                    .unwrap_or_default(),
+                t::bold(t::ROSE),
+            ),
         ]),
         Line::from(vec![Span::styled("public  ", t::muted()), public, via]),
         Line::from(agents),

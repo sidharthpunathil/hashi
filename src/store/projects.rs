@@ -480,7 +480,11 @@ mod tests {
         let r = s.get_request(&queued).unwrap().unwrap();
         assert_eq!(r.status, crate::store::RequestStatus::Failed);
         assert_eq!(r.error.as_deref(), Some(PROJECT_REMOVED));
-        assert!(s.claim_next(AgentKind::Claude).unwrap().is_some_and(|r| r.id == other));
+        assert!(
+            s.claim_next(AgentKind::Claude)
+                .unwrap()
+                .is_some_and(|r| r.id == other)
+        );
     }
 
     #[test]

@@ -50,12 +50,21 @@ pub fn path(home: &Path) -> PathBuf {
 ///
 /// # Errors
 ///
-/// Fails, with a message naming the file, when it cannot be read or parsed.
+/// Fails, with a message naming the file, when it cannot be read or parsed,
+/// or saves port 0 (which would listen on a random port).
 pub fn load(home: &Path) -> Result<Settings, String> {
     let path = path(home);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
-            serde_json::from_str(&text).map_err(|e| format!("ignoring {}: {e}", path.display()))
+            let s: Settings = serde_json::from_str(&text)
+                .map_err(|e| format!("ignoring {}: {e}", path.display()))?;
+            if s.port == Some(0) {
+                return Err(format!(
+                    "ignoring {}: port 0 is not a port to listen on",
+                    path.display()
+                ));
+            }
+            Ok(s)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(e) => Err(format!("ignoring {}: {e}", path.display())),
@@ -70,6 +79,20 @@ pub fn load(home: &Path) -> Result<Settings, String> {
 pub fn save(home: &Path, settings: &Settings) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(settings).map_err(std::io::Error::other)?;
     crate::diagnostics::write_private(&path(home), &format!("{text}\n"))
+}
+
+/// The dashboard header's warning for listening on `bind`: `None` on
+/// loopback. Shown for the whole run, so an address saved in
+/// `settings.json` is not only a line on stderr before the dashboard opens.
+#[must_use]
+pub fn exposure_note(bind: IpAddr, tls: bool) -> Option<&'static str> {
+    if bind.is_loopback() {
+        None
+    } else if tls {
+        Some("! exposed, HTTPS")
+    } else {
+        Some("! exposed, no TLS")
+    }
 }
 
 /// The value in effect: the flag or variable when `given`, else the saved
@@ -127,6 +150,25 @@ mod tests {
         .unwrap();
         let text = std::fs::read_to_string(path(dir.path())).unwrap();
         assert!(!text.contains("bind"), "{text}");
+    }
+
+    #[test]
+    fn port_zero_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(path(dir.path()), r#"{"port":0,"bind":"0.0.0.0"}"#).unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(err.contains("port 0"), "{err}");
+        std::fs::write(path(dir.path()), r#"{"port":1}"#).unwrap();
+        assert_eq!(load(dir.path()).unwrap().port, Some(1));
+    }
+
+    #[test]
+    fn a_non_loopback_bind_gets_a_header_warning() {
+        let any: IpAddr = "0.0.0.0".parse().unwrap();
+        assert!(exposure_note(any, false).is_some_and(|n| n.contains("no TLS")));
+        assert!(exposure_note(any, true).is_some_and(|n| n.contains("HTTPS")));
+        assert_eq!(exposure_note(DEFAULT_BIND, false), None);
+        assert_eq!(exposure_note("::1".parse().unwrap(), false), None);
     }
 
     #[test]
