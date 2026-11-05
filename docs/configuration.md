@@ -60,6 +60,8 @@ hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, 
 hashi token revoke hashi_1a2b3c4d
 hashi share alice --agents claude          # one-time invite link
 hashi account add claude work              # another login for an agent (see Accounts)
+hashi project add api ~/code/api           # a folder to share (see Projects)
+hashi share bob --project api              # an invite that works in that folder
 hashi invite list                          # pending, claimed and expired invites
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
@@ -121,6 +123,21 @@ Limits are tracked only for tokens that list accounts for the agent.
 **Sessions.** A stateful token keeps one conversation per agent and account, because the conversation lives in the account's directory. Failing over starts it fresh on the new account; `DELETE /v1/session/{agent}` clears it on every account.
 
 **Seeing it.** Admins see the account that ran each request in `GET /v1/ask/{id}` and the dashboard's request detail, each token's accounts at the foot of the tokens view, and the number of accounts on each agent card. `GET /v1/accounts` returns the list with its state and counts.
+
+### Projects
+
+A project is a folder on this machine with its own agents, accounts and defaults. Bind tokens and invites to it instead of choosing those on each one.
+
+| Command | What it does |
+|---|---|
+| `hashi project add <name> <path> [--agents claude,codex] [--account claude=work,personal]... [--default-agent claude] [--model claude=sonnet]... [--note ..]` | Add a project. `<path>` must be an existing folder, outside the Hashi home; symlinks are resolved. Without `--agents`, the installed agents |
+| `hashi project update <name> [--path ..] [--agents ..] [--account ..]... [--clear-accounts] [--default-agent ..] [--clear-default-agent] [--model ..]... [--clear-models] [--note ..]` | Change a project. Refused if a bound token or pending invite would be left with accounts outside it |
+| `hashi project list` | Projects with their bound tokens, prompts today and this month, spend this month, agents, accounts, models and folder |
+| `hashi project remove <name> [--unbind]` | Remove a project. Refused while tokens or pending invites are bound, unless `--unbind` puts them back on their own workspace. The folder is never touched |
+| `hashi token create <name> --project <name>` | Bind a new token. Also on `hashi share` |
+| `hashi token update <id> --project <name>` or `--clear-project` | Bind a token, or put it back on its own workspace |
+
+A bound token's run starts in the project folder. It may use only the agents both the token and the project allow. Its account list for an agent, when it has one, must be a subset of the project's list for that agent (`default` when the project has none), or the command is refused; without a list it uses the project's. When a prompt names no model, the project's model for that agent is used. Limits work as before. Stateful conversations are kept per token, agent, account and project. The name `default` is reserved for no project. The dashboard's token and share forms have a project selector, and the request and token details show the project.
 
 ### Connecting to someone else's Hashi
 

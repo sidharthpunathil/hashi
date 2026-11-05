@@ -106,6 +106,19 @@ Hashi also speaks the OpenAI chat API at `/v1/chat/completions` and `/v1/models`
 
 ## Sharing with people
 
+### Projects
+
+Set up a folder once, with the agents and accounts it should use, then share the project instead of repeating those choices on every token:
+
+```bash
+hashi project add api ~/code/api --account claude=work --model claude=sonnet
+hashi share alice --project api
+```
+
+Alice's prompts then run in `~/code/api` instead of a private workspace, with the agents both her token and the project allow and only the project's accounts. She sees only the name: `/v1/me` says `project: "api"` and the claim page says it works in the project api. `hashi project list` shows each project's tokens and use, and `hashi project remove api` refuses while tokens are bound unless you pass `--unbind`. Hashi never changes, moves or deletes a project folder, not on revoke, remove or uninstall. A project changes where a run starts, not what an agent running as you can read, so share only folders you trust. See [projects](docs/configuration.md#projects).
+
+### Invite links
+
 ```bash
 hashi share alice --daily-requests 50 --daily-budget 5 --expires-in-days 30
 ```
