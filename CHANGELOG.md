@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `hashi ask --remote [<name>] "<prompt>"` sends a prompt to a saved bridge and waits for the answer.
 - The claim page offers "Set up from a terminal": one command (sh or PowerShell) that installs Hashi and connects it with the invite link. The installers run `hashi connect "$HASHI_CONNECT"` when `HASHI_CONNECT` is set.
 - After claiming, the claim page has Add to Cursor and Add to VS Code buttons and a Codex MCP snippet (`codex mcp add --url ... --bearer-token-env-var`).
+- `hashi uninstall [--dry-run] [--keep-data] [--yes]` lists the binary, a leftover `hashi.old.exe`, the data directory and (on Windows) the installer's PATH entry, asks you to type `uninstall`, then removes them. It refuses while a server is running (a running server now writes `~/.hashi/server.pid`, owner only), refuses a data directory that is a symlink or holds files Hashi did not create, leaves Cargo installs to `cargo uninstall hashi`, and prints how to remove cloudflared, tailscale and the MCP entries for your saved remotes.
 
 ## [0.2.0] - 2026-11-05
 
