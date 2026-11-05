@@ -56,7 +56,8 @@ pub use access::ask_more_for;
 pub use cancel::cancel_request;
 
 pub use ask::{
-    AskBody, SubmitInput, me_json, reads_any_request, request_json, submit, wait_until_done,
+    AskBody, SubmitInput, forwarded_hops, me_json, reads_any_request, request_json, shared_usage,
+    submit, wait_until_done,
 };
 pub use invites::{CreateInviteBody, MAX_PENDING_INVITES, snippets, validate_new_invite};
 pub use projects::{
@@ -668,6 +669,9 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "uptimeSecs": state.runtime.started.elapsed().as_secs(),
+        // A random id kept in the database, so a remote account can be
+        // refused when it points back at this same bridge.
+        "instance": state.store.instance_id().ok(),
         "defaultAgent": state.default_agent,
         "agents": state.runtime.agents.iter().map(|a| json!({
             "agent": a.agent, "available": a.available, "version": a.version,
@@ -750,6 +754,10 @@ pub fn account_json_with(
         "agent": a.agent,
         "name": a.name,
         "kind": a.kind,
+        // The saved remote's name only, never its address or token.
+        "remote": a.remote,
+        "remoteAgent": a.remote_agent,
+        "disabledReason": a.disabled_reason,
         "state": status.as_str(),
         "limitedUntil": match status {
             crate::store::AccountStatus::Limited(until) => crate::util::rfc3339(until),
@@ -783,6 +791,9 @@ pub fn accounts_with_usage(store: &Store) -> ApiResult<Vec<crate::store::Account
                 limited_until: None,
                 last_used: None,
                 created_at: now_ms(),
+                remote: None,
+                remote_agent: None,
+                disabled_reason: None,
             });
         }
     }
@@ -877,6 +888,9 @@ async fn refresh_account(
             limited_until: None,
             last_used: None,
             created_at: now,
+            remote: None,
+            remote_agent: None,
+            disabled_reason: None,
         });
     let rotate_at = state.dispatcher.usage().policy().rotate_at;
     let mut v = account_json_with(&state.store, &a, now, rotate_at)?;

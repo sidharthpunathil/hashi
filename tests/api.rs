@@ -1579,6 +1579,7 @@ async fn concurrent_submits_never_exceed_request_caps() {
                         agent: None,
                         model: None,
                         account: None,
+                        hops: 0,
                     },
                 )
                 .await

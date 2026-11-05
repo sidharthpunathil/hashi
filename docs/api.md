@@ -8,7 +8,7 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 |---|---|---|---|
 | `GET` | `/` | | Name, version and a pointer to the docs |
 | `GET` | `/healthz` | | Liveness probe |
-| `GET` | `/v1/status` | | Version, uptime, which agents are installed |
+| `GET` | `/v1/status` | | Version, uptime, which agents are installed, this bridge's `instance` id |
 | `POST` | `/v1/ask` | token | Queue a prompt |
 | `GET` | `/v1/ask/{id}` | token | Read a result. Add `?wait=30` to long-poll |
 | `DELETE` | `/v1/ask/{id}` | token | Cancel a queued or running request (admins: any request) |
@@ -47,6 +47,8 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 | `agent` | `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor` | server default (`claude`) | Must be installed and allowed for the token |
 | `model` | string | agent default | Passed to the agent's `--model` / `-m` |
 | `wait` | seconds | none | Hold the request open up to this long (max 120) |
+
+Another Hashi forwarding a prompt for a [remote account](configuration.md#remote-accounts) adds `X-Hashi-Hops` (how many bridges it has passed through, counting itself) and `X-Hashi-From` (its `instance` id from `/v1/status`). A prompt with more than 2 hops answers `508 hop_limit`, and one from this same bridge `508 loop`. A prompt that arrived with 2 hops is never forwarded again.
 
 It returns `200` with the result when the run finished within `wait`, or `202` with a `poll` path otherwise. `status` is one of `queued`, `running`, `completed` or `failed`. A queued request also reports its `position`.
 
@@ -131,6 +133,7 @@ With Open WebUI: open **Admin Settings**, then **Connections**, and add an OpenA
 | `limits` | object, see below | `maxPending: 3` for `user` tokens, none for admins |
 | `accounts` | object, agent to an ordered list of account names | every agent uses `default` |
 | `project` | a project name | none: the token's own workspace |
+| `shareUsage` | boolean | `false` |
 
 The response contains the raw `token` exactly once. Only its SHA-256 hash is stored.
 
@@ -140,11 +143,17 @@ A token with a `project` runs in the project's folder. It may use the agents bot
 
 `limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd` and `maxPending`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code and opencode do, so budgets bound only those two.
 
-`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits`, `accounts` and `project`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`. `project` binds the token to a project, and `null` puts it back on its own workspace; the result is checked as on create.
+`shareUsage: true` adds `agentUsage` to the token's `GET /v1/me`: for each agent it may use, the most headroom left on an account serving it that can take a run, as a whole percent, that account's next reset and its state (`ok`, `warning`, `limited` or `unknown`). When every account serving the agent is at its limit or disabled, the state is `limited`, `headroom` is `0` and `nextReset` is when the first comes back. Account names, how many accounts there are and their windows are never included:
+
+```json
+"agentUsage": { "claude": { "headroom": 62, "nextReset": "2026-11-06T16:00:00Z", "state": "ok" } }
+```
+
+`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits`, `accounts`, `project` and `shareUsage`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`. `project` binds the token to a project, and `null` puts it back on its own workspace; the result is checked as on create.
 
 ## `POST /v1/invites`
 
-Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`), `accounts` and `project` (as for tokens). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once. `POST /v1/claim/preview` shows the project's name, never its folder or accounts.
+Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`), `accounts`, `project` and `shareUsage` (as for tokens; the claim preview and the claim page say when it is on). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once. `POST /v1/claim/preview` shows the project's name, never its folder or accounts.
 
 ## Access requests
 
@@ -256,15 +265,15 @@ Admin only. Lists every account with its state, use and quota; keys, access toke
 }
 ```
 
-`kind` is `login`, `api-key`, `oauth-token` or `default` (your own login, listed once a token that names it has used it, or once its quota has been read). `state` is `ready`, `limited` (with `limitedUntil`) or `disabled`. `tokens` counts the tokens whose list includes the account, and `perAgent` the accounts each agent has besides `default`. `strategy` and `rotateAt` are the server's defaults.
+`kind` is `login`, `api-key`, `oauth-token`, `remote` or `default` (your own login, listed once a token that names it has used it, or once its quota has been read). A `remote` account also has `remote` (the saved remote's name, never its address or token) and `remoteAgent`. `disabledReason` says why Hashi switched an account off itself, such as a remote bridge that paused or revoked its token; it is `null` otherwise and cleared by `hashi account enable`. `state` is `ready`, `limited` (with `limitedUntil`) or `disabled`. `tokens` counts the tokens whose list includes the account, and `perAgent` the accounts each agent has besides `default`. `strategy` and `rotateAt` are the server's defaults.
 
-`usage` has one entry per quota window, with `source` `poll` (a read of the live quota), `run` (a Claude Code run's `rate_limit_event`) or `error` (a run that failed at the limit, counted as fully used until `resetsAt`). In `summary`, `headroom` is 100 minus the highest `usedPercent` (whole percent, `null` when nothing is known), `binding` names that window, and `state` is `ok`, `warning` (at or above the server's `rotateAt`), `limited` (until `limitedUntil`) or `unknown`. `note` says why there are no figures, such as "unknown, refreshes on its next run". `costToday` and `tokensToday` are what this account's runs reported today (UTC).
+`usage` has one entry per quota window, with `source` `poll` (a read of the live quota), `run` (a Claude Code run's `rate_limit_event`), `error` (a run that failed at the limit, counted as fully used until `resetsAt`) or `remote` (a remote account's `/v1/me`: the shared headroom as window `remote`, and the remote token's caps as `daily_requests`, `monthly_requests`, `daily_budget` and `monthly_budget`). In `summary`, `headroom` is 100 minus the highest `usedPercent` (whole percent, `null` when nothing is known), `binding` names that window, and `state` is `ok`, `warning` (at or above the server's `rotateAt`), `limited` (until `limitedUntil`) or `unknown`. `note` says why there are no figures, such as "unknown, refreshes on its next run". `costToday` and `tokensToday` are what this account's runs reported today (UTC).
 
-None of this is shown to token holders: `/v1/me`, the MCP tools and the OpenAI-compatible responses have no usage fields.
+None of this is shown to token holders: the MCP tools and the OpenAI-compatible responses have no usage fields, and `/v1/me` has only the per-agent `agentUsage` summary, and only for a token with `shareUsage`.
 
 ## `POST /v1/accounts/{agent}/{name}/refresh`
 
-Admin only. Reads a Claude Code or Codex sign-in's quota now (the default account or a login account), records it and answers `{"ok": true, "account": {...}}` with the account as `GET /v1/accounts` shows it. A read that gives no figures still answers `200`, with `"ok": false`, an `error` on the account and its `summary.note`. Each account is read at most once a minute: sooner answers `429 rate_limited`. A run on the account in progress answers `409 account_busy`; an unknown agent, an API-key account or an agent without live quota answers `400`. The token used for the read is never refreshed, logged or returned. Refreshes are audited as `account.refresh`.
+Admin only. Reads a Claude Code or Codex sign-in's quota now (the default account or a login account), or a remote account's `/v1/me` on its bridge, records it and answers `{"ok": true, "account": {...}}` with the account as `GET /v1/accounts` shows it. A read that gives no figures still answers `200`, with `"ok": false`, an `error` on the account and its `summary.note`. Each account is read at most once a minute: sooner answers `429 rate_limited`. A run on the account in progress answers `409 account_busy`; an unknown agent, an API-key account or an agent without live quota answers `400`. The token used for the read is never refreshed, logged or returned. Refreshes are audited as `account.refresh`.
 
 `GET /v1/tokens` lists each token's `conversations`: `[{"agent", "account", "project", "updatedAt"}]`, most recent first, so admins see which account each stateful conversation is on.
 
@@ -302,6 +311,8 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 500 | `internal` | A bug in Hashi. The error also carries an `errorId` to quote in a bug report |
 | 502 | `agent_failed` | OpenAI endpoint: the agent run failed or was cancelled; `message` says why |
 | 503 | `unavailable` | That agent is not installed on this machine |
+| 508 | `hop_limit` | A forwarded prompt has passed through more than 2 bridges |
+| 508 | `loop` | A forwarded prompt came from this same bridge |
 
 ## From code
 

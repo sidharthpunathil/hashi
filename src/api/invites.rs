@@ -46,6 +46,10 @@ pub struct CreateInviteBody {
     /// Project the token is bound to, as on `POST /v1/tokens`.
     #[serde(default)]
     pub project: Option<String>,
+    /// Let the token see how much headroom is left, as on
+    /// `POST /v1/tokens`. The claim page says so.
+    #[serde(default)]
+    pub share_usage: Option<bool>,
 }
 
 /// Body of the claim endpoints.
@@ -69,6 +73,7 @@ fn invite_json(i: &Invite, now: i64) -> Value {
         "claimedAt": i.claimed_at.and_then(rfc3339),
         "accounts": i.accounts,
         "project": i.project,
+        "shareUsage": i.share_usage,
     })
 }
 
@@ -88,6 +93,7 @@ pub fn validate_new_invite(body: CreateInviteBody) -> ApiResult<NewInvite> {
         limits: body.limits,
         accounts: body.accounts,
         project: body.project,
+        share_usage: None,
     })?;
     let link_hours = body.link_hours.unwrap_or(24);
     if !LINK_HOURS.contains(&link_hours) {
@@ -207,6 +213,7 @@ pub(super) async fn create(
     body: Result<Json<CreateInviteBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    let share_usage = body.share_usage.unwrap_or(false);
     let mut new = validate_new_invite(body)?;
     new.accounts = super::check_accounts(&state.store, new.accounts)?;
     super::check_binding(
@@ -227,7 +234,11 @@ pub(super) async fn create(
             "too many pending invites, cancel some first",
         ));
     }
-    let (invite, code) = state.store.create_invite(&new)?;
+    let (mut invite, code) = state.store.create_invite(&new)?;
+    if share_usage {
+        state.store.set_invite_share_usage(&invite.id, true)?;
+        invite.share_usage = true;
+    }
     state.store.audit(
         &admin.name,
         "invite.create",
@@ -342,6 +353,7 @@ fn preview_code(state: &AppState, body: ClaimJson) -> ApiResult<Json<Value>> {
             "project": i.project,
             "linkExpiresAt": rfc3339(i.expires_at),
             "notice": "The owner of this Hashi can see the prompts you send and the answers you get.",
+            "shareUsage": i.share_usage,
         }))),
         InviteState::Claimed => Err(claimed()),
         InviteState::Expired => Err(expired()),
@@ -381,6 +393,7 @@ fn redeem_code(state: &AppState, body: ClaimJson) -> ApiResult<(StatusCode, Json
                     "sessionMode": token.session_mode,
                     "limits": token.limits,
                     "expiresAt": token.expires_at.and_then(rfc3339),
+                    "shareUsage": token.share_usage,
                     "snippets": snippets(&base, &secret.raw),
                     "installLinks": install_links(&base, &secret.raw),
                 })),
@@ -409,6 +422,7 @@ mod tests {
             link_hours: None,
             accounts: None,
             project: None,
+            share_usage: None,
         }
     }
 

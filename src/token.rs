@@ -192,6 +192,9 @@ pub struct Token {
     /// The project it is bound to, or `None` for its own workspace. Token
     /// holders see only this name, never the project's folder or accounts.
     pub project: Option<String>,
+    /// Whether `/v1/me` shows this token the headroom of the accounts
+    /// serving each of its agents. Off unless the owner turns it on.
+    pub share_usage: bool,
 }
 
 impl Token {

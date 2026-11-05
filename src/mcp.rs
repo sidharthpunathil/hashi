@@ -326,6 +326,7 @@ async fn ask(
             agent: Some(agent.as_str().to_owned()),
             model: a.model,
             account: None,
+            hops: 0,
         },
     )
     .await?;

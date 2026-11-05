@@ -9,6 +9,7 @@ pub mod api;
 pub mod diagnostics;
 pub mod doctor;
 pub mod events;
+pub mod forward;
 pub mod guard;
 pub mod install;
 pub mod maintenance;

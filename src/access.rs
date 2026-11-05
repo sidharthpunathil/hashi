@@ -786,6 +786,8 @@ fn accept_new(
         link_hours: Some(input.link_hours.unwrap_or(ACCEPTED_LINK_HOURS)),
         accounts: input.accounts,
         project: input.project.or(pre.project),
+        // Shared usage stays off unless the owner turns it on later.
+        share_usage: None,
     })?;
     new.accounts = crate::api::check_accounts(store, new.accounts)?;
     crate::api::check_binding(store, new.project.as_deref(), &new.agents, &new.accounts)?;

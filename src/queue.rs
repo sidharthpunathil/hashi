@@ -31,6 +31,15 @@
 //! tried at most once per request. A token with no list for the agent runs
 //! on the default account exactly as before, with no limit tracking.
 //!
+//! A remote account (see [`crate::forward`]) runs no process: the prompt
+//! goes to the friend's bridge and the answer, usage and cost come back
+//! from it. The local run timeout applies, and a cancel or timeout cancels
+//! the request on the bridge too, best effort. A limit there marks the
+//! account limited, a paused, revoked or forbidden token disables it with
+//! the reason shown to the owner, and a network failure moves the request
+//! to the next account. A prompt that already came through
+//! [`crate::forward::MAX_HOPS`] bridges is never forwarded again.
+//!
 //! A token bound to a project (see [`crate::projects`]) runs with the
 //! project's effective settings: only agents both allow, the account list
 //! [`crate::projects::effective`] picks, and the project folder as the
@@ -341,9 +350,14 @@ enum Halt {
     Failed(String),
     /// Put back in the queue (its token is paused).
     Requeued,
-    /// Put back in the queue to run on the next account, after this one hit
-    /// its limit.
-    Failover(String),
+    /// Put back in the queue to run on the next account, after this one
+    /// could not take it.
+    Failover {
+        /// The account that could not take it.
+        account: String,
+        /// Why, for the owner's log.
+        why: String,
+    },
     /// Its token is gone.
     Revoked,
 }
@@ -506,11 +520,11 @@ impl Worker {
                 info!(id = %req.id, agent = %self.agent, "token paused, request left in the queue");
                 return;
             }
-            Err(Halt::Failover(account)) => {
+            Err(Halt::Failover { account, why }) => {
                 info!(id = %req.id, agent = %self.agent, account = %account,
-                      "account at its limit, the request goes to the next account");
+                      "account {why}, the request goes to the next account");
                 self.bus.log(format!(
-                    "{} account {account} is at its limit; trying the next one",
+                    "{} account {account} {why}; trying the next one",
                     self.agent.display_name()
                 ));
                 self.dispatcher.wake(self.agent);
@@ -608,12 +622,14 @@ impl Worker {
                 kind: AccountKind::Default,
                 listed: false,
                 fresh: false,
+                remote: None,
             }));
         };
         let now = now_ms();
         let policy = self.policy(eff);
         let mut names: Vec<&String> = Vec::new();
         let mut kinds = Vec::new();
+        let mut remotes = Vec::new();
         let mut candidates = Vec::new();
         for name in list {
             let state = self
@@ -627,14 +643,29 @@ impl Worker {
                 Some(s) if s.kind == AccountKind::Default => continue,
                 Some(s) => s.kind,
             };
+            let remote = state
+                .as_ref()
+                .filter(|s| s.kind == AccountKind::Remote)
+                .map(|s| {
+                    (
+                        s.remote.clone().unwrap_or_default(),
+                        s.remote_agent.unwrap_or(self.agent),
+                    )
+                });
+            // A prompt that already came through the most bridges allowed
+            // is never forwarded again.
             let ready = !tried.contains(name)
-                && state.is_none_or(|s| s.status(now) == AccountStatus::Ready);
+                && state
+                    .as_ref()
+                    .is_none_or(|s| s.status(now) == AccountStatus::Ready)
+                && (remote.is_none() || req.hops < crate::forward::MAX_HOPS);
             let summary = self
                 .store
                 .account_summary(self.agent, name, policy.rotate_at, now)
                 .map_err(|e| e.to_string())?;
             names.push(name);
             kinds.push(kind);
+            remotes.push(remote);
             candidates.push(crate::usage::Candidate {
                 available: ready,
                 summary,
@@ -645,6 +676,7 @@ impl Worker {
             kind: kinds[i],
             listed: true,
             fresh,
+            remote: remotes[i].clone(),
         };
         let current = if req.stateful {
             let owned: Vec<String> = names.iter().map(|n| (*n).clone()).collect();
@@ -729,12 +761,6 @@ impl Worker {
     }
 
     async fn execute(&self, req: &Request) -> Result<agent::AgentOutput, Halt> {
-        let cfg = self
-            .cfg
-            .agents
-            .get(&self.agent)
-            .ok_or("agent is not configured")?;
-
         let token = self.token_gate(req)?;
         let mut eff = self.effective(&token)?;
         if let Some(name) = self.dispatcher.pinned_account(&req.id) {
@@ -811,6 +837,17 @@ impl Worker {
         {
             warn!(error = %e, "failed to start a fresh conversation");
         }
+        if account.kind == AccountKind::Remote {
+            self.store
+                .set_request_account(&req.id, &account.name)
+                .map_err(|e| e.to_string())?;
+            return self.run_remote(req, &eff, &account).await;
+        }
+        let cfg = self
+            .cfg
+            .agents
+            .get(&self.agent)
+            .ok_or("agent is not configured")?;
         // The owner's credential variables are removed and the account's
         // own set, for every account but the default.
         let env = acct::run_env(&self.cfg.home, self.agent, &account.name, account.kind).map_err(
@@ -940,6 +977,20 @@ impl Worker {
             }
             return Halt::Failed(error);
         };
+        self.limited(req, eff, account, reset)
+    }
+
+    /// Marks `account` limited until `reset` (Unix ms, capped at
+    /// [`agent::limit::MAX_RESET`] from now), or for the cooldown when it is
+    /// unknown or past, and fails the request over to the next account, or
+    /// fails it when none is left.
+    fn limited(
+        &self,
+        req: &Request,
+        eff: &Effective,
+        account: &Picked,
+        reset: Option<i64>,
+    ) -> Halt {
         let now = now_ms();
         let cooldown = i64::try_from(self.cfg.account_cooldown.as_millis()).unwrap_or(i64::MAX);
         let latest = now
@@ -970,15 +1021,209 @@ impl Worker {
         }
         info!(agent = %self.agent, account = %account.name,
               until = %crate::util::rfc3339(until).unwrap_or_default(), "account at its limit");
+        self.move_on(req, eff, account, "is at its limit", None)
+    }
+
+    /// Fails the request over to the next account after `account` could
+    /// not take it (`why`, for the owner's log), or fails it when none is
+    /// left: with `last_error`, or else with why no account is left.
+    fn move_on(
+        &self,
+        req: &Request,
+        eff: &Effective,
+        account: &Picked,
+        why: &str,
+        last_error: Option<String>,
+    ) -> Halt {
         let mut tried = req.accounts_tried.clone();
         tried.push(account.name.clone());
         match self.pick_account(req, eff, &tried) {
             Ok(Some(_)) => match self.store.requeue_after_limit(&req.id, &account.name) {
-                Ok(()) => Halt::Failover(account.name.clone()),
+                Ok(()) => Halt::Failover {
+                    account: account.name.clone(),
+                    why: why.to_owned(),
+                },
                 Err(e) => Halt::Failed(e.to_string()),
             },
-            Ok(None) => Halt::Failed(self.none_left(&eff.accounts)),
+            Ok(None) => Halt::Failed(last_error.unwrap_or_else(|| self.none_left(&eff.accounts))),
             Err(halt) => halt,
+        }
+    }
+
+    /// Runs the request on a remote account: forwards it to the friend's
+    /// bridge and waits for the answer (see [`crate::forward`]). Token
+    /// holders never learn that the account is remote: errors they see
+    /// name no bridge.
+    async fn run_remote(
+        &self,
+        req: &Request,
+        eff: &Effective,
+        account: &Picked,
+    ) -> Result<agent::AgentOutput, Halt> {
+        use crate::forward::{self, Failure};
+        let (remote, remote_agent) = account
+            .remote
+            .clone()
+            .unwrap_or_else(|| (String::new(), self.agent));
+        let target = match forward::Target::load(&self.cfg.home, &remote, remote_agent) {
+            Ok(t) => t,
+            Err(why) => {
+                warn!(agent = %self.agent, account = %account.name,
+                      "could not load a remote account: {why}");
+                self.disable(account, &why);
+                return Err(self.move_on(req, eff, account, "could not be loaded", None));
+            }
+        };
+        let from = self.store.instance_id().map_err(|e| e.to_string())?;
+        let timeout = self.cfg.limits.timeout;
+        let handle = Arc::new(forward::Handle::default());
+        // Dropped however this ends, including when the run is cancelled
+        // or its token revoked: a request still running on the bridge is
+        // then cancelled there too.
+        let _cancel = RemoteCancel {
+            target: target.clone(),
+            handle: Arc::clone(&handle),
+        };
+        let message = req.message.clone();
+        let model = req.model.clone();
+        let hops = req.hops;
+        let max_output = self.cfg.limits.max_output;
+        let deadline = std::time::Instant::now() + timeout;
+        let run = tokio::task::spawn_blocking(move || {
+            forward::forward(
+                &target,
+                &forward::Call {
+                    message: &message,
+                    model: model.as_deref(),
+                    hops,
+                    from: &from,
+                    deadline,
+                    max_output,
+                },
+                &handle,
+            )
+        });
+        let result = match tokio::time::timeout(timeout + Duration::from_secs(20), run).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err(Failure::Retryable("the forwarded run stopped".to_owned())),
+            Err(_) => Err(Failure::TimedOut),
+        };
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(failure) => {
+                let halt = self.remote_failed(req, eff, account, &remote, failure, timeout);
+                self.after_run(&account.name);
+                return Err(halt);
+            }
+        };
+        if let Err(e) = self
+            .store
+            .mark_account_used(self.agent, &account.name, true)
+        {
+            warn!(error = %e, "failed to record the account's use");
+        }
+        if let Err(e) = self.store.clear_error_usage(self.agent, &account.name) {
+            warn!(error = %e, "failed to clear an account's limit record");
+        }
+        self.after_run(&account.name);
+        info!(agent = %self.agent, account = %account.name, remote = %remote,
+              "prompt answered by a remote bridge");
+        Ok(agent::AgentOutput {
+            text: reply.text,
+            session_id: None,
+            usage: reply.usage,
+            rate_limits: Vec::new(),
+        })
+    }
+
+    /// What a failed forward means for the request and the account.
+    fn remote_failed(
+        &self,
+        req: &Request,
+        eff: &Effective,
+        account: &Picked,
+        remote: &str,
+        failure: crate::forward::Failure,
+        timeout: Duration,
+    ) -> Halt {
+        use crate::forward::Failure;
+        match failure {
+            Failure::Limited { reset_at, message } => {
+                info!(agent = %self.agent, account = %account.name, remote = %remote,
+                      "the remote bridge is at a limit: {}", log_excerpt(&message));
+                self.limited(req, eff, account, reset_at)
+            }
+            Failure::Disabled(reason) => {
+                warn!(agent = %self.agent, account = %account.name, remote = %remote,
+                      "remote account switched off: {reason}");
+                self.disable(account, &reason);
+                self.move_on(req, eff, account, "was switched off", None)
+            }
+            Failure::Retryable(why) => {
+                warn!(agent = %self.agent, account = %account.name, remote = %remote,
+                      "the remote bridge could not take the run: {}", log_excerpt(&why));
+                self.used(&account.name, false);
+                self.move_on(
+                    req,
+                    eff,
+                    account,
+                    "could not be reached",
+                    Some(format!(
+                        "{} could not be reached on any account this token can use; \
+                         try again later",
+                        self.agent.display_name()
+                    )),
+                )
+            }
+            Failure::TimedOut => {
+                self.used(&account.name, false);
+                Halt::Failed(agent::AgentError::Timeout(timeout).to_string())
+            }
+            Failure::Failed(error) => {
+                self.used(&account.name, false);
+                Halt::Failed(error)
+            }
+        }
+    }
+
+    /// Records a run on `account`.
+    fn used(&self, account: &str, succeeded: bool) {
+        if let Err(e) = self.store.mark_account_used(self.agent, account, succeeded) {
+            warn!(error = %e, "failed to record the account's use");
+        }
+    }
+
+    /// Switches `account` off with `reason`, which the owner sees in
+    /// `hashi account list`.
+    fn disable(&self, account: &Picked, reason: &str) {
+        if let Err(e) = self
+            .store
+            .disable_account_because(self.agent, &account.name, reason)
+        {
+            warn!(error = %e, "failed to switch an account off");
+        }
+        self.bus.log(format!(
+            "{} account {} was switched off: {reason}",
+            self.agent.display_name(),
+            account.name
+        ));
+    }
+}
+
+/// Cancels a forwarded request on the remote bridge when dropped while it
+/// is still running there, on a thread of its own so the drop never
+/// blocks.
+#[derive(Debug)]
+struct RemoteCancel {
+    target: crate::forward::Target,
+    handle: Arc<crate::forward::Handle>,
+}
+
+impl Drop for RemoteCancel {
+    fn drop(&mut self) {
+        if let Some(id) = self.handle.stop() {
+            let target = self.target.clone();
+            std::thread::spawn(move || crate::forward::cancel(&target, &id));
         }
     }
 }
@@ -994,6 +1239,8 @@ struct Picked {
     /// The token's conversation moves here from another account, so it
     /// starts fresh.
     fresh: bool,
+    /// For a remote account: the saved remote and the agent asked for there.
+    remote: Option<(String, AgentKind)>,
 }
 
 /// Who asked for a cancel.

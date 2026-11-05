@@ -282,6 +282,8 @@ pub fn signed_in(
 ) -> String {
     match kind {
         AccountKind::Default => "-".to_owned(),
+        // Signed in on the friend's bridge; its state comes from runs and polls.
+        AccountKind::Remote => "remote".to_owned(),
         AccountKind::ApiKey | AccountKind::OauthToken => {
             if acct::read_key(home, agent, name).is_ok() {
                 "key set".to_owned()

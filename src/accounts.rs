@@ -11,6 +11,10 @@
 //!   refreshes those credentials.
 //! - **key**: an API key in `<home>/accounts/<agent>/<name>/key` (mode
 //!   0600), passed in the agent's API-key variable.
+//! - **remote**: access a friend shared with the owner. A run sends the
+//!   prompt to the saved remote's bridge (see [`crate::remote`] and
+//!   [`crate::forward`]) instead of starting a process. The remote's token
+//!   stays in `remotes.json`; the database keeps only the remote's name.
 //!
 //! Every run on a non-default account first removes the agent's credential
 //! variables inherited from the owner ([`credential_vars`]), so an
@@ -62,6 +66,8 @@ pub enum AccountKind {
     ApiKey,
     /// A Claude Code OAuth token, from `claude setup-token`.
     OauthToken,
+    /// A friend's bridge, through a saved remote.
+    Remote,
 }
 
 impl AccountKind {
@@ -73,6 +79,7 @@ impl AccountKind {
             Self::Login => "login",
             Self::ApiKey => "api-key",
             Self::OauthToken => "oauth-token",
+            Self::Remote => "remote",
         }
     }
 
@@ -98,8 +105,9 @@ impl FromStr for AccountKind {
             "login" => Ok(Self::Login),
             "api-key" | "key" => Ok(Self::ApiKey),
             "oauth-token" => Ok(Self::OauthToken),
+            "remote" => Ok(Self::Remote),
             other => Err(format!(
-                "unknown account kind `{other}` (expected login, api-key or oauth-token)"
+                "unknown account kind `{other}` (expected login, api-key, oauth-token or remote)"
             )),
         }
     }
@@ -136,6 +144,7 @@ pub const fn supports(agent: AgentKind, kind: AccountKind) -> bool {
         AccountKind::Default => true,
         AccountKind::Login => dir_var(agent).is_some(),
         AccountKind::ApiKey | AccountKind::OauthToken => key_var(agent, kind).is_some(),
+        AccountKind::Remote => true,
     }
 }
 
@@ -471,6 +480,8 @@ pub fn run_env(
             let var = key_var(agent, kind).ok_or_else(|| unsupported(agent, kind))?;
             vec![(var.to_owned(), read_key(home, agent, name)?)]
         }
+        // A remote account never starts a process.
+        AccountKind::Remote => return Err(unsupported(agent, kind)),
     };
     let mut remove = credential_vars(agent).to_vec();
     remove.extend_from_slice(always_removed(agent));
@@ -641,6 +652,7 @@ mod tests {
             AccountKind::Login,
             AccountKind::ApiKey,
             AccountKind::OauthToken,
+            AccountKind::Remote,
         ] {
             assert_eq!(k.as_str().parse::<AccountKind>(), Ok(k));
         }

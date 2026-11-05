@@ -383,6 +383,7 @@ async fn chat_completions(
         agent: agent.map(|a| a.as_str().to_owned()),
         model,
         account: None,
+        hops: 0,
     };
 
     if body.stream.unwrap_or(false) {

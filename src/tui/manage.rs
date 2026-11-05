@@ -594,6 +594,7 @@ impl App {
                     agent: agent.map(|a| a.as_str().to_owned()),
                     model,
                     account: form.account().map(str::to_owned),
+                    hops: 0,
                 };
                 // `submit` only checks and queues; nothing in it waits.
                 match futures::executor::block_on(crate::api::submit(&self.state, &owner, input)) {
