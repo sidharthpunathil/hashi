@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod diagnostics;
 pub mod events;
 pub mod mcp;
 pub mod queue;

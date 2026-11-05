@@ -1062,6 +1062,14 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     let block = panel("event log", t::VIOLET);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let [inner, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Something wrong? Run `hashi report` and attach the file to an issue.",
+            t::muted(),
+        )),
+        hint,
+    );
     if app.feed.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(

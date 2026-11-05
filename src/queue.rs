@@ -138,6 +138,14 @@ impl Worker {
             }
             Err(err) => {
                 let msg = truncate(&err, 4_000);
+                let error_id = crate::diagnostics::new_error_id();
+                warn!(
+                    id = %req.id,
+                    agent = %self.agent,
+                    error_id = %error_id,
+                    error = %msg,
+                    "request failed"
+                );
                 if let Err(e) = self.store.fail_request(&req.id, &msg) {
                     warn!(id = %req.id, error = %e, "failed to store error");
                 }

@@ -6,7 +6,9 @@ Hashi lets HTTP clients run coding agents on the host machine, so security repor
 
 Please do not open a public issue. Report privately through GitHub's [private vulnerability reporting](https://github.com/sidharthpunathil/hashi/security/advisories/new).
 
-Include the version (`hashi --version`), what you did, what happened, and what you expected. You will get an acknowledgement within a few days. A fix is coordinated with you before anything is disclosed.
+Include the version (`hashi --version`), what you did, what happened, and what you expected.
+
+`hashi report` redacts tokens, invite codes, provider keys and your home directory, and leaves prompts out. Still read the file before you post it anywhere public, since error messages and log lines can carry details that no pattern catches. You will get an acknowledgement within a few days. A fix is coordinated with you before anything is disclosed.
 
 ## In scope
 
