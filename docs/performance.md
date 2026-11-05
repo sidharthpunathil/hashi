@@ -1,6 +1,6 @@
 # Performance: memory, startup and binary size
 
-Measured on release builds, before (`4829217`) and after this pass. macOS is
+Measured for 0.3.0 on release builds, before (`4829217`) and after this pass. macOS is
 an Apple Silicon laptop (10 cores, about 650 processes running); Linux is
 `rust:1-bookworm` in Docker on the same machine. Every server ran with a
 fresh temp `HASHI_HOME` and `HOME`, fake agent scripts for all six agents,
@@ -64,6 +64,34 @@ not growth per request.
 4. **The watchdog reads memory only for the run's processes**
    (`src/guard.rs`). See the sampler section.
 5. **Release binaries keep their symbol names** (`Cargo.toml`). See below.
+
+## Request path, database and dashboard
+
+These were timed in process with the ignored benches below, on a seeded
+store of 200 tokens, 10 projects, 30 accounts with usage and 20,000
+finished requests (medians, before and after):
+
+| Path | Before | After | Change |
+|---|---|---|---|
+| Token lookup on every authenticated request | 8.8 µs | 3.9 µs | prepared statements cached per connection (64 slots) |
+| `GET /v1/ask/{id}` | 19.8 µs | 10.1 µs | the same |
+| MCP `tools/list` | 28 µs | 22 µs | the same |
+| `GET /v1/stats` | 0.50 ms | 0.05 ms | counts index pages and small status ranges instead of every entry |
+| `GET /v1/projects` (10 projects) | 3.6 ms | 0.53 ms | schema 9 index on `(project, created_at, cost_usd)` |
+| `GET /v1/accounts` (30 accounts) | 8.7 ms | 2.1 ms | one read of every token's account list instead of one per account |
+| Dashboard refresh | 5.8 ms | 2.0 ms | store data read once per refresh into a frame cache, not once per frame |
+| Accounts popup, one frame | 5.4 ms | 0.25 ms | the same |
+
+The Tokens view also draws only the rows that fit, as the Requests view
+does.
+
+```sh
+cargo test --release --test perf -- --ignored --nocapture
+cargo test --release --test tui_bench -- --ignored --nocapture
+```
+
+`tests/perf.rs` never touches `~/.hashi`; set `HASHI_PERF_KEEP` to a file
+path to keep the seeded database for `EXPLAIN QUERY PLAN`.
 
 ## Binary size and the release profile
 

@@ -66,7 +66,7 @@ hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
 hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, --clear-limits
 hashi token revoke hashi_1a2b3c4d
-hashi share alice --agents claude          # one-time invite link
+hashi share alice --agents claude          # one-time invite link (see Invites and limits)
 hashi account add claude work              # another login for an agent (see Accounts)
 hashi project add api ~/code/api           # a folder to share (see Projects)
 hashi share bob --project api              # an invite that works in that folder
@@ -84,10 +84,40 @@ hashi uninstall                            # remove the binary and ~/.hashi (--d
 
 `hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
-The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (`hashi/0.2.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
+The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.3.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
 
 - `--version v0.3.0` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
 - Downloads are HTTPS only, and only a regular file in the archive is installed (see [supply chain](security-model.md#supply-chain)).
+
+### Invites and limits
+
+```bash
+hashi share alice --daily-requests 50 --daily-budget 5 --expires-in-days 30
+hashi share bob --agents claude,codex --stateful --link-hours 168
+hashi invite list                           # pending, claimed and expired invites
+hashi invite cancel <id>
+hashi token create ci --agents codex --max-pending 2 --monthly-requests 500
+hashi token update hashi_1a2b3c4d --pause   # --resume, --expires-in-days 0, --clear-limits, --note ..
+hashi token revoke hashi_1a2b3c4d
+```
+
+`hashi share <label>` prints a one-time link, `<base>/claim/hashi_inv_<code>`. The base is `--public-url` (or `HASHI_PUBLIC_URL`), else the running server's public URL from `~/.hashi/public-url`, else this machine on `--port` (from `settings.json`, else `7878`), which only works locally. The link works once and expires after `--link-hours` (`1`, `24` or `168`; default `24`). `--expires-in-days` counts from the claim. Every flag of `hashi token create` that shapes access works on `share` too: `--agents`, `--stateful`, `--account`, `--project`, `--share-usage` and the limit flags. At most 100 invites can be pending.
+
+The claim page shows who is sharing, which agents the person gets, their limits, the project's name if any, and a notice that you can see their prompts and answers. Claiming gives them a personal `user` token once, with ready-made curl, Python, TypeScript and MCP snippets, Add to Cursor and Add to VS Code buttons and a `codex mcp add` command. It also offers "Set up from a terminal": one `sh` or PowerShell command that installs Hashi and runs `hashi connect` with the link (see [installer options](#installer-options)).
+
+**Limits** apply to any `user` token, from `share`, `token create`, `token update` or the API:
+
+| Flag | Limit |
+|---|---|
+| `--daily-requests`, `--monthly-requests` | Prompts per UTC day or month |
+| `--daily-budget`, `--monthly-budget` | Reported spend in USD per UTC day or month. Only Claude Code, opencode and Crush report cost, so budgets bound only those |
+| `--max-pending` | Prompts queued or running at once, 1 to 100. A `user` token created without limits gets 3 |
+
+Over a cap, a prompt answers `429 limit_reached` with the limit and the time it resets. `hashi token update --clear-limits` removes every limit before applying the limit flags given with it.
+
+**Control.** Pause, resume, extend, edit or revoke from the dashboard (Tokens view: `p`, `e`, `d`), `hashi token update` and `hashi token revoke`, or `PATCH` and `DELETE /v1/tokens/{id}`. Pausing holds queued prompts, expiry fails them, and revoking stops running prompts at once and deletes the token's workspace. Every change is recorded in `hashi audit`.
+
+**Self-service.** `/me` is a page where a token holder pastes their token to see its status, limits and today's use, and ask for more (see [access requests](#access-requests)). `GET /v1/me` returns the same. Hashi is also an MCP server at `/mcp`, so a token holder can add your agents as tools in their own Claude Code, Cursor or Codex.
 
 ### Accounts
 
@@ -285,7 +315,8 @@ Nearly everything the CLI does can be done from the dashboard, through the same 
 
 | Key | Action |
 |---|---|
-| `1` `2` `3` `4` `5`, `Tab`, `h` `l` | Overview, Requests, Tokens, Logs, Commands |
+| `1` `2` `3` `4` `5` | Overview, Requests, Tokens, Logs, Commands |
+| `Tab` `Shift-Tab`, `→` `←`, `l` `h` | Next / previous view |
 | `↑` `↓` / `j` `k` | Move the selection |
 | `PgUp` `PgDn` / `J` `K` | Scroll the request detail |
 | `Enter` | Run the selected row (Commands view) |
@@ -294,7 +325,7 @@ Nearly everything the CLI does can be done from the dashboard, through the same 
 | `e` | Edit the selected token: name, note, expiry, limits, accounts and project (Tokens view) |
 | `s` | Share: create an invite link (Tokens and Commands views) |
 | `p` | Pause or resume the selected token |
-| `i` / `x` | Switch to pending invites / cancel one |
+| `i` / `x` | Switch between tokens and pending invites / cancel the selected invite (Tokens view) |
 | `x` | Cancel the selected queued or running request, after confirmation (Requests view). Audited as `dashboard` |
 | `c` | Copy the API URL, or the token or invite link being shown |
 | `t` | Go public: start a Cloudflare quick tunnel on the running server. Without `cloudflared`, opens its install popup; with Tailscale public, asks to switch |
@@ -372,17 +403,17 @@ Running requests count up their elapsed time, and every status pairs a symbol wi
 
 | Variable | Effect |
 |---|---|
-| `HASHI_VERSION=v0.2.0` | Install a specific release instead of the latest |
+| `HASHI_VERSION=v0.3.0` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
 | `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect -- <link>` instead of `hashi doctor`. Only a link of the shape the claim page builds (`https://<host>[:port]/claim/hashi_inv_<hex>`, or `http://` on loopback) is accepted; anything else stops the installer before it downloads. It fails with a clear message if the link is used up or expired |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.2.0 sh
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.3.0 sh
 ```
 
 ```powershell
-$env:HASHI_VERSION = "v0.2.0"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+$env:HASHI_VERSION = "v0.3.0"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
 The claim page builds the one-command setup for an invited person from its own link:

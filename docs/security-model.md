@@ -113,13 +113,13 @@ The dashboard draws text that other people wrote: prompts, answers, token and in
 - Hashi binds to `127.0.0.1` by default. Binding elsewhere without TLS prints a warning. Tunnels and HTTPS are opt-in.
 - Cross-origin browser access is off unless you list an origin with `--cors-origin`. Over plain HTTP, Hashi answers only requests whose `Host` is an IP address, `localhost`, the `--public-url` host or a name you list with `--allowed-host`, which stops DNS rebinding.
 - The claim, ask-access and My access pages load nothing from other sites, run no inline script, and are served with a strict Content Security Policy, `no-referrer` and `no-store`, so an invite code never leaks through a Referer header or a cache.
+- A body without a JSON content type is read as JSON only when the request carries an `Authorization` header, which a web page on another site cannot add without a CORS preflight. The unauthenticated claim and ask-access endpoints therefore still refuse form posts, so a cross-site HTML form cannot reach them.
 - Invite links are single-use, hashed, short-lived and create `user` tokens only.
 
 ## Data on disk
 
 - **One server per home.** A server holds an exclusive OS lock on `~/.hashi/server.lock` while it runs, taken before it touches the database. A second `hashi serve` on the same home refuses to start, so it cannot requeue the first server's running prompts. Only the lock holder writes `server.pid`, a server removes that file only while it holds its own pid, and `hashi uninstall` treats a held lock as a running server.
 - **Schema versions.** A database written by a newer Hashi (its schema version is above what this build knows) is refused with both versions named, never opened and misread. Migrations run in one transaction that takes the write lock first, so two processes opening an old database at once both succeed.
-
 - On macOS and Linux, `~/.hashi` is created `0700`, and the database with its WAL and SHM files, logs, crash files, the tunnel config and `hashi report` output are `0600`. On Windows, Hashi limits the home to you, SYSTEM and Administrators; a `HASHI_HOME` outside your profile prints a warning, and Hashi refuses to start there if it cannot set that.
 - Errors returned to token holders have your home directory replaced by `~` and secrets masked. Headless output strips control and text-direction characters, so agent output cannot rewrite your terminal.
 - Every hour Hashi deletes finished requests older than `--retention-days` (never the current month, which monthly caps count from), plus audit records and claimed or expired invites older than the retention period or 90 days, whichever is longer, and access requests decided or expired more than 30 days ago, and the usage windows, usage reads and conversations of accounts that no longer exist, and returns the freed pages to the disk.

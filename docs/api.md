@@ -1,6 +1,10 @@
 # API reference
 
-Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, `/healthz`, `/v1/status` and the share pages needs `Authorization: Bearer <token>`. Request and response bodies are JSON with camelCase keys.
+Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, `/healthz`, `/v1/status`, the claim and ask-access endpoints and the share pages needs `Authorization: Bearer <token>`. Request and response bodies are JSON with camelCase keys.
+
+A request with an `Authorization` header and no `Content-Type`, or `curl -d`'s default `application/x-www-form-urlencoded`, is read as JSON, so the curl examples need no `Content-Type` header. The unauthenticated claim and ask-access endpoints still need `Content-Type: application/json`: a cross-site HTML form cannot send it, or an `Authorization` header, without a CORS preflight.
+
+**How a request runs.** A request is checked against its token, written to SQLite and handed to that agent's worker. The worker claims it, starts the CLI directly (no shell, prompt after `--`) in the token's workspace under the resource guard, parses its output and stores the answer. Long-polling clients and the dashboard follow along on an in-process event bus. If Hashi stops mid-run, the request goes back in the queue on the next start.
 
 ## Endpoints
 
@@ -44,7 +48,7 @@ Hashi listens on `http://127.0.0.1:7878` by default. Every endpoint except `/`, 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `message` | string | required | Up to 32 KB |
-| `agent` | `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor` | server default (`claude`) | Must be installed and allowed for the token |
+| `agent` | `claude`, `codex`, `gemini`, `opencode`, `qwen`, `cursor`, or `crush` when the server runs with `--enable-crush` | server default (`claude`), or the project's `defaultAgent` | Must be installed and allowed for the token |
 | `model` | string | agent default | Passed to the agent's `--model` / `-m` |
 | `wait` | seconds | none | Hold the request open up to this long (max 120) |
 
@@ -77,7 +81,7 @@ A token can cancel its own requests; an admin token can cancel any. Another toke
 
 `POST /v1/chat/completions` and `GET /v1/models` speak enough of the OpenAI API for apps and libraries built for it. They take the same Hashi tokens, and every prompt goes through the same path as `POST /v1/ask`, so pause, agent scope, limits and the queue all apply.
 
-- **`model`** picks the agent: `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor`. Add the agent's own model after a slash, for example `claude/opus` or `gemini/gemini-2.5-pro`. Without `model` the server's default agent answers.
+- **`model`** picks the agent: `claude`, `codex`, `gemini`, `opencode`, `qwen`, `cursor` or (when enabled) `crush`. Add the agent's own model after a slash, for example `claude/opus` or `gemini/gemini-2.5-pro`. Without `model` the server's default agent answers.
 - **`messages`.** System and developer messages go first as an instruction block, earlier user and assistant turns follow as a plain transcript, and the last message, which must be from the user, ends the prompt. Only text is accepted: a string, or parts with `type: "text"`. Images, audio and `tool` messages answer `400`.
 - **Response.** A standard `chat.completion` with `finish_reason: "stop"`. `usage` maps the tokens the agent reports (`prompt_tokens`, `completion_tokens`, `total_tokens`) and is left out when the agent reports none. The `X-Hashi-Request-Id` header carries the Hashi request id.
 - **`stream: true`** answers with server-sent events: a role chunk, then `: queued` or `: running` comment lines every second while the request waits or runs, then one chunk with the whole answer, a final chunk with `finish_reason`, and `data: [DONE]`. Agents do not stream token by token. With `stream_options.include_usage` a usage chunk comes before `[DONE]`. A failed run sends `data: {"error": {...}}` and closes the stream. A stream also ends, with an error chunk and `data: [DONE]`, when its token is paused (`token_paused`), revoked or expires (`unauthorized`), or when it has been open for twice the run timeout plus 10 seconds (`504 stream_timeout`). The request keeps its place in the queue: read it later with `GET /v1/ask/{id}`. A stream counts as one of the token's 4 open long polls; a fifth answers `429 too_many_waits`.
@@ -141,7 +145,7 @@ A token with a `project` runs in the project's folder. It may use the agents bot
 
 `accounts` looks like `{"claude": ["work", "personal"], "codex": ["ci"]}`. Each name must be an account added with `hashi account add`, or `default` for your own login; an unknown name is refused with `400`. A run uses the first listed account that is enabled and not at its limit, and fails over to the next one when it hits the agent's limit. Token listings and `PATCH` responses show `accounts` to admins; `/v1/me`, MCP and the claim page never do.
 
-`limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd` and `maxPending`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code and opencode do, so budgets bound only those two.
+`limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd` and `maxPending`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code, opencode and Crush do, so budgets bound only those.
 
 `shareUsage: true` adds `agentUsage` to the token's `GET /v1/me`: for each agent it may use, the most headroom left on an account serving it that can take a run, as a whole percent, that account's next reset and its state (`ok`, `warning`, `limited` or `unknown`). When every account serving the agent is at its limit or disabled, the state is `limited`, `headroom` is `0` and `nextReset` is when the first comes back. Account names, how many accounts there are and their windows are never included:
 
@@ -162,11 +166,11 @@ Off by default. `POST /v1/request-link` (admin) opens the ask-access link and cl
 The page, and `hashi request`, use three public endpoints. Codes go in the body, never the path:
 
 ```bash
-curl -X POST https://host/v1/ask-access/preview -d '{"code": "hashi_ask_…"}'
+curl -X POST https://host/v1/ask-access/preview -H "Content-Type: application/json" -d '{"code": "hashi_ask_…"}'
 # {"server": "Sid's Hashi", "note": "...", "project": null, "agents": ["claude", "codex"], "closesAt": "...", ...}
-curl -X POST https://host/v1/ask-access -d '{"code": "hashi_ask_…", "name": "Alice", "message": "for the docs", "agents": ["claude"]}'
+curl -X POST https://host/v1/ask-access -H "Content-Type: application/json" -d '{"code": "hashi_ask_…", "name": "Alice", "message": "for the docs", "agents": ["claude"]}'
 # 201 {"id": "...", "status": "pending", "pickup": "hashi_pick_<64 hex>", "expiresAt": "..."}
-curl -X POST https://host/v1/ask-access/status -d '{"pickup": "hashi_pick_…"}'
+curl -X POST https://host/v1/ask-access/status -H "Content-Type: application/json" -d '{"pickup": "hashi_pick_…"}'
 # {"status": "accepted", "claimCode": "hashi_inv_…", "claimUrl": "https://host/claim/hashi_inv_…", ...}
 ```
 
@@ -298,17 +302,26 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 403 | `token_paused` | The token is paused by the owner |
 | 404 | `not_found` | Unknown request, or a request owned by another token |
 | 404 | `invite_not_found` | Unknown or cancelled invite link |
+| 404 | `link_not_found` | Unknown ask-access link code |
+| 404 | `request_not_found` | Unknown pickup secret |
 | 405 | `method_not_allowed` | `GET /mcp` |
 | 409 | `conflict` | Revoking the last admin token, pausing your own token, the token limit is reached, too many invites are pending, or cancelling a request that already finished |
 | 409 | `already_claimed` | The invite link was already used |
+| 409 | `project_in_use` | Removing a project that tokens or pending invites are bound to, or an edit that would leave one outside it |
+| 409 | `account_busy` | Refreshing an account while a run on it is in progress |
+| 409 | `link_full`, `requests_full` | The ask-access link holds 50 pending requests, or the server 200 |
+| 409 | `too_many_open_requests` | A token already has 3 open requests for more |
+| 409 | `not_pending` | Accepting or declining a request that was already decided or expired |
 | 410 | `invite_expired` | The invite link is past its expiry |
+| 410 | `link_closed` | The ask-access link was closed or has expired |
 | 413 | | Body larger than 64 KB |
 | 413 | `too_large` | A token that may run on a remote account sent a prompt that would pass 64 KB once forwarded |
 | 421 | `unknown_host` | Plain HTTP request with a `Host` Hashi does not serve (see `--allowed-host`) |
 | 429 | `limit_reached` | A daily or monthly cap was hit; `limit` and `resetAt` say which and until when |
 | 429 | `too_many_pending` | The token already has `maxPending` prompts in flight |
 | 429 | `too_many_waits` | OpenAI endpoint: the token already holds 4 open long polls or streams |
-| 429 | `rate_limited` | Per-token rate limit, full queue, or too many failed token or invite attempts from one address |
+| 429 | `request_too_soon` | A token asked for more less than an hour after its last request |
+| 429 | `rate_limited` | Per-token rate limit, full queue, too many failed token, invite, link or pickup attempts from one address, or an account refresh within a minute of the last |
 | 500 | `internal` | A bug in Hashi. The error also carries an `errorId` to quote in a bug report |
 | 502 | `agent_failed` | OpenAI endpoint: the agent run failed or was cancelled; `message` says why |
 | 503 | `unavailable` | That agent is not installed on this machine |
