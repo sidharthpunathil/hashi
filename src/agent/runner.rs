@@ -311,9 +311,28 @@ pub async fn run(
     workdir: &Path,
     limits: Limits,
 ) -> Result<RawOutput, AgentError> {
+    run_with(bin, args, env, &[], workdir, limits).await
+}
+
+/// Like [`run`], but also removes the inherited variables named in
+/// `remove` (matched without regard to case) before `env` is applied. A run
+/// on a non-default account uses this to drop the owner's credentials.
+///
+/// # Errors
+///
+/// See [`AgentError`].
+pub async fn run_with(
+    bin: &Path,
+    args: &[OsString],
+    env: &[(String, String)],
+    remove: &[&str],
+    workdir: &Path,
+    limits: Limits,
+) -> Result<RawOutput, AgentError> {
     let mut cmd = command(bin, args, limits.nice);
     for (key, _) in std::env::vars_os() {
-        if is_hashi_secret(&key) {
+        let upper = key.to_string_lossy().to_ascii_uppercase();
+        if is_hashi_secret(&key) || remove.iter().any(|r| r.eq_ignore_ascii_case(&upper)) {
             cmd.env_remove(&key);
         }
     }

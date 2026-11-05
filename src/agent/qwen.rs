@@ -221,6 +221,34 @@ fn is_top_level_result(m: &Value) -> bool {
         && m.get("parent_tool_use_id").is_none_or(Value::is_null)
 }
 
+/// Qwen Code's quota messages (`packages/core/src/utils/quotaErrorDetection.ts`
+/// and `retry.ts`): an exhausted token plan, an exceeded free allocation or
+/// `insufficient_quota`, and the rewrite for the discontinued OAuth free tier.
+const LIMIT_MESSAGES: [&str; 5] = [
+    "quota exhausted",
+    "quota has been exhausted",
+    "free allocated quota exceeded",
+    "insufficient_quota",
+    "qwen oauth free tier has been discontinued",
+];
+
+/// Whether a failed run's error says this account is at its limit, and when
+/// it resets if the message says: "The quota will reset at MM-DD HH:MM:SS
+/// UTC." has no year, so it is the next such time. See
+/// [`super::limit_hit`].
+#[must_use]
+pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
+    if !super::limit::contains_any(error, &LIMIT_MESSAGES) {
+        return None;
+    }
+    let now = time::OffsetDateTime::now_utc();
+    Some(
+        super::limit::after_marker(error, "reset at ")
+            .and_then(|rest| super::limit::next_month_day_utc(&rest, now))
+            .or_else(|| super::limit::reset_time(error, now)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +513,49 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn limit_messages_are_recognised() {
+        for msg in [
+            "Free allocated quota exceeded.",
+            "429 You exceeded your current quota (insufficient_quota)",
+            "Qwen OAuth free tier has been discontinued. Switch to an API key.",
+        ] {
+            assert_eq!(limit_hit(msg), Some(None), "{msg}");
+        }
+        // The Gemini-era pattern is not Qwen Code's.
+        assert!(
+            limit_hit("Quota exceeded for quota metric 'Requests' and limit 'Requests per day'")
+                .is_none()
+        );
+        assert!(limit_hit("quota exceeded").is_none());
+    }
+
+    #[test]
+    fn token_plan_reset_is_the_next_such_time() {
+        let now = time::OffsetDateTime::now_utc();
+        let soon = now + time::Duration::hours(3);
+        let msg = format!(
+            "Quota exhausted: Your token-plan monthly quota has been exhausted. The quota will reset at {:02}-{:02} {:02}:{:02}:{:02} UTC.",
+            u8::from(soon.month()),
+            soon.day(),
+            soon.hour(),
+            soon.minute(),
+            soon.second()
+        );
+        let at = limit_hit(&msg).unwrap().unwrap();
+        assert!((at - soon).whole_seconds().abs() <= 1, "{at} vs {soon}");
+        let past = now - time::Duration::hours(3);
+        let msg = format!(
+            "Quota exhausted: Your token-plan quota has been exhausted. The quota will reset at {:02}-{:02} {:02}:{:02}:{:02} UTC.",
+            u8::from(past.month()),
+            past.day(),
+            past.hour(),
+            past.minute(),
+            past.second()
+        );
+        let at = limit_hit(&msg).unwrap().unwrap();
+        assert!(at > now && at.year() >= now.year(), "{at}");
     }
 }

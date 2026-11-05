@@ -189,6 +189,41 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
     })
 }
 
+/// Gemini CLI's quota messages.
+const LIMIT_MESSAGES: [&str; 6] = [
+    "exhausted your daily quota",
+    "exhausted your capacity",
+    "quota exceeded",
+    "quota_exhausted",
+    "rate_limit_exceeded",
+    "please retry in",
+];
+
+/// A "Please retry in Ns" wait no longer than this is a brief rate limit,
+/// so the account gets the usual cooldown instead.
+const MIN_RETRY_SECS: u64 = 300;
+
+/// Whether a failed run's error says this account is at its limit, and when
+/// it resets if the message says. "Please retry in Ns" sets the reset only
+/// when N is over five minutes. See [`super::limit_hit`].
+#[must_use]
+pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
+    if !super::limit::contains_any(error, &LIMIT_MESSAGES) {
+        return None;
+    }
+    if let Some(rest) = super::limit::after_marker(error, "please retry in ") {
+        return Some(
+            super::limit::leading_seconds(&rest)
+                .filter(|n| *n > MIN_RETRY_SECS)
+                .map(|n| {
+                    time::OffsetDateTime::now_utc()
+                        + std::time::Duration::from_secs(n).min(super::limit::MAX_RESET)
+                }),
+        );
+    }
+    super::limit::hit(error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +443,36 @@ mod tests {
             parse_output(&noisy).unwrap().text,
             "It defines `add`, which sums two integers."
         );
+    }
+
+    #[test]
+    fn limit_messages_are_recognised() {
+        for msg in [
+            "You have exhausted your daily quota on this model.",
+            "You have exhausted your capacity on this model. Your quota will reset after 3h12m.",
+            "[API Error: 429 quota exceeded]",
+        ] {
+            assert!(limit_hit(msg).is_some(), "{msg}");
+        }
+        assert!(limit_hit("Gemini CLI reported an error").is_none());
+        assert!(limit_hit("[API Error: RESOURCE_EXHAUSTED QUOTA_EXHAUSTED]").is_some());
+        assert!(limit_hit("status RATE_LIMIT_EXCEEDED").is_some());
+    }
+
+    #[test]
+    fn retry_in_sets_the_reset_only_past_five_minutes() {
+        let hit = limit_hit("Quota exceeded for model. Please retry in 1234.5s.").unwrap();
+        let left = hit.unwrap() - time::OffsetDateTime::now_utc();
+        assert!((1_230..=1_235).contains(&left.whole_seconds()), "{left}");
+        assert_eq!(limit_hit("Please retry in 42.1s."), Some(None));
+        assert_eq!(limit_hit("Please retry in 300s."), Some(None));
+    }
+
+    #[test]
+    fn limit_reset_is_read_when_given() {
+        let msg =
+            "You have exhausted your capacity on this model. Your quota will reset after 3h12m.";
+        let left = limit_hit(msg).unwrap().unwrap() - time::OffsetDateTime::now_utc();
+        assert!((11_400..=11_520).contains(&left.whole_seconds()), "{left}");
     }
 }

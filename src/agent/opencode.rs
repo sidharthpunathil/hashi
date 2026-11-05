@@ -192,7 +192,7 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
                     .map(str::trim)
                     .filter(|m| !m.is_empty())
                     .unwrap_or("opencode reported an error");
-                failure = Some(message.to_owned());
+                failure = Some(describe_error(&event, message));
             }
             _ => {}
         }
@@ -232,6 +232,47 @@ fn count(value: Option<&Value>) -> u64 {
         }),
         None => 0,
     }
+}
+
+/// The typed `error.type` values opencode gives limit failures
+/// (`packages/core/src/session/to-session-error.ts`).
+const LIMIT_TYPES: [&str; 7] = [
+    "provider.rate-limit",
+    "provider.quota",
+    "provider.go-limit",
+    "provider.budget-limit",
+    "provider.model-budget-limit",
+    "provider.free-limit",
+    "provider.chatgpt-limit",
+];
+
+/// An error event's message, with its type and wait kept when it is one of
+/// the [`LIMIT_TYPES`]: `usage limit reached (provider.quota, retry after
+/// 30s)`. Other errors keep their message alone.
+fn describe_error(event: &Value, message: &str) -> String {
+    let kind = event.pointer("/error/type").and_then(Value::as_str);
+    let Some(kind) = kind.filter(|k| LIMIT_TYPES.contains(k)) else {
+        return message.to_owned();
+    };
+    let wait = ["/error/retryAfterMs", "/error/data/retryAfterMs"]
+        .iter()
+        .find_map(|p| event.pointer(p).and_then(Value::as_u64));
+    match wait {
+        Some(ms) => format!("{message} ({kind}, retry after {}s)", ms.div_ceil(1000)),
+        None => format!("{message} ({kind})"),
+    }
+}
+
+/// Whether a failed run's error says this account is at its limit: one of
+/// the typed limit errors, or "usage limit reached" (which also covers
+/// "Workspace usage limit reached"). A `retryAfterMs` sets the reset. See
+/// [`super::limit_hit`].
+#[must_use]
+pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
+    (super::limit::contains_any(error, &LIMIT_TYPES)
+        || super::limit::contains_any(error, &["usage limit reached"]))
+    .then(|| super::limit::hit(error))
+    .flatten()
 }
 
 #[cfg(test)]
@@ -530,5 +571,24 @@ mod tests {
         ] {
             assert!(matches!(parse_output(stream), Err(AgentError::Parse(_))));
         }
+    }
+
+    #[test]
+    fn typed_limit_errors_are_recognised_with_their_wait() {
+        let stream = r#"{"type":"error","timestamp":1,"sessionID":"ses_x","error":{"type":"provider.rate-limit","message":"Rate limited","retryAfterMs":90500}}"#;
+        let err = parse_output(stream).unwrap_err().to_string();
+        assert_eq!(err, "Rate limited (provider.rate-limit, retry after 91s)");
+        let left = limit_hit(&err).unwrap().unwrap() - time::OffsetDateTime::now_utc();
+        assert!((85..=91).contains(&left.whole_seconds()), "{left}");
+
+        let stream = r#"{"type":"error","sessionID":"ses_x","error":{"type":"provider.quota","message":"Workspace usage limit reached"}}"#;
+        let err = parse_output(stream).unwrap_err().to_string();
+        assert_eq!(limit_hit(&err), Some(None));
+        for kind in LIMIT_TYPES {
+            assert!(limit_hit(&format!("x ({kind})")).is_some(), "{kind}");
+        }
+        assert_eq!(limit_hit("usage limit reached"), Some(None));
+        assert!(limit_hit("quota exceeded").is_none());
+        assert!(limit_hit("Invalid API key").is_none());
     }
 }

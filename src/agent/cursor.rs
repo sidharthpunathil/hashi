@@ -143,6 +143,43 @@ pub fn parse_output(stdout: &str) -> Result<AgentOutput, AgentError> {
     })
 }
 
+/// Cursor CLI's limit wording and error codes, from its CLI bundle. In print
+/// mode a failure is printed to stderr with exit code 1 and no JSON result,
+/// so the text arrives as the summary of an `Exit` error.
+const LIMIT_MESSAGES: [&str; 11] = [
+    "hit your usage limit",
+    "usage limit",
+    "rate limit",
+    "resource_exhausted",
+    "quota",
+    "free_user_usage_limit",
+    "pro_user_usage_limit",
+    "free_user_rate_limit_exceeded",
+    "pro_user_rate_limit_exceeded",
+    "rate_limited",
+    "generic_rate_limit_exceeded",
+];
+
+/// Whether a failed run's error says this account is at its limit: the
+/// messages and codes above, or a bare 429 status. "Your usage limits will
+/// reset when your monthly cycle ends on M/D/YYYY" gives the reset date.
+/// See [`super::limit_hit`].
+#[must_use]
+pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
+    if !(super::limit::has_status(error, "429")
+        || super::limit::contains_any(error, &LIMIT_MESSAGES))
+    {
+        return None;
+    }
+    let now = time::OffsetDateTime::now_utc();
+    Some(
+        super::limit::after_marker(error, "cycle ends on ")
+            .and_then(|rest| super::limit::us_date_utc(&rest))
+            .filter(|t| *t > now)
+            .or_else(|| super::limit::reset_time(error, now)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +327,38 @@ mod tests {
     fn stream_without_result_is_a_parse_error() {
         let partial = r#"{"type":"system","subtype":"init","session_id":"x"}"#;
         assert!(matches!(parse_output(partial), Err(AgentError::Parse(_))));
+    }
+
+    #[test]
+    fn limit_messages_are_recognised() {
+        assert!(limit_hit("model quota exhausted").is_some());
+        assert!(limit_hit("HTTP 429 Too Many Requests").is_some());
+        assert!(limit_hit("request 14290 failed").is_none());
+        assert!(limit_hit("not signed in").is_none());
+        for msg in [
+            "agent exited with exit status: 1: You've hit your usage limit",
+            "agent exited with exit status: 1: Error: rate limit reached, slow down",
+            "ConnectError: [resource_exhausted] Error",
+            "ERROR_CODE PRO_USER_USAGE_LIMIT",
+            "FREE_USER_RATE_LIMIT_EXCEEDED",
+            "GENERIC_RATE_LIMIT_EXCEEDED",
+            "RATE_LIMITED",
+        ] {
+            assert!(limit_hit(msg).is_some(), "{msg}");
+        }
+    }
+
+    #[test]
+    fn monthly_cycle_end_is_the_reset() {
+        let year = time::OffsetDateTime::now_utc().year() + 1;
+        let msg = format!(
+            "You\u{2019}ve hit your usage limit. Your usage limits will reset when your monthly cycle ends on 3/1/{year}."
+        );
+        let at = limit_hit(&msg).unwrap().unwrap();
+        assert_eq!(
+            (at.year(), at.month(), at.day()),
+            (year, time::Month::March, 1)
+        );
+        assert_eq!(limit_hit("You've hit your usage limit"), Some(None));
     }
 }
