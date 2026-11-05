@@ -20,6 +20,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -67,9 +68,14 @@ pub struct NetLimits {
     pub body_read_timeout: Duration,
     /// How long shutdown lets open requests finish before dropping them.
     pub shutdown_grace: Duration,
-    /// Trust `CF-Connecting-IP` from loopback peers. The server turns this on
-    /// when a tunnel is configured; tests can turn it on without one.
+    /// Always trust `CF-Connecting-IP` from loopback peers, whatever
+    /// [`NetLimits::tunnel_trust`] says. Tests turn this on without a tunnel.
     pub trust_forwarded: bool,
+    /// Trust `CF-Connecting-IP` from loopback peers while this is on. The
+    /// server turns it on when a tunnel is configured or started, and it is
+    /// read on every request, so a tunnel started at runtime takes effect at
+    /// once.
+    pub tunnel_trust: TunnelTrust,
     /// Trust the last `X-Forwarded-For` hop from loopback peers
     /// (`--trust-proxy`), for a reverse proxy on the same host.
     pub trust_proxy: bool,
@@ -89,10 +95,30 @@ impl Default for NetLimits {
             body_read_timeout: BODY_READ_TIMEOUT,
             shutdown_grace: SHUTDOWN_GRACE,
             trust_forwarded: false,
+            tunnel_trust: TunnelTrust::default(),
             trust_proxy: false,
             cors_origins: Vec::new(),
             allowed_hosts: Vec::new(),
         }
+    }
+}
+
+/// A shared switch for trusting `CF-Connecting-IP`, flipped at runtime when
+/// a tunnel is configured or started. Off by default: without a tunnel any
+/// local process could send the header and pick its own rate-limit key.
+#[derive(Debug, Clone, Default)]
+pub struct TunnelTrust(Arc<AtomicBool>);
+
+impl TunnelTrust {
+    /// Turns trust on or off for every request from now on.
+    pub fn set(&self, on: bool) {
+        self.0.store(on, Ordering::Release);
+    }
+
+    /// Whether the header is trusted right now.
+    #[must_use]
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -461,10 +487,9 @@ where
     builder
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_read_timeout);
-    let trust = Trust {
-        tunnel: limits.trust_forwarded,
-        proxy: limits.trust_proxy,
-    };
+    let always_trust_tunnel = limits.trust_forwarded;
+    let tunnel_trust = limits.tunnel_trust.clone();
+    let trust_proxy = limits.trust_proxy;
     let body_timeout = limits.body_read_timeout;
     loop {
         let (io, addr) = tokio::select! {
@@ -472,8 +497,16 @@ where
             conn = listener.accept() => conn,
         };
         let app = app.clone();
-        let peer = Peer { addr, trust };
+        let tunnel_trust = tunnel_trust.clone();
         let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
+            // Read per request: a tunnel can start while a connection is open.
+            let peer = Peer {
+                addr,
+                trust: Trust {
+                    tunnel: always_trust_tunnel || tunnel_trust.get(),
+                    proxy: trust_proxy,
+                },
+            };
             let mut req = req.map(|body| DeadlineBody::new(body, body_timeout));
             req.extensions_mut().insert(ConnectInfo(addr));
             req.extensions_mut().insert(peer);

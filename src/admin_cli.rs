@@ -140,7 +140,8 @@ pub struct ShareArgs {
             .map(|s| s.parse::<u32>().unwrap_or(24)),
     )]
     pub link_hours: u32,
-    /// Base URL for the link. Defaults to HASHI_PUBLIC_URL, else this machine.
+    /// Base URL for the link. Defaults to HASHI_PUBLIC_URL, else the public URL
+    /// of the running server (from `<home>/public-url`), else this machine.
     #[arg(long, env = "HASHI_PUBLIC_URL")]
     pub public_url: Option<String>,
     /// Port of the local server, used for a local-only link.
@@ -366,19 +367,28 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         &invite.label,
         &format!("link valid {}h", args.link_hours),
     )?;
-    let base = match &args.public_url {
-        Some(u) => u.trim_end_matches('/').to_owned(),
-        None => format!("http://127.0.0.1:{}", args.port),
-    };
+    // A running server records its public URL (configured or tunnel) for us.
+    let public = args.public_url.as_deref().map_or_else(
+        || {
+            store
+                .data_dir()
+                .and_then(|home| hashi::server::read_public_url(&home))
+        },
+        |u| Some(u.trim_end_matches('/').to_owned()),
+    );
+    let base = public
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", args.port));
     eprintln!(
         "invite for {} (works once, expires {}):",
         invite.label,
         rfc3339(invite.expires_at).unwrap_or_default()
     );
     println!("{base}/claim/{code}");
-    if args.public_url.is_none() {
+    if public.is_none() {
         eprintln!(
-            "note: this link only works on this machine. Start with --tunnel or set HASHI_PUBLIC_URL to share it."
+            "note: this link only works on this machine. Press t in the dashboard to go public, \
+             start with --tunnel or set HASHI_PUBLIC_URL to share it."
         );
     }
     Ok(())

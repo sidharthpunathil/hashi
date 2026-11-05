@@ -19,6 +19,7 @@ use crate::net::{LimitedListener, NetLimits};
 use crate::queue::{self, Dispatcher, QueueConfig};
 use crate::store::{NewToken, Store};
 use crate::token::{Role, SessionMode};
+use crate::tunnel::{StartError, Status as TunnelStatus};
 
 /// Everything needed to start a server.
 #[derive(Debug, Clone)]
@@ -67,14 +68,145 @@ pub struct Running {
     /// Fires to stop everything.
     pub cancel: CancellationToken,
     tasks: JoinSet<()>,
+    home: PathBuf,
 }
 
 impl Running {
-    /// Stops all tasks and waits for them to finish.
+    /// Stops all tasks and the tunnel, waits for them to finish and removes
+    /// `<home>/public-url`.
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         while self.tasks.join_next().await.is_some() {}
+        self.state.runtime.tunnel.join().await;
+        if let Err(e) = remove_public_url(&self.home) {
+            tracing::warn!(error = %e, "could not remove {PUBLIC_URL_FILE}");
+        }
     }
+}
+
+/// File in the data directory holding the running server's public base URL,
+/// so `hashi share` in another terminal can print a public link.
+pub const PUBLIC_URL_FILE: &str = "public-url";
+
+/// Records `url` as the running server's public base URL, readable only by
+/// its owner.
+///
+/// # Errors
+///
+/// Fails if the file cannot be written.
+pub fn write_public_url(home: &Path, url: &str) -> std::io::Result<()> {
+    crate::diagnostics::write_private(&home.join(PUBLIC_URL_FILE), &format!("{url}\n"))
+}
+
+/// The public base URL a running server recorded, if any. Anything that is
+/// not a single `http(s)://` URL is ignored.
+#[must_use]
+pub fn read_public_url(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join(PUBLIC_URL_FILE)).ok()?;
+    let url = text.trim().trim_end_matches('/');
+    let plain = (url.starts_with("https://") || url.starts_with("http://"))
+        && url.len() > "https://".len()
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control());
+    plain.then(|| url.to_owned())
+}
+
+/// Removes the recorded public base URL. A missing file is not an error.
+///
+/// # Errors
+///
+/// Fails if the file exists but cannot be removed.
+pub fn remove_public_url(home: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(home.join(PUBLIC_URL_FILE)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Starts a quick tunnel on a running server, as `--tunnel` does at startup.
+/// The dashboard calls this when the owner presses `t`. Progress arrives on
+/// the bus as [`Event::TunnelReady`] or [`Event::TunnelDown`].
+///
+/// # Errors
+///
+/// Fails at once, without starting anything, when a tunnel is already
+/// starting or up, a public URL is configured, `cloudflared` is missing or
+/// there is no Tokio runtime.
+pub fn go_public(runtime: &Arc<Runtime>, bus: &Bus) -> Result<(), StartError> {
+    launch_tunnel(runtime, bus, true)
+}
+
+/// The one path every tunnel takes: claims the [`crate::tunnel::Control`],
+/// runs cloudflared until shutdown, publishes the URL unless one is
+/// configured, and reports on the bus.
+fn launch_tunnel(runtime: &Arc<Runtime>, bus: &Bus, on_demand: bool) -> Result<(), StartError> {
+    let settings = runtime.tunnel.begin(on_demand)?.clone();
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        runtime.tunnel.set_status(TunnelStatus::Off);
+        return Err(StartError::Unavailable);
+    };
+    let runtime_task = Arc::clone(runtime);
+    let bus = bus.clone();
+    let task = handle.spawn(async move {
+        let runtime = runtime_task;
+        let s = settings;
+        let named = s
+            .named_token
+            .as_ref()
+            .zip(s.configured_url.as_ref())
+            .filter(|_| !on_demand);
+        let starting = async {
+            match named {
+                Some((token, url)) => crate::tunnel::start_named(token, url, &s.home).await,
+                None => crate::tunnel::start(s.port, s.local_tls, &s.home).await,
+            }
+        };
+        let started = tokio::select! {
+            () = s.cancel.cancelled() => return,
+            started = starting => started,
+        };
+        let mut tunnel = match started {
+            Ok(tunnel) => tunnel,
+            Err(e) => {
+                runtime.tunnel.set_status(TunnelStatus::Down(e.to_string()));
+                bus.emit(Event::TunnelDown(e.to_string()));
+                return;
+            }
+        };
+        // A configured public URL wins: invite links must not change.
+        let ours = match runtime.public_url.write() {
+            Ok(mut url) if url.is_none() => {
+                *url = Some(tunnel.url.clone());
+                true
+            }
+            _ => false,
+        };
+        if ours && let Err(e) = write_public_url(&s.home, &tunnel.url) {
+            bus.log(format!("could not record the public URL: {e}"));
+        }
+        runtime
+            .tunnel
+            .set_status(TunnelStatus::Up(tunnel.url.clone()));
+        bus.emit(Event::TunnelReady(tunnel.url.clone()));
+        tokio::select! {
+            () = s.cancel.cancelled() => {}
+            status = tunnel.child.wait() => {
+                // The URL is dead now: links go back to local until the next tunnel.
+                if ours {
+                    if let Ok(mut url) = runtime.public_url.write()
+                        && url.as_deref() == Some(tunnel.url.as_str())
+                    {
+                        *url = None;
+                    }
+                    let _ = remove_public_url(&s.home);
+                }
+                let why = format!("cloudflared exited: {status:?}");
+                runtime.tunnel.set_status(TunnelStatus::Down(why.clone()));
+                bus.emit(Event::TunnelDown(why));
+            }
+        }
+    });
+    runtime.tunnel.set_task(task);
+    Ok(())
 }
 
 async fn hsts(mut res: axum::response::Response) -> axum::response::Response {
@@ -405,14 +537,15 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
 }
 
 /// Starts the API, workers and (optionally) the tunnel, with explicit
-/// connection limits. `CF-Connecting-IP` is trusted from loopback peers when
-/// a tunnel is configured, or when `net.trust_forwarded` is already set.
+/// connection limits. `CF-Connecting-IP` is trusted from loopback peers
+/// while a tunnel is configured or started ([`NetLimits::tunnel_trust`]), or
+/// always when `net.trust_forwarded` is set.
 ///
 /// # Errors
 ///
 /// Fails if the database cannot be opened or the port cannot be bound.
-pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Result<Running> {
-    net.trust_forwarded |= cfg.tunnel || cfg.tunnel_token.is_some();
+pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<Running> {
+    let tunnel_configured = cfg.tunnel || cfg.tunnel_token.is_some();
     let store = Arc::new(open_store(&cfg.home)?);
     let recovered = store.recover_interrupted()?;
     if recovered > 0 {
@@ -451,13 +584,35 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
         "http"
     };
 
+    let cancel = CancellationToken::new();
+    let tunnel = crate::tunnel::Control::new(
+        crate::tunnel::Settings {
+            port: local.port(),
+            local_tls: tls_config.is_some(),
+            home: cfg.home.clone(),
+            configured_url: cfg.public_url.clone(),
+            named_token: cfg.tunnel_token.clone(),
+            configured: tunnel_configured,
+            cancel: cancel.clone(),
+        },
+        net.tunnel_trust.clone(),
+    );
     let runtime = Arc::new(Runtime {
         started: Instant::now(),
         local_url: format!("{scheme}://{local}"),
         public_url: RwLock::new(cfg.public_url.clone()),
         agents,
         name: cfg.name.clone(),
+        tunnel,
     });
+    // A file left by a run that did not shut down cleanly is stale.
+    let recorded = match &cfg.public_url {
+        Some(url) => write_public_url(&cfg.home, url),
+        None => remove_public_url(&cfg.home),
+    };
+    if let Err(e) = recorded {
+        bus.log(format!("could not record the public URL: {e}"));
+    }
     let dispatcher = Dispatcher::new();
     let guard = Arc::new(ResourceGuard::new(
         &cfg.resources,
@@ -480,7 +635,6 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
         waits: Arc::default(),
     };
 
-    let cancel = CancellationToken::new();
     let queue_cfg = Arc::new(QueueConfig {
         agents: cfg.agents.clone(),
         concurrency: cfg.concurrency,
@@ -504,7 +658,6 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
 
     let mut app = api::router(state.clone(), &net);
     let shutdown = cancel.clone();
-    let local_tls = tls_config.is_some();
     match tls_config {
         Some(config) => {
             // Browsers should keep using HTTPS for this host from now on.
@@ -519,38 +672,8 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
     }
     bus.log(format!("listening on {scheme}://{local}"));
 
-    if cfg.tunnel || cfg.tunnel_token.is_some() {
-        let bus = bus.clone();
-        let runtime = Arc::clone(&runtime);
-        let cancel = cancel.clone();
-        let port = local.port();
-        let tunnel_token = cfg.tunnel_token.clone();
-        let home = cfg.home.clone();
-        let named_url = cfg.public_url.clone();
-        tasks.spawn(async move {
-            let started = match (&tunnel_token, &named_url) {
-                (Some(token), Some(url)) => crate::tunnel::start_named(token, url, &home).await,
-                _ => crate::tunnel::start(port, local_tls, &home).await,
-            };
-            match started {
-                Ok(mut tunnel) => {
-                    // A configured public URL wins: invite links must not change.
-                    if let Ok(mut url) = runtime.public_url.write()
-                        && url.is_none()
-                    {
-                        *url = Some(tunnel.url.clone());
-                    }
-                    bus.emit(Event::TunnelReady(tunnel.url.clone()));
-                    tokio::select! {
-                        () = cancel.cancelled() => {}
-                        status = tunnel.child.wait() => {
-                            bus.emit(Event::TunnelDown(format!("cloudflared exited: {status:?}")));
-                        }
-                    }
-                }
-                Err(e) => bus.emit(Event::TunnelDown(e.to_string())),
-            }
-        });
+    if tunnel_configured {
+        launch_tunnel(&runtime, &bus, false)?;
     }
 
     Ok(Running {
@@ -558,6 +681,7 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
         bootstrap_token,
         cancel,
         tasks,
+        home: cfg.home.clone(),
     })
 }
 
@@ -585,6 +709,46 @@ mod tests {
             assert_eq!(mode(&path), 0o600, "{name}");
         }
         assert_eq!(mode(&home), 0o700);
+    }
+
+    #[test]
+    fn public_url_file_round_trips_and_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert_eq!(read_public_url(home), None);
+        write_public_url(home, "https://calm-river-bridge.trycloudflare.com").unwrap();
+        assert_eq!(
+            read_public_url(home).as_deref(),
+            Some("https://calm-river-bridge.trycloudflare.com")
+        );
+        #[cfg(unix)]
+        assert_eq!(mode(&home.join(PUBLIC_URL_FILE)), 0o600);
+        // Overwriting replaces the old URL.
+        write_public_url(home, "https://hashi.example.com/").unwrap();
+        assert_eq!(
+            read_public_url(home).as_deref(),
+            Some("https://hashi.example.com")
+        );
+        remove_public_url(home).unwrap();
+        assert_eq!(read_public_url(home), None);
+        // Removing twice is fine.
+        remove_public_url(home).unwrap();
+    }
+
+    #[test]
+    fn a_garbled_public_url_file_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        for bad in [
+            "",
+            "hashi.example.com",
+            "https://",
+            "https://a b",
+            "ftp://x",
+        ] {
+            std::fs::write(home.join(PUBLIC_URL_FILE), bad).unwrap();
+            assert_eq!(read_public_url(home), None, "{bad:?}");
+        }
     }
 
     #[test]

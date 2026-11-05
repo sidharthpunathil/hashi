@@ -133,10 +133,15 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
     } else {
         "○"
     };
+    let configured = rt.public_url();
     let public = match &app.tunnel {
-        TunnelState::Off => Span::styled("off  (start with --tunnel)", t::muted()),
+        TunnelState::Off | TunnelState::Down(_) if configured.is_some() => Span::styled(
+            configured.unwrap_or_default(),
+            t::bold(t::PINK).add_modifier(Modifier::UNDERLINED),
+        ),
+        TunnelState::Off => Span::styled("off  (press t to go public)", t::muted()),
         TunnelState::Starting => Span::styled(
-            format!("{} opening tunnel…", t::spinner(app.tick)),
+            format!("{} starting tunnel…", t::spinner(app.tick)),
             t::fg(t::AMBER),
         ),
         TunnelState::Up(url) => Span::styled(
@@ -246,6 +251,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Tab::Overview => &[
             ("1-4", "views"),
             ("c", "copy url"),
+            ("t", "go public"),
             ("r", "refresh"),
             ("?", "help"),
             ("q", "quit"),
@@ -1364,12 +1370,13 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
     let area = frame.area();
     match popup {
         Popup::Help => {
-            let rows: [(&str, &str); 16] = [
+            let rows: [(&str, &str); 17] = [
                 ("1 2 3 4", "jump to a view"),
                 ("tab / ←→", "next / previous view"),
                 ("↑↓ / j k", "move selection"),
                 ("PgUp PgDn", "scroll request detail"),
                 ("c", "copy the API base URL"),
+                ("t", "go public: start a Cloudflare quick tunnel"),
                 ("n", "new token (Tokens view)"),
                 ("d", "revoke token (Tokens view)"),
                 ("p", "pause or resume token (Tokens view)"),
@@ -1498,10 +1505,12 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
         }
         Popup::InviteReveal {
             label,
-            url,
+            code,
             link_hours,
-            local_only,
         } => {
+            let url = app.invite_url(code);
+            let local_only = &app.local_only();
+            let starting = matches!(app.tunnel, TunnelState::Starting);
             let height = if *local_only { 15 } else { 12 };
             let width = u16::try_from(url.chars().count() + 10)
                 .unwrap_or(u16::MAX)
@@ -1542,12 +1551,27 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                     ),
                 ]));
                 lines.push(Line::from(Span::styled(
-                    "  Restart with --tunnel or --public-url to share it.",
+                    if starting {
+                        format!(
+                            "  {} starting tunnel… the link turns public when it is up.",
+                            t::spinner(app.tick)
+                        )
+                    } else {
+                        "  press t to make this link public".to_owned()
+                    },
                     t::muted(),
                 )));
             }
             lines.push(Line::raw(""));
-            lines.push(key_hint(&[("c", "copy"), ("enter", "done")]));
+            if *local_only && !starting {
+                lines.push(key_hint(&[
+                    ("c", "copy"),
+                    ("t", "go public"),
+                    ("enter", "done"),
+                ]));
+            } else {
+                lines.push(key_hint(&[("c", "copy"), ("enter", "done")]));
+            }
             let title = format!("Invite for {label}");
             frame.render_widget(Clear, rect);
             frame.render_widget(
