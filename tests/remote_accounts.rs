@@ -24,7 +24,8 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 /// The far side's agent. Knows its account from `$CLAUDE_CONFIG_DIR/name`;
-/// a prompt containing `slow` sleeps first, so it can be cancelled.
+/// a prompt containing `slow` sleeps first, so it can be cancelled, and one
+/// containing `boom` fails with an error that names the far machine.
 const FAR_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "9.9.9 (Fake Claude)"; exit 0; fi
 for last; do :; done
@@ -32,6 +33,7 @@ acct=default
 dir="$CLAUDE_CONFIG_DIR"
 if [ -n "$dir" ] && [ -f "$dir/name" ]; then acct=$(cat "$dir/name"); fi
 case "$last" in *slow*) sleep 30 ;; esac
+case "$last" in *boom*) echo '{"type":"result","is_error":true,"subtype":"error_during_execution","result":"bob-laptop: disk /Users/bob is full"}'; exit 1 ;; esac
 echo '{"type":"system","subtype":"init","session_id":"s"}'
 printf '{"type":"result","subtype":"success","is_error":false,"result":"far %s on %s","session_id":"sess","total_cost_usd":0.25,"usage":{"input_tokens":3,"output_tokens":4}}\n' "$last" "$acct"
 "#;
@@ -395,15 +397,127 @@ async fn a_network_failure_falls_over_to_the_next_account() {
     assert!(!a.disabled, "a network failure is not the token's fault");
     assert!(a.limited_until.is_none());
 
-    // Alone, it fails without naming the bridge.
+    // Alone, it fails without naming the bridge, and the account sits
+    // out a few seconds rather than being tried on every prompt.
     let (alone, _) = near
         .token(json!({"name": "alone", "accounts": {"claude": ["gone-claude"]}}))
         .await;
     let v = near.ask(&alone, "hi").await;
     assert_eq!(v["status"], "failed", "{v}");
     let err = v["error"].as_str().unwrap();
-    assert!(err.contains("could not be reached"), "{err}");
+    assert!(err.contains("try again in a minute"), "{err}");
     assert!(!err.contains("127.0.0.1") && !err.contains("gone"), "{err}");
+    assert!(!err.contains("bridge"), "{err}");
+}
+
+/// A far token's maxPending is a transient refusal one holder here can
+/// cause with a burst. It backs the remote account off for seconds, and
+/// never marks it limited for the hour-long cooldown.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_busy_far_token_backs_the_account_off_for_seconds_not_the_cooldown() {
+    let (_far, near, _, _) = pair(json!({"name": "near-owner", "limits": {"maxPending": 1}})).await;
+    let (token, _) = near
+        .token(
+            json!({"name": "friend", "accounts": {"claude": ["bob-claude"]},
+                      "limits": {"maxPending": 3}}),
+        )
+        .await;
+    // Two concurrent slow prompts: the far token allows one in flight.
+    let (s1, one) = near
+        .post("/v1/ask", &token, json!({"message": "slow one"}))
+        .await;
+    let (s2, two) = near
+        .post("/v1/ask", &token, json!({"message": "slow two"}))
+        .await;
+    assert!(s1.is_success() && s2.is_success(), "{one} {two}");
+    let ids = [
+        one["id"].as_str().unwrap().to_owned(),
+        two["id"].as_str().unwrap().to_owned(),
+    ];
+    let failed = || {
+        ids.iter().find_map(|id| {
+            near.store()
+                .get_request(id)
+                .unwrap()
+                .filter(|r| r.status == hashi::store::RequestStatus::Failed)
+        })
+    };
+    wait_for(|| failed().is_some(), "the refused prompt to fail").await;
+    let err = failed().unwrap().error.unwrap_or_default();
+    assert!(err.contains("try again in a minute"), "{err}");
+    assert!(!err.contains("bridge") && !err.contains("bob"), "{err}");
+    let a = near.account("bob-claude");
+    assert!(
+        a.limited_until.is_none(),
+        "limited until {:?}",
+        a.limited_until
+    );
+    assert!(!a.disabled);
+    assert!(
+        near.running
+            .state
+            .dispatcher
+            .backed_off(AgentKind::Claude, "bob-claude")
+    );
+}
+
+/// A run that fails on the far bridge reaches the token holder as neutral
+/// text; the far side's words stay with the owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_far_run_shows_the_holder_neutral_text() {
+    let (_far, near, _, _) = pair(json!({"name": "near-owner"})).await;
+    let (token, _) = near
+        .token(json!({"name": "friend", "accounts": {"claude": ["bob-claude"]}}))
+        .await;
+    let mut log = near.running.state.bus.subscribe();
+    let v = near.ask(&token, "boom").await;
+    assert_eq!(v["status"], "failed", "{v}");
+    assert_eq!(v["error"], "the run failed", "{v}");
+    // The owner still sees what happened, in the dashboard log.
+    let mut owner_saw = false;
+    loop {
+        match log.try_recv() {
+            Ok(hashi::events::Event::Log(line)) if line.contains("disk /Users/bob is full") => {
+                owner_saw = true;
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(owner_saw, "the owner's log has the far error");
+}
+
+/// A prompt that fits this bridge's 64 KB body cap but not the far one's
+/// once forwarded is refused here with the usual 413, never sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prompt_too_big_to_forward_is_refused_with_413() {
+    let (_far, near, _, _) = pair(json!({"name": "near-owner"})).await;
+    let (token, _) = near
+        .token(json!({"name": "friend", "accounts": {"claude": ["bob-claude"]}}))
+        .await;
+    let msg = "\"".repeat(32_760);
+    let body = format!("{{\"message\":{}}}", serde_json::to_string(&msg).unwrap());
+    assert!(body.len() <= 65_536, "{}", body.len());
+    let res = near
+        .http
+        .post(format!("{}/v1/ask", near.base))
+        .bearer_auth(&token)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let v: Value = res.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "too_large", "{v}");
+    let text = v["error"]["message"].as_str().unwrap();
+    assert!(!text.contains("bridge") && !text.contains("remote"), "{v}");
+    // A token without a remote account takes the same prompt.
+    let (local, _) = near.token(json!({"name": "local"})).await;
+    let (status, v) = near
+        .post("/v1/ask", &local, json!({ "message": msg }))
+        .await;
+    assert!(status.is_success(), "{v}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

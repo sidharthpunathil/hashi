@@ -36,8 +36,10 @@
 //! from it. The local run timeout applies, and a cancel or timeout cancels
 //! the request on the bridge too, best effort. A limit there marks the
 //! account limited, a paused, revoked or forbidden token disables it with
-//! the reason shown to the owner, and a network failure moves the request
-//! to the next account. A prompt that already came through
+//! the reason shown to the owner, and a network failure or a busy bridge
+//! backs the account off for seconds (see [`remote_backoff`]) and moves the
+//! request to the next account. A run that fails there shows the token
+//! holder only [`REMOTE_FAILED_ERROR`]. A prompt that already came through
 //! [`crate::forward::MAX_HOPS`] bridges is never forwarded again.
 //!
 //! A token bound to a project (see [`crate::projects`]) runs with the
@@ -107,6 +109,41 @@ pub struct QueueConfig {
 /// Default for [`QueueConfig::account_cooldown`].
 pub const DEFAULT_ACCOUNT_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
+/// First back-off of a remote account whose bridge could not take a run.
+pub const REMOTE_BACKOFF_FIRST: Duration = Duration::from_secs(5);
+
+/// Longest back-off of a remote account whose bridge could not take a run.
+pub const REMOTE_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// A back-off older than this, past its end, starts again from
+/// [`REMOTE_BACKOFF_FIRST`].
+const REMOTE_BACKOFF_FORGET: Duration = Duration::from_secs(5 * 60);
+
+/// Error a token holder sees when a run on a remote account failed. The
+/// bridge's own words go to the owner's log and dashboard only.
+pub const REMOTE_FAILED_ERROR: &str = "the run failed";
+
+/// How long a remote account sits out after its `strikes`-th transient
+/// failure in a row: [`REMOTE_BACKOFF_FIRST`], doubling each time, at most
+/// [`REMOTE_BACKOFF_MAX`].
+#[must_use]
+pub fn remote_backoff(strikes: u32) -> Duration {
+    let doubled = REMOTE_BACKOFF_FIRST
+        .checked_mul(1 << strikes.saturating_sub(1).min(16))
+        .unwrap_or(REMOTE_BACKOFF_MAX);
+    doubled.min(REMOTE_BACKOFF_MAX)
+}
+
+/// A remote account backing off: until when (Unix ms), and after how many
+/// transient failures in a row.
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    until: i64,
+    strikes: u32,
+}
+
+type Backoffs = Arc<Mutex<HashMap<(AgentKind, String), Backoff>>>;
+
 /// One claimed run, as seen by [`Dispatcher::cancel_token_runs`].
 #[derive(Debug)]
 struct RunEntry {
@@ -128,6 +165,9 @@ pub struct Dispatcher {
     usage: Arc<crate::usage::Hub>,
     /// Accounts an admin pinned single requests to, by request id.
     pins: Arc<Mutex<HashMap<String, String>>>,
+    /// Remote accounts sitting out a short back-off (see
+    /// [`remote_backoff`]). In memory only: a restart forgets them.
+    backoffs: Backoffs,
 }
 
 /// Registration of one run. Dropping it marks the run as finished.
@@ -162,7 +202,44 @@ impl Dispatcher {
             runs: Runs::default(),
             usage: Arc::default(),
             pins: Arc::default(),
+            backoffs: Arc::default(),
         }
+    }
+
+    /// Backs `account` off after a transient failure on its bridge, for
+    /// longer each time in a row. Returns how long.
+    pub fn back_off(&self, agent: AgentKind, account: &str) -> Duration {
+        let now = now_ms();
+        let forget = i64::try_from(REMOTE_BACKOFF_FORGET.as_millis()).unwrap_or(i64::MAX);
+        let mut map = self.backoffs.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = (agent, account.to_owned());
+        let strikes = map
+            .get(&key)
+            .filter(|b| b.until.saturating_add(forget) > now)
+            .map_or(1, |b| b.strikes.saturating_add(1));
+        let wait = remote_backoff(strikes);
+        let until = now.saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX));
+        map.insert(key, Backoff { until, strikes });
+        wait
+    }
+
+    /// Whether `account` is sitting out a back-off now.
+    #[must_use]
+    pub fn backed_off(&self, agent: AgentKind, account: &str) -> bool {
+        let now = now_ms();
+        self.backoffs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(agent, account.to_owned()))
+            .is_some_and(|b| b.until > now)
+    }
+
+    /// Ends `account`'s back-off after a run on it went through.
+    pub fn clear_backoff(&self, agent: AgentKind, account: &str) {
+        self.backoffs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&(agent, account.to_owned()));
     }
 
     /// The server's usage state: the default strategy and threshold, and
@@ -658,7 +735,9 @@ impl Worker {
                 && state
                     .as_ref()
                     .is_none_or(|s| s.status(now) == AccountStatus::Ready)
-                && (remote.is_none() || req.hops < crate::forward::MAX_HOPS);
+                && (remote.is_none()
+                    || (req.hops < crate::forward::MAX_HOPS
+                        && !self.dispatcher.backed_off(self.agent, name)));
             let summary = self
                 .store
                 .account_summary(self.agent, name, policy.rotate_at, now)
@@ -741,7 +820,18 @@ impl Worker {
     /// Why no account of the token's list can run this agent now.
     fn none_left(&self, accounts: &AccountMap) -> String {
         let now = now_ms();
-        let until = acct::for_agent(accounts, self.agent)
+        let names = acct::for_agent(accounts, self.agent);
+        let agent = self.agent.display_name();
+        if names
+            .iter()
+            .any(|n| self.dispatcher.backed_off(self.agent, n))
+        {
+            return format!(
+                "every account for {agent} this token can use is busy or unavailable; \
+                 try again in a minute"
+            );
+        }
+        let until = names
             .iter()
             .filter_map(|n| self.store.get_account(self.agent, n).ok().flatten())
             .filter_map(|s| match s.status(now) {
@@ -749,7 +839,6 @@ impl Worker {
                 _ => None,
             })
             .min();
-        let agent = self.agent.display_name();
         match until.and_then(crate::util::rfc3339) {
             Some(t) => {
                 format!("every account for {agent} this token can use is at its limit until {t}")
@@ -1125,6 +1214,7 @@ impl Worker {
         if let Err(e) = self.store.clear_error_usage(self.agent, &account.name) {
             warn!(error = %e, "failed to clear an account's limit record");
         }
+        self.dispatcher.clear_backoff(self.agent, &account.name);
         self.after_run(&account.name);
         info!(agent = %self.agent, account = %account.name, remote = %remote,
               "prompt answered by a remote bridge");
@@ -1160,17 +1250,22 @@ impl Worker {
                 self.move_on(req, eff, account, "was switched off", None)
             }
             Failure::Retryable(why) => {
+                // Transient: a short back-off of seconds, never the limit
+                // cooldown, so one holder's burst cannot shut the account
+                // for everyone else.
+                let wait = self.dispatcher.back_off(self.agent, &account.name);
                 warn!(agent = %self.agent, account = %account.name, remote = %remote,
+                      backoff_secs = wait.as_secs(),
                       "the remote bridge could not take the run: {}", log_excerpt(&why));
                 self.used(&account.name, false);
                 self.move_on(
                     req,
                     eff,
                     account,
-                    "could not be reached",
+                    "could not take the run",
                     Some(format!(
-                        "{} could not be reached on any account this token can use; \
-                         try again later",
+                        "no account for {} this token can use could take the run; \
+                         try again in a minute",
                         self.agent.display_name()
                     )),
                 )
@@ -1180,8 +1275,18 @@ impl Worker {
                 Halt::Failed(agent::AgentError::Timeout(timeout).to_string())
             }
             Failure::Failed(error) => {
+                // The holder never learns the run went to a bridge: the
+                // bridge's words are for the owner only.
+                warn!(agent = %self.agent, account = %account.name, remote = %remote,
+                      "the run failed on the remote bridge: {}", log_excerpt(&error));
+                self.bus.log(format!(
+                    "{} account {}: the run failed on remote {remote}: {}",
+                    self.agent.display_name(),
+                    account.name,
+                    log_excerpt(&client_error(&error))
+                ));
                 self.used(&account.name, false);
-                Halt::Failed(error)
+                Halt::Failed(REMOTE_FAILED_ERROR.to_owned())
             }
         }
     }
@@ -1355,6 +1460,22 @@ mod tests {
         );
         assert!(!msg.contains("AbCdEfGhIjKlMnOpQrSt"), "{msg}");
         assert_eq!(client_error(&"x".repeat(5_000)).chars().count(), 4_000);
+    }
+
+    #[test]
+    fn remote_backoff_grows_in_seconds_and_stops_at_a_minute() {
+        let secs: Vec<u64> = (1..=6).map(|n| remote_backoff(n).as_secs()).collect();
+        assert_eq!(secs, [5, 10, 20, 40, 60, 60]);
+        assert_eq!(remote_backoff(u32::MAX), REMOTE_BACKOFF_MAX);
+        let d = Dispatcher::new();
+        assert!(!d.backed_off(AgentKind::Claude, "bob"));
+        assert_eq!(d.back_off(AgentKind::Claude, "bob").as_secs(), 5);
+        assert_eq!(d.back_off(AgentKind::Claude, "bob").as_secs(), 10);
+        assert!(d.backed_off(AgentKind::Claude, "bob"));
+        assert!(!d.backed_off(AgentKind::Codex, "bob"));
+        d.clear_backoff(AgentKind::Claude, "bob");
+        assert!(!d.backed_off(AgentKind::Claude, "bob"));
+        assert_eq!(d.back_off(AgentKind::Claude, "bob").as_secs(), 5);
     }
 
     #[test]
