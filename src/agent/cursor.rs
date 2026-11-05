@@ -10,7 +10,9 @@
 //! Safety: `-f`/`--force` (alias `--yolo`) is never passed, and is stripped
 //! from operator supplied extra arguments too. Without it, print mode only
 //! proposes changes and does not apply them, which is the right default when
-//! the bridge is shared with other people.
+//! the bridge is shared with other people. `--approve-mcps` (approve every
+//! MCP server without asking) is stripped the same way, so the owner's MCP
+//! servers are not handed to shared users by an extra argument.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -19,8 +21,9 @@ use serde::Deserialize;
 
 use super::{AgentConfig, AgentError, AgentOutput, Invocation};
 
-/// Flags that let Cursor apply changes and run commands without confirmation.
-const UNSAFE_FLAGS: [&str; 3] = ["-f", "--force", "--yolo"];
+/// Flags that let Cursor apply changes, run commands or start MCP servers
+/// without confirmation.
+const UNSAFE_FLAGS: [&str; 4] = ["-f", "--force", "--yolo", "--approve-mcps"];
 
 /// Sandbox mode passed to `--sandbox`. A constant rather than a config field
 /// because `AgentConfig::sandbox` holds Codex policy names.
@@ -228,7 +231,25 @@ mod tests {
                 "{flag} in {args:?}"
             );
         }
-        assert!(before_prompt.iter().any(|a| a == "--approve-mcps"));
+    }
+
+    #[test]
+    fn approve_mcps_never_appears_even_from_extra_args() {
+        let mut c = cfg();
+        c.extra_args = ["--approve-mcps", "--approve-mcps=true", "--model-x"]
+            .map(str::to_owned)
+            .to_vec();
+        let args = strings(&build_args(&c, inv("--approve-mcps", None, None)));
+        let before_prompt = &args[..args.len() - 2];
+        assert!(
+            !before_prompt
+                .iter()
+                .any(|a| a.starts_with("--approve-mcps")),
+            "{args:?}"
+        );
+        // Unrelated extra arguments still pass through, and the prompt is untouched.
+        assert!(before_prompt.iter().any(|a| a == "--model-x"));
+        assert_eq!(args.last().map(String::as_str), Some("--approve-mcps"));
     }
 
     #[test]

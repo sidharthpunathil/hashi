@@ -15,7 +15,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::{AgentConfig, AgentError, AgentOutput, Invocation, Usage, is_safe_arg};
+use super::{
+    AgentConfig, AgentError, AgentOutput, Invocation, Usage, has_flag, is_safe_arg,
+    neutralize_slash_command,
+};
 
 /// Extra environment for the child.
 ///
@@ -53,6 +56,13 @@ pub fn env(_workdir: &Path) -> Vec<(String, String)> {
 ///   positional is unverified.
 /// - `cfg.max_turns` is not applied: Gemini has no CLI flag for it, only the
 ///   `model.maxSessionTurns` setting.
+/// - `--allowed-mcp-server-names ""`: no MCP server from the owner's settings
+///   is connected, so shared users cannot reach the owner's MCP tools or
+///   resources. An empty value becomes `[""]`, which no server name matches
+///   (`config.ts` `coerceCommaSeparated`, the "allow no MCP servers if the
+///   flag is provided but empty" test, and `isBlockedBySettings` in
+///   `mcp-client-manager.ts`). The owner opts in by passing the flag with the
+///   server names in `extra_args`, which replaces this one.
 #[must_use]
 pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
@@ -62,6 +72,9 @@ pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
         "--approval-mode".into(),
         "default".into(),
     ];
+    if !has_flag(&cfg.extra_args, &[MCP_ALLOWLIST_FLAG]) {
+        args.extend([MCP_ALLOWLIST_FLAG.into(), "".into()]);
+    }
     // Callers validate these with `is_safe_arg`; checking again here keeps a
     // value that starts with `-` from ever being read as a flag.
     if let Some(model) = inv.model.filter(|m| is_safe_arg(m)) {
@@ -72,22 +85,15 @@ pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     }
     args.extend(cfg.extra_args.iter().map(OsString::from));
     let mut prompt = OsString::from("--prompt=");
+    // Headless Gemini runs a prompt that starts with `/` as a built-in slash
+    // command (for example `/extensions install <url>`).
     prompt.push(neutralize_slash_command(inv.prompt));
     args.push(prompt);
     args
 }
 
-/// Headless Gemini runs a prompt that starts with `/` as a built-in slash
-/// command (for example `/extensions install <url>`), which a shared user
-/// must not be able to trigger. The CLI only checks `startsWith('/')` without
-/// trimming, so a leading space makes it an ordinary prompt.
-fn neutralize_slash_command(prompt: &str) -> String {
-    if prompt.starts_with('/') {
-        format!(" {prompt}")
-    } else {
-        prompt.to_owned()
-    }
-}
+/// Restricts which configured MCP servers Gemini CLI connects to.
+const MCP_ALLOWLIST_FLAG: &str = "--allowed-mcp-server-names";
 
 /// Folds the `stream-json` event stream into a single result.
 ///
@@ -224,9 +230,39 @@ mod tests {
                 "--skip-trust",
                 "--approval-mode",
                 "default",
+                "--allowed-mcp-server-names",
+                "",
                 "--prompt=hi"
             ]
         );
+    }
+
+    #[test]
+    fn build_args_connects_no_mcp_server_by_default() {
+        let args = strings(&build_args(&cfg(), inv("hi", Some("s-1"), Some("m"))));
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--allowed-mcp-server-names", ""])
+        );
+    }
+
+    #[test]
+    fn owner_mcp_allowlist_replaces_the_default() {
+        for extra in [
+            vec!["--allowed-mcp-server-names".to_owned(), "docs".to_owned()],
+            vec!["--allowed-mcp-server-names=docs".to_owned()],
+        ] {
+            let mut c = cfg();
+            c.extra_args = extra.clone();
+            let args = strings(&build_args(&c, inv("hi", None, None)));
+            let flags = args
+                .iter()
+                .filter(|a| a.starts_with("--allowed-mcp-server-names"))
+                .count();
+            assert_eq!(flags, 1, "{args:?}");
+            assert!(!args.iter().any(String::is_empty), "{args:?}");
+            assert!(args.ends_with(&[extra, vec!["--prompt=hi".to_owned()]].concat()));
+        }
     }
 
     #[test]

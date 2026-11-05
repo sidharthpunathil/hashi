@@ -31,7 +31,7 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{AgentConfig, AgentError, AgentOutput, Invocation, Usage};
+use super::{AgentConfig, AgentError, AgentOutput, Invocation, Usage, has_flag};
 
 /// Approval mode passed on every run. Hashi's `AgentConfig` has no Qwen field,
 /// so this is fixed: headless `default` denies shell and edits unless
@@ -46,20 +46,49 @@ pub const APPROVAL_MODE: &str = "default";
 /// stops it (`packages/cli/src/utils/relaunch.ts`). Update checks run only in
 /// the interactive TUI and folder trust is off by default (and only narrows the
 /// approval mode when on), so neither needs an override.
+///
+/// `QWEN_CODE_MEMORY_BASE_DIR` moves Qwen Code's auto-memory store
+/// (`packages/core/src/memory/paths.ts`, `getMemoryBaseDir`) from the owner's
+/// global Qwen directory into the run's own workspace, so memories written
+/// during one token's runs are never read back in another token's runs.
 #[must_use]
-pub fn env(_workdir: &Path) -> Vec<(String, String)> {
-    vec![("QWEN_CODE_NO_RELAUNCH".to_owned(), "1".to_owned())]
+pub fn env(workdir: &Path) -> Vec<(String, String)> {
+    let dir = std::path::absolute(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    vec![
+        ("QWEN_CODE_NO_RELAUNCH".to_owned(), "1".to_owned()),
+        (
+            "QWEN_CODE_MEMORY_BASE_DIR".to_owned(),
+            dir.join(MEMORY_DIR).to_string_lossy().into_owned(),
+        ),
+    ]
 }
 
+/// Directory, inside the workspace, that holds Qwen Code's memory store.
+pub const MEMORY_DIR: &str = ".qwen-memory";
+
+/// Restricts which configured MCP servers Qwen Code connects to.
+const MCP_ALLOWLIST_FLAG: &str = "--allowed-mcp-server-names";
+
 /// Builds the argument vector for a headless Qwen Code run.
+///
+/// `--allowed-mcp-server-names ""` connects none of the owner's MCP servers:
+/// the empty name is filtered out, leaving an empty allowlist that no server
+/// matches (`packages/cli/src/config/config.ts`, and the "allow no MCP servers
+/// if the flag is provided but empty" test). The option takes any number of
+/// values, so it goes first, followed by another option. The owner opts in by
+/// passing the flag with server names in `extra_args`, which replaces it.
 #[must_use]
 pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec![
+    let mut args: Vec<OsString> = Vec::new();
+    if !has_flag(&cfg.extra_args, &[MCP_ALLOWLIST_FLAG]) {
+        args.extend([MCP_ALLOWLIST_FLAG.into(), "".into()]);
+    }
+    args.extend([
         "--output-format".into(),
         "stream-json".into(),
         "--approval-mode".into(),
         APPROVAL_MODE.into(),
-    ];
+    ]);
     if let Some(model) = inv.model {
         args.extend(["--model".into(), model.into()]);
     }
@@ -232,6 +261,8 @@ mod tests {
         assert_eq!(
             args_for("hi", None, None),
             [
+                "--allowed-mcp-server-names",
+                "",
                 "--output-format",
                 "stream-json",
                 "--approval-mode",
@@ -323,7 +354,65 @@ mod tests {
     #[test]
     fn env_disables_self_relaunch() {
         let env = env(Path::new("/tmp/ws"));
-        assert_eq!(env, [("QWEN_CODE_NO_RELAUNCH".to_owned(), "1".to_owned())]);
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "QWEN_CODE_NO_RELAUNCH" && v == "1")
+        );
+    }
+
+    #[test]
+    fn env_keeps_memory_inside_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let env = env(workspace.path());
+        let dir = &env
+            .iter()
+            .find(|(k, _)| k == "QWEN_CODE_MEMORY_BASE_DIR")
+            .unwrap()
+            .1;
+        let expected = std::path::absolute(workspace.path())
+            .unwrap()
+            .join(MEMORY_DIR);
+        assert_eq!(Path::new(dir), expected);
+        assert!(Path::new(dir).starts_with(workspace.path()));
+        // A relative workspace still yields an absolute path, since Qwen
+        // Code resolves the variable against its own working directory.
+        let env = super::env(Path::new("ws"));
+        let dir = &env
+            .iter()
+            .find(|(k, _)| k == "QWEN_CODE_MEMORY_BASE_DIR")
+            .unwrap()
+            .1;
+        assert!(Path::new(dir).is_absolute(), "{dir}");
+    }
+
+    #[test]
+    fn build_args_connects_no_mcp_server_by_default() {
+        let args = args_for("hi", Some(SESSION), Some("qwen3-coder-plus"));
+        assert_eq!(
+            &args[..3],
+            ["--allowed-mcp-server-names", "", "--output-format"]
+        );
+    }
+
+    #[test]
+    fn owner_mcp_allowlist_replaces_the_default() {
+        let mut c = cfg();
+        c.extra_args = vec!["--allowed-mcp-server-names=docs".into()];
+        let args = strings(&build_args(
+            &c,
+            Invocation {
+                prompt: "hi",
+                resume: None,
+                model: None,
+            },
+        ));
+        assert_eq!(
+            args.iter()
+                .filter(|a| a.starts_with("--allowed-mcp-server-names"))
+                .count(),
+            1
+        );
+        assert!(!args.iter().any(String::is_empty), "{args:?}");
     }
 
     #[test]
