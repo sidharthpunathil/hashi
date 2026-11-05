@@ -964,6 +964,7 @@ dependencies = [
  "ureq",
  "uuid",
  "win32job",
+ "zeroize",
 ]
 
 [[package]]

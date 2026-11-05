@@ -7,6 +7,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crossterm::event::KeyCode;
+use zeroize::Zeroizing;
 
 use super::app::ProjectChoice;
 use crate::accounts::{self as acct, AccountKind};
@@ -20,9 +21,11 @@ use crate::util::now_ms;
 pub type FieldError = (usize, String);
 
 /// Typed text that must never be shown or logged, such as an API key. Its
-/// `Debug` gives only the length.
+/// `Debug` gives only the length. The text is wiped from memory when the
+/// secret is dropped, and room for a whole key is set aside on the first
+/// key press so growing it does not leave copies behind.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub struct Secret(String);
+pub struct Secret(Zeroizing<String>);
 
 impl Secret {
     /// The characters typed so far.
@@ -82,6 +85,15 @@ pub fn edit(text: &mut String, code: KeyCode, max: usize) -> bool {
 
 /// Like [`edit`], for a [`Secret`].
 pub fn edit_secret(secret: &mut Secret, code: KeyCode, max: usize) -> bool {
+    // A character is at most four bytes.
+    let room = max.saturating_mul(4);
+    if secret.0.capacity() < room {
+        // Move what is typed into the larger buffer by hand, so the old one
+        // is wiped when it drops instead of being freed as it is.
+        let mut grown = Zeroizing::new(String::with_capacity(room));
+        grown.push_str(&secret.0);
+        secret.0 = grown;
+    }
     edit(&mut secret.0, code, max)
 }
 
@@ -637,7 +649,7 @@ impl AccountForm {
     /// # Errors
     ///
     /// When the key is missing or malformed.
-    pub fn clean_key(&self) -> Result<Option<String>, FieldError> {
+    pub fn clean_key(&self) -> Result<Option<Zeroizing<String>>, FieldError> {
         if !self.kind.is_key() {
             return Ok(None);
         }
@@ -645,7 +657,7 @@ impl AccountForm {
             return Err((Self::KEY, "paste the key".to_owned()));
         }
         acct::clean_key(self.key.expose())
-            .map(Some)
+            .map(|k| Some(Zeroizing::new(k)))
             .map_err(|e| (Self::KEY, e))
     }
 }
@@ -1018,5 +1030,27 @@ impl ListenForm {
                 })?,
         };
         Ok(SocketAddr::new(ip, port))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The typed key lives in one buffer from the first key to the last, so
+    /// no reallocation leaves an unwiped copy behind, and that buffer is a
+    /// zeroizing one.
+    #[test]
+    fn a_typed_key_never_moves_in_memory() {
+        let mut secret = Secret::default();
+        edit_secret(&mut secret, KeyCode::Char('s'), AccountForm::KEY_CHARS);
+        let start = secret.expose().as_ptr();
+        for _ in 0..AccountForm::KEY_CHARS + 10 {
+            edit_secret(&mut secret, KeyCode::Char('é'), AccountForm::KEY_CHARS);
+            assert_eq!(secret.expose().as_ptr(), start, "the key was copied");
+        }
+        assert_eq!(secret.len(), AccountForm::KEY_CHARS);
+        let _: &Zeroizing<String> = &secret.0;
+        assert_eq!(format!("{secret:?}"), "Secret(4096 chars)");
     }
 }

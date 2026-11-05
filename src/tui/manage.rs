@@ -355,7 +355,7 @@ impl App {
                     KeyCode::PageUp => scroll = scroll.saturating_sub(10),
                     KeyCode::Char('c') => {
                         if let Some(Ok(text)) = &answer {
-                            self.copy(text, "answer copied");
+                            self.copy(&answer_for_clipboard(text), "answer copied");
                         }
                     }
                     _ => {}
@@ -1074,7 +1074,7 @@ impl App {
             form.agent,
             &name,
             kind,
-            key.as_deref(),
+            key.as_deref().map(String::as_str),
             ACTOR,
         ) {
             return fail(form, (1, format!("{e:#}")));
@@ -1709,5 +1709,28 @@ impl App {
         }
         self.notify(msg);
         None
+    }
+}
+
+/// A remote's answer as it goes to the clipboard: every control character
+/// but newline and tab, ESC above all, and every bidi control replaced, so
+/// pasting it cannot end a bracketed paste early and run what follows.
+fn answer_for_clipboard(text: &str) -> String {
+    crate::diagnostics::neutralize_controls(text, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_remote_answer_cannot_break_out_of_a_bracketed_paste() {
+        let answer = "ok\u{1b}[201~rm -rf ~\r\n\u{9b}201~\u{202e}x\nline two\tend";
+        let copied = answer_for_clipboard(answer);
+        assert!(!copied.contains('\u{1b}'), "{copied:?}");
+        assert!(!copied.contains('\u{9b}'), "{copied:?}");
+        assert!(!copied.contains('\r'), "{copied:?}");
+        assert!(!copied.contains('\u{202e}'), "{copied:?}");
+        assert!(copied.contains("\nline two\tend"), "{copied:?}");
     }
 }

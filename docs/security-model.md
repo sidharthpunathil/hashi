@@ -88,6 +88,16 @@ A remote account sends prompts to a friend's bridge, with the token they shared 
 
 Pause holds queued prompts, expiry fails them, and revoke stops running ones at once (within about 2 seconds when you revoke from another terminal with `hashi token revoke`). Revoking deletes the token's workspace, removing symlinks without following them. Every token and invite change is audited. Hashi shuts down cleanly on Ctrl-C, `SIGTERM`, `SIGHUP` and Windows console close, and a second signal exits at once.
 
+## The dashboard
+
+The dashboard draws text that other people wrote: prompts, answers, token and invite names, a bridge's answer. None of it can drive your terminal.
+
+- **No hidden or reordered text.** Every cell and popup title has control characters and Unicode format characters (bidi overrides and isolates, zero-width spaces and joiners, the byte order mark) removed before it is drawn, so a prompt cannot make `exe.txt` read as `txt.exe` or hide part of itself. Token names with bidi or format characters are refused when a token is created or renamed.
+- **Safe copies.** Pressing `c` on a bridge's answer copies it with every control character but newline and tab (ESC above all) and every bidi control replaced, so pasting it cannot end a bracketed paste and run what follows.
+- **Ctrl-C during a command.** When the dashboard runs an install, a sign-in or an update in the terminal, a Ctrl-C (or another stop signal) that arrives while the command or its "Press Enter" prompt runs belongs to the command and does not stop Hashi afterwards. Outside those windows a signal stops Hashi as before, and a second one exits at once.
+- **No stray keys.** Keys typed ahead are dropped before the terminal goes to the command and again when the dashboard takes it back, so keys meant for one never fire in the other.
+- **Typed keys.** A key typed into the add-account form is held in one buffer that is wiped when the form closes, and the form is never copied to draw it.
+
 ## Network edge
 
 - Hashi binds to `127.0.0.1` by default. Binding elsewhere without TLS prints a warning. Tunnels and HTTPS are opt-in.

@@ -9,6 +9,7 @@ use ratatui::widgets::TableState;
 use super::forms::{
     AccountForm, AskForm, ConnectForm, EditTokenForm, ListenForm, ProjectForm, ReportForm,
 };
+use super::one_line;
 use super::theme::{self, Rgb};
 use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
@@ -21,7 +22,7 @@ use crate::store::{Invite, NewInvite, NewToken, Request, Revoke, Stats, TokenUsa
 use crate::tailscale::Mode;
 use crate::token::{Limits, Role, SessionMode, Token, TokenStatus};
 use crate::tunnel::StartError;
-use crate::util::{now_ms, one_line, truncate};
+use crate::util::{now_ms, truncate};
 
 /// Top-level views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

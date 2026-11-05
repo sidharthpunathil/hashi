@@ -668,16 +668,9 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
             events,
             running.bootstrap_token.clone(),
             args.tunnel || args.tailscale.is_some(),
-            async {
-                // While an install runs from the dashboard, Ctrl-C is meant
-                // for it (the terminal sends it to both), not for Hashi.
-                loop {
-                    signals.recv().await;
-                    if !hashi::tui::command_running() {
-                        break;
-                    }
-                }
-            },
+            // While an install runs from the dashboard, Ctrl-C is meant
+            // for it (the terminal sends it to both), not for Hashi.
+            hashi::tui::stop_unless_attached(&mut signals),
         )
         .await;
         let _force = hashi::shutdown::exit_on_next(signals);

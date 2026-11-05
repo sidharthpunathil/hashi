@@ -61,6 +61,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- A Ctrl-C meant for an install, sign-in or update run from the dashboard, or pressed at its "Press Enter" prompt, no longer shuts Hashi down once the dashboard is back. A signal outside those windows still stops it.
+- The dashboard removes bidi controls, zero-width and other format characters from every table cell and popup title, so a prompt, a name or a bridge's answer cannot reorder or hide text. Token names with them are refused.
+- Copying a bridge's answer with `c` replaces control characters (ESC included) and bidi controls, so the paste cannot break out of bracketed paste.
+- Keys typed ahead are dropped before the dashboard hands the terminal to a command and again when it takes it back.
+- A key typed into the add-account form is wiped from memory when the form closes and is no longer copied on every frame.
 - The dashboard picked up finished background work only while nothing animated, so a bridge's answer or a connect result waited until its own spinner stopped, which it never did.
 
 ## [0.2.0] - 2026-11-05
