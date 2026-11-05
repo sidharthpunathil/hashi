@@ -68,7 +68,7 @@ async fn start() -> Tls {
         usage: Default::default(),
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
-    let url = running.state.runtime.local_url.clone();
+    let url = running.state.runtime.local_url();
     assert!(url.starts_with("https://"), "{url}");
     let port = url.rsplit(':').next().unwrap().parse().unwrap();
 

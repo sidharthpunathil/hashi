@@ -231,9 +231,25 @@ pub struct Control {
     settings: Option<Settings>,
     trust: TunnelTrust,
     slot: Mutex<Slot>,
+    /// The local port after the server moved, in place of `settings.port`.
+    moved_to: Mutex<Option<u16>>,
 }
 
 impl Control {
+    /// The local port a tunnel started now points at.
+    #[must_use]
+    pub fn port(&self) -> Option<u16> {
+        let moved = self.moved_to.lock().ok().and_then(|p| *p);
+        moved.or_else(|| self.settings.as_ref().map(|s| s.port))
+    }
+
+    /// Points tunnels started from now on at `port`, after the server moved.
+    pub fn set_port(&self, port: u16) {
+        if let Ok(mut p) = self.moved_to.lock() {
+            *p = Some(port);
+        }
+    }
+
     /// A control for a server. When a tunnel is configured, trust is turned
     /// on right away.
     #[must_use]
@@ -249,6 +265,7 @@ impl Control {
                 keep_trust,
                 ..Slot::default()
             }),
+            moved_to: Mutex::default(),
         }
     }
 
@@ -310,6 +327,7 @@ impl Control {
         self.trust.set(true);
         Ok(Settings {
             cancel: stop,
+            port: self.port().unwrap_or(settings.port),
             ..settings.clone()
         })
     }

@@ -112,7 +112,7 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
     tweak(&mut cfg);
 
     let running = server::start(cfg, Bus::default()).await.unwrap();
-    let base = running.state.runtime.local_url.clone();
+    let base = running.state.runtime.local_url();
     let admin = running
         .bootstrap_token
         .clone()
@@ -1578,6 +1578,7 @@ async fn concurrent_submits_never_exceed_request_caps() {
                         message: format!("hi {i}"),
                         agent: None,
                         model: None,
+                        account: None,
                     },
                 )
                 .await

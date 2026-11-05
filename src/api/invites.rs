@@ -238,9 +238,7 @@ pub(super) async fn create(
         .bus
         .log(format!("invite created for {}", invite.label));
     let public = state.runtime.public_url();
-    let base = public
-        .clone()
-        .unwrap_or_else(|| state.runtime.local_url.clone());
+    let base = public.clone().unwrap_or_else(|| state.runtime.local_url());
     Ok((
         StatusCode::CREATED,
         Json(json!({

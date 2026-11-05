@@ -188,7 +188,7 @@ async fn start_with(tweak: impl FnOnce(&mut ServerConfig)) -> anyhow::Result<Wor
     let port = running
         .state
         .runtime
-        .local_url
+        .local_url()
         .rsplit(':')
         .next()
         .unwrap()
@@ -249,7 +249,7 @@ async fn serve_turns_on_then_off_exactly_its_own_listener() {
         ]
     );
     assert!(!w.argv().iter().any(|a| a.contains("reset")));
-    assert_eq!(rt.base_url(), rt.local_url);
+    assert_eq!(rt.base_url(), rt.local_url());
     assert_eq!(server::read_public_url(&w.dir.path().join("home")), None);
     assert!(!rt.tailscale.trust().get());
     assert_eq!(
@@ -404,7 +404,7 @@ async fn only_one_route_is_public_at_a_time_and_cloudflare_can_stop() {
     );
     assert!(matches!(w.next().await, Event::TunnelDown(_)));
     assert_eq!(server::active_route(&st.runtime), None);
-    assert_eq!(st.runtime.base_url(), st.runtime.local_url);
+    assert_eq!(st.runtime.base_url(), st.runtime.local_url());
     w.running.shutdown().await;
 }
 

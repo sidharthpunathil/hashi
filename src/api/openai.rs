@@ -382,6 +382,7 @@ async fn chat_completions(
         message,
         agent: agent.map(|a| a.as_str().to_owned()),
         model,
+        account: None,
     };
 
     if body.stream.unwrap_or(false) {

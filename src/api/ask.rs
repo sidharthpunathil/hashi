@@ -114,6 +114,9 @@ pub struct SubmitInput {
     pub agent: Option<String>,
     /// Model override.
     pub model: Option<String>,
+    /// Run on this account of the agent only, instead of the token's list.
+    /// Admin tokens only; the dashboard's prompt popup sets it.
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -271,7 +274,14 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         return Err(ApiError::Unavailable(agent::unavailable_message(agent)));
     }
 
+    if let Some(name) = &input.account {
+        check_pinned_account(state, token, agent, name)?;
+    }
     let id = uuid::Uuid::new_v4().to_string();
+    // Pinned before the row exists, so no worker can claim it first.
+    if let Some(name) = &input.account {
+        state.dispatcher.pin_account(&id, name);
+    }
     let admission = state.store.insert_request_checked(
         NewRequest {
             id: &id,
@@ -283,8 +293,12 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         &token.limits,
         state.queue_limit,
         admin_reserve(state.queue_limit),
-    )?;
+    );
     let l = token.limits;
+    if !matches!(admission, Ok(Admission::Accepted)) {
+        state.dispatcher.unpin(&id);
+    }
+    let admission = admission?;
     match admission {
         Admission::Accepted => {}
         Admission::LimitReached(cap) => {
@@ -348,6 +362,40 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
         .ok_or(ApiError::NotFound("request vanished"))
 }
 
+/// Checks that an admin may pin a request on `agent` to account `name`:
+/// the default account, or one that exists, is enabled and not limited.
+fn check_pinned_account(
+    state: &AppState,
+    token: &Token,
+    agent: AgentKind,
+    name: &str,
+) -> ApiResult<()> {
+    if !token.is_admin() {
+        return Err(ApiError::Forbidden(
+            "only an admin token may pick the account".to_owned(),
+        ));
+    }
+    crate::accounts::check_name(name, true).map_err(ApiError::BadRequest)?;
+    if name == crate::accounts::DEFAULT {
+        return Ok(());
+    }
+    match state.store.get_account(agent, name)? {
+        Some(a) if a.kind != crate::accounts::AccountKind::Default => match a.status(now_ms()) {
+            crate::store::AccountStatus::Ready => Ok(()),
+            s => Err(ApiError::Conflict(
+                if s == crate::store::AccountStatus::Disabled {
+                    "that account is disabled"
+                } else {
+                    "that account is at its limit"
+                },
+            )),
+        },
+        _ => Err(ApiError::BadRequest(format!(
+            "{agent} has no account named {name}"
+        ))),
+    }
+}
+
 /// Waits up to `secs` (capped at `cap`) for a request to finish, then
 /// returns its latest state. The wait counts against `waiter`, the token
 /// asking; one that already holds [`MAX_WAITS_PER_TOKEN`] waits gets the
@@ -407,6 +455,7 @@ pub(super) async fn ask(
             message: body.message,
             agent: body.agent,
             model: body.model,
+            account: None,
         },
     )
     .await?;

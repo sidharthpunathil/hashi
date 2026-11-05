@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
+use super::forms::{
+    AccountForm, AskForm, ConnectForm, EditTokenForm, ListenForm, ProjectForm, ReportForm,
+};
 use super::theme::{self, Rgb};
 use crate::accounts::{self as acct, AccountMap};
 use crate::agent::AgentKind;
@@ -83,31 +86,64 @@ pub enum Action {
     NewInvite,
     /// Create a token.
     NewToken,
+    /// Send a prompt to an agent here or on a bridge.
+    Ask,
+    /// List and manage agent accounts.
+    Accounts,
+    /// List and manage projects.
+    Projects,
+    /// List and forget the bridges this machine connected to.
+    Bridges,
+    /// Redeem an invite link to someone else's Hashi.
+    Connect,
+    /// Move the server to another port or address.
+    Listen,
+    /// Copy the API base URL.
+    CopyUrl,
     /// Install cloudflared.
     InstallCloudflared,
     /// Install tailscale.
     InstallTailscale,
+    /// Install Crush.
+    InstallCrush,
     /// Check for a newer release.
     CheckUpdate,
-    /// Copy the API base URL.
-    CopyUrl,
+    /// Download and install the latest release.
+    InstallUpdate,
+    /// Show what `hashi doctor` checks.
+    Doctor,
+    /// Write a diagnostic report.
+    Report,
+    /// Show the audit log.
+    Audit,
     /// Show every key binding.
     Help,
 }
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 22] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
         Self::StopPublic,
         Self::NewInvite,
         Self::NewToken,
+        Self::Ask,
+        Self::Accounts,
+        Self::Projects,
+        Self::Bridges,
+        Self::Connect,
+        Self::Listen,
+        Self::CopyUrl,
         Self::InstallCloudflared,
         Self::InstallTailscale,
+        Self::InstallCrush,
         Self::CheckUpdate,
-        Self::CopyUrl,
+        Self::InstallUpdate,
+        Self::Doctor,
+        Self::Report,
+        Self::Audit,
         Self::Help,
     ];
 
@@ -119,8 +155,13 @@ impl Action {
                 "Go public"
             }
             Self::NewInvite | Self::NewToken => "Share",
-            Self::InstallCloudflared | Self::InstallTailscale => "Install",
-            Self::CheckUpdate | Self::CopyUrl => "Maintenance",
+            Self::Ask => "Ask",
+            Self::Accounts | Self::Projects | Self::Bridges | Self::Connect => "Manage",
+            Self::Listen | Self::CopyUrl => "Server",
+            Self::InstallCloudflared | Self::InstallTailscale | Self::InstallCrush => "Install",
+            Self::CheckUpdate | Self::InstallUpdate | Self::Doctor | Self::Report | Self::Audit => {
+                "Maintenance"
+            }
             Self::Help => "Help",
         }
     }
@@ -132,6 +173,7 @@ impl Action {
             Self::Cloudflare => "t",
             Self::NewInvite => "s",
             Self::NewToken => "n",
+            Self::Ask => "a",
             Self::CopyUrl => "c",
             Self::Help => "?",
             _ => "enter",
@@ -148,10 +190,21 @@ impl Action {
             Self::StopPublic => "Stop going public",
             Self::NewInvite => "New invite",
             Self::NewToken => "New token",
+            Self::Ask => "Ask an agent",
+            Self::Accounts => "Accounts",
+            Self::Projects => "Projects",
+            Self::Bridges => "Bridges I use",
+            Self::Connect => "Connect to a bridge",
+            Self::Listen => "Port and bind address",
+            Self::CopyUrl => "Copy the API URL",
             Self::InstallCloudflared => "Install cloudflared",
             Self::InstallTailscale => "Install tailscale",
+            Self::InstallCrush => "Install Crush",
             Self::CheckUpdate => "Check for updates",
-            Self::CopyUrl => "Copy the API URL",
+            Self::InstallUpdate => "Install the update",
+            Self::Doctor => "Doctor",
+            Self::Report => "Diagnostic report",
+            Self::Audit => "Audit log",
             Self::Help => "All key bindings",
         }
     }
@@ -166,18 +219,61 @@ impl Action {
             Self::StopPublic => "turn off the active route; links go back to local",
             Self::NewInvite => "a one-time link that gives someone their own token",
             Self::NewToken => "an API token for a script or app",
+            Self::Ask => "a prompt through the queue, or to a bridge you use",
+            Self::Accounts => "add, sign in, disable and remove agent accounts",
+            Self::Projects => "folders that tokens and invites can be bound to",
+            Self::Bridges => "other people's Hashi that you connected to",
+            Self::Connect => "paste an invite link someone sent you",
+            Self::Listen => "move the server without stopping it",
+            Self::CopyUrl => "the base URL clients should use",
             Self::InstallCloudflared => "Cloudflare's own install command for this machine",
             Self::InstallTailscale => "Tailscale's own install command for this machine",
+            Self::InstallCrush => "Charm's own install command (Crush is opt-in)",
             Self::CheckUpdate => "ask GitHub for the latest release",
-            Self::CopyUrl => "the base URL clients should use",
+            Self::InstallUpdate => "download, verify and replace this binary",
+            Self::Doctor => "agents, helpers, accounts, updates and the home",
+            Self::Report => "a redacted file to attach to a bug report",
+            Self::Audit => "recent sharing and access changes",
             Self::Help => "every key the dashboard knows",
         }
     }
 }
 
-/// What `enter` in the Commands view asks the event loop to run with the
-/// terminal attached: an install plan.
-pub type PendingCommand = crate::install::Plan;
+/// Something the event loop runs with the terminal attached, the dashboard
+/// stepping aside meanwhile: an install, an account sign-in or an update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingCommand {
+    /// A helper's install plan.
+    Install(crate::install::Plan),
+    /// A login account's sign-in command.
+    SignIn {
+        /// The Hashi home.
+        home: std::path::PathBuf,
+        /// The agent.
+        agent: AgentKind,
+        /// The account.
+        name: String,
+        /// The agent's executable.
+        bin: std::path::PathBuf,
+    },
+    /// `hashi update`: download, verify and install the latest release.
+    Update {
+        /// The Hashi home.
+        home: std::path::PathBuf,
+    },
+}
+
+impl PendingCommand {
+    /// The CLI command it stands for, shown while it runs.
+    #[must_use]
+    pub fn title(&self) -> String {
+        match self {
+            Self::Install(plan) => format!("hashi install {}", plan.helper()),
+            Self::SignIn { agent, name, .. } => format!("hashi account login {agent} {name}"),
+            Self::Update { .. } => "hashi update".to_owned(),
+        }
+    }
+}
 
 /// Which agents a new token may use: every agent, or exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,7 +332,16 @@ impl ProjectChoice {
         Self { names, at: 0 }
     }
 
-    fn shift(&mut self, by: isize) {
+    /// A choice among `names`, starting at `selected` when it is one of them.
+    #[must_use]
+    pub fn with(names: Vec<String>, selected: Option<&str>) -> Self {
+        let at = selected
+            .and_then(|s| names.iter().position(|n| n == s))
+            .map_or(0, |i| i + 1);
+        Self { names, at }
+    }
+
+    pub(crate) fn shift(&mut self, by: isize) {
         self.at = cycle(self.at, self.names.len() + 1, by);
     }
 
@@ -564,6 +669,104 @@ pub enum Popup {
         /// The URL, as the CLI printed it.
         url: String,
     },
+    /// Token edit form.
+    EditToken(Box<EditTokenForm>),
+    /// The prompt popup.
+    Ask(Box<AskForm>),
+    /// A bridge's answer, or the wait for it.
+    RemoteAnswer {
+        /// The bridge asked.
+        remote: String,
+        /// The answer, the error, or `None` while waiting.
+        answer: Option<Result<String, String>>,
+        /// Lines scrolled.
+        scroll: u16,
+    },
+    /// The accounts list.
+    Accounts {
+        /// Selected row.
+        selected: usize,
+    },
+    /// "Add account" form.
+    AddAccount(Box<AccountForm>),
+    /// Account removal confirmation.
+    ConfirmRemoveAccount {
+        /// The agent.
+        agent: AgentKind,
+        /// The account.
+        name: String,
+        /// Tokens that list it.
+        tokens: usize,
+    },
+    /// The projects list.
+    Projects {
+        /// Selected row.
+        selected: usize,
+    },
+    /// "Add project" or "edit project" form.
+    Project(Box<ProjectForm>),
+    /// Project removal confirmation.
+    ConfirmRemoveProject {
+        /// The project.
+        name: String,
+        /// Tokens bound to it.
+        tokens: usize,
+    },
+    /// The bridges saved by `hashi connect`.
+    Remotes {
+        /// Selected row.
+        selected: usize,
+    },
+    /// "Connect to a bridge" form.
+    Connect(Box<ConnectForm>),
+    /// Bridge removal confirmation.
+    ConfirmRemoveRemote {
+        /// The bridge's name.
+        name: String,
+    },
+    /// The audit log.
+    Audit {
+        /// Rows scrolled.
+        scroll: usize,
+    },
+    /// What `hashi doctor` checks.
+    Doctor,
+    /// The report popup.
+    Report(Box<ReportForm>),
+    /// A report was written here.
+    ReportSaved {
+        /// Where.
+        path: String,
+        /// Whether prompt excerpts are in it.
+        include_prompts: bool,
+    },
+    /// The port and bind address form.
+    Listen(Box<ListenForm>),
+    /// Confirmation for a bind that exposes the API in plain text.
+    ConfirmListen {
+        /// The form, to go back to.
+        form: Box<ListenForm>,
+        /// The address asked for.
+        addr: std::net::SocketAddr,
+        /// The warning shown.
+        warning: String,
+    },
+    /// Confirmation before the dashboard steps aside for `hashi update`.
+    ConfirmUpdate,
+}
+
+/// Work finished in the background, picked up on the next tick.
+#[derive(Debug, Clone)]
+pub enum Done {
+    /// `hashi connect`: the name saved under, or why it failed.
+    Connected(Result<String, String>),
+    /// `hashi ask --remote`: the bridge asked and its answer or error.
+    Answer {
+        /// The bridge.
+        remote: String,
+        /// The answer, or why there is none.
+        result: Result<String, String>,
+    },
 }
 
 /// Public tunnel state.
@@ -644,7 +847,7 @@ pub struct App {
     pub reduced_motion: bool,
     /// The request detail pane, kept between frames.
     pub detail_cache: super::ui::DetailCache,
-    last_refresh: Option<Instant>,
+    pub(crate) last_refresh: Option<Instant>,
     /// The selected request in full, for the detail pane.
     pub(crate) detail: Option<Request>,
     /// Selected row of the Commands view, an index into [`Action::ALL`].
@@ -658,7 +861,16 @@ pub struct App {
     pub tailscale_bin: Option<std::path::PathBuf>,
     /// Tailscale's `BackendState` from the last background probe.
     tailscale_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// The whole answer of the last `tailscale status --json`, for the doctor.
+    pub(crate) tailscale_self: Shared<Option<Result<crate::tailscale::SelfStatus, String>>>,
+    /// Where `crush` is, if installed.
+    pub crush: Option<std::path::PathBuf>,
+    /// Background work that has finished, waiting for the next tick.
+    pub(crate) done: Shared<Vec<Done>>,
 }
+
+/// State a background task fills in for the dashboard.
+pub type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
 
 const FEED_CAP: usize = 500;
 const RECENT_LIMIT: u32 = 300;
@@ -706,6 +918,9 @@ impl App {
             cloudflared: None,
             tailscale_bin: None,
             tailscale_state: std::sync::Arc::default(),
+            tailscale_self: std::sync::Arc::default(),
+            crush: None,
+            done: std::sync::Arc::default(),
         };
         app.refresh();
         app
@@ -783,7 +998,7 @@ impl App {
                 .any(|r| r.status == crate::store::RequestStatus::Running)
             || matches!(self.tunnel, TunnelState::Starting)
             || self.toast.is_some()
-            || matches!(self.popup, Some(Popup::Share(_) | Popup::NewToken(_)))
+            || self.popup.as_ref().is_some_and(Popup::animates)
     }
 
     /// Advances animations and refreshes data periodically. Returns whether
@@ -793,7 +1008,7 @@ impl App {
         if animating && !self.reduced_motion {
             self.tick = self.tick.wrapping_add(1);
         }
-        let mut redraw = animating;
+        let mut redraw = animating || self.take_done();
         if self
             .last_refresh
             .is_none_or(|t| t.elapsed() >= Duration::from_millis(750))
@@ -987,6 +1202,12 @@ impl App {
                 self.notify("refreshed");
             }
             KeyCode::Char('t') => self.go_public(),
+            KeyCode::Char('a') => self.open_ask(None),
+            KeyCode::Char('e')
+                if self.tab == Tab::Tokens && self.tokens_focus == TokensFocus::Tokens =>
+            {
+                self.open_edit_token();
+            }
             KeyCode::Enter if self.tab == Tab::Commands => self.run_action(self.selected_action()),
             KeyCode::Char('n') if matches!(self.tab, Tab::Tokens | Tab::Commands) => {
                 self.popup = Some(Popup::NewToken(TokenForm::new(self.project_names())));
@@ -1046,6 +1267,25 @@ impl App {
     fn on_popup_key(&mut self, popup: Popup, key: KeyEvent) -> Option<Popup> {
         match popup {
             Popup::Help => None,
+            popup @ (Popup::EditToken(_)
+            | Popup::Ask(_)
+            | Popup::RemoteAnswer { .. }
+            | Popup::Accounts { .. }
+            | Popup::AddAccount(_)
+            | Popup::ConfirmRemoveAccount { .. }
+            | Popup::Projects { .. }
+            | Popup::Project(_)
+            | Popup::ConfirmRemoveProject { .. }
+            | Popup::Remotes { .. }
+            | Popup::Connect(_)
+            | Popup::ConfirmRemoveRemote { .. }
+            | Popup::Audit { .. }
+            | Popup::Doctor
+            | Popup::Report(_)
+            | Popup::ReportSaved { .. }
+            | Popup::Listen(_)
+            | Popup::ConfirmListen { .. }
+            | Popup::ConfirmUpdate) => self.on_manage_key(popup, key),
             Popup::Reveal { title, secret } => match key.code {
                 KeyCode::Char('c') => {
                     self.copy(&secret, "token copied to clipboard");
@@ -1109,7 +1349,7 @@ impl App {
             }
             Popup::Install(plan) => match key.code {
                 KeyCode::Enter if matches!(plan, crate::install::Plan::Run { .. }) => {
-                    self.pending_command = Some(plan);
+                    self.pending_command = Some(PendingCommand::Install(plan));
                     None
                 }
                 KeyCode::Enter | KeyCode::Char('c') => {
@@ -1316,7 +1556,7 @@ impl App {
     }
 
     /// The names of the projects, for the project selector of the forms.
-    fn project_names(&self) -> Vec<String> {
+    pub(crate) fn project_names(&self) -> Vec<String> {
         self.state
             .store
             .list_projects()
@@ -1390,13 +1630,13 @@ impl App {
         self.refresh();
     }
 
-    fn audit(&mut self, action: &str, target: &str, detail: &str) {
+    pub(crate) fn audit(&mut self, action: &str, target: &str, detail: &str) {
         if let Err(e) = self.state.store.audit("dashboard", action, target, detail) {
             self.notify(format!("audit log failed: {e}"));
         }
     }
 
-    fn selected_token(&self) -> Option<&Token> {
+    pub(crate) fn selected_token(&self) -> Option<&Token> {
         self.tokens_table
             .selected()
             .and_then(|i| self.tokens.get(i))
@@ -1447,7 +1687,7 @@ impl App {
         self.refresh();
     }
 
-    fn set_tab(&mut self, tab: Tab) {
+    pub(crate) fn set_tab(&mut self, tab: Tab) {
         if tab == Tab::Commands && self.tab != Tab::Commands {
             self.probe_tailscale();
         }
@@ -1484,7 +1724,7 @@ impl App {
     }
 
     /// Loads the selected request with its full prompt and response.
-    fn load_detail(&mut self) {
+    pub(crate) fn load_detail(&mut self) {
         let id = self
             .requests_table
             .selected()
@@ -1549,7 +1789,7 @@ impl App {
         }
     }
 
-    fn open_install(&mut self, helper: Helper) {
+    pub(crate) fn open_install(&mut self, helper: Helper) {
         self.popup = Some(Popup::Install(crate::install::plan_here(helper)));
     }
 
@@ -1561,7 +1801,7 @@ impl App {
             Helper::Cloudflared => self.cloudflared.as_deref(),
             Helper::Tailscale => self.tailscale_bin.as_deref(),
             // An agent, not a helper of the dashboard.
-            Helper::Crush => None,
+            Helper::Crush => self.crush.as_deref(),
         }
     }
 
@@ -1571,12 +1811,13 @@ impl App {
         let ts_custom = rt.tailscale.settings().and_then(|s| s.bin.clone());
         self.cloudflared = crate::install::locate(Helper::Cloudflared, cf_custom.as_deref());
         self.tailscale_bin = crate::install::locate(Helper::Tailscale, ts_custom.as_deref());
+        self.crush = crate::install::locate(Helper::Crush, None);
     }
 
     /// Asks `tailscale status --json` in the background whether this device
     /// is signed in, for the Commands view. Needs a Tokio runtime and an
     /// installed `tailscale`.
-    fn probe_tailscale(&mut self) {
+    pub(crate) fn probe_tailscale(&mut self) {
         let Some(bin) = self.tailscale_bin.clone() else {
             return;
         };
@@ -1584,13 +1825,20 @@ impl App {
             return;
         };
         let slot = std::sync::Arc::clone(&self.tailscale_state);
+        let whole = std::sync::Arc::clone(&self.tailscale_self);
         rt.spawn(async move {
-            let state = match crate::tailscale::self_status(&bin).await {
-                Ok(me) => me.backend_state,
+            let status = crate::tailscale::self_status(&bin)
+                .await
+                .map_err(|e| e.to_string());
+            let state = match &status {
+                Ok(me) => me.backend_state.clone(),
                 Err(e) => format!("unknown ({e})"),
             };
             if let Ok(mut s) = slot.lock() {
                 *s = Some(state);
+            }
+            if let Ok(mut s) = whole.lock() {
+                *s = Some(status);
             }
         });
     }
@@ -1616,11 +1864,11 @@ impl App {
             Action::NewToken => {
                 self.popup = Some(Popup::NewToken(TokenForm::new(self.project_names())));
             }
-            Action::InstallCloudflared | Action::InstallTailscale => {
-                let helper = if action == Action::InstallCloudflared {
-                    Helper::Cloudflared
-                } else {
-                    Helper::Tailscale
+            Action::InstallCloudflared | Action::InstallTailscale | Action::InstallCrush => {
+                let helper = match action {
+                    Action::InstallCloudflared => Helper::Cloudflared,
+                    Action::InstallTailscale => Helper::Tailscale,
+                    _ => Helper::Crush,
                 };
                 match self.helper_path(helper) {
                     Some(path) => {
@@ -1636,10 +1884,20 @@ impl App {
                 self.copy(&url, "URL copied");
             }
             Action::Help => self.popup = Some(Popup::Help),
+            Action::Ask
+            | Action::Accounts
+            | Action::Projects
+            | Action::Bridges
+            | Action::Connect
+            | Action::Listen
+            | Action::InstallUpdate
+            | Action::Doctor
+            | Action::Report
+            | Action::Audit => self.run_manage_action(action),
         }
     }
 
-    fn check_update(&mut self) {
+    pub(crate) fn check_update(&mut self) {
         if let Some(v) = &self.update {
             let msg = format!("v{v} is available: run hashi update in a terminal");
             self.notify(msg);
@@ -1707,21 +1965,45 @@ impl App {
     }
 
     /// Called by the event loop when a command run with the terminal
-    /// attached has finished.
-    pub fn command_finished(&mut self, helper: Helper, result: Result<(), String>) {
+    /// attached has finished. `result` is a line to show, or the error.
+    pub fn command_finished(&mut self, done: &PendingCommand, result: Result<String, String>) {
         self.refresh_helpers();
-        match result {
-            Ok(()) if self.helper_path(helper).is_some() => {
-                self.notify(format!("{helper} is installed"));
-                self.state.bus.log(format!("{helper} installed"));
+        match done {
+            PendingCommand::Install(plan) => {
+                let helper = plan.helper();
+                match result {
+                    Ok(_) if self.helper_path(helper).is_some() => {
+                        self.notify(format!("{helper} is installed"));
+                        self.state.bus.log(format!("{helper} installed"));
+                    }
+                    Ok(_) => self.notify(format!(
+                        "{helper} is still not found; open a new terminal or restart hashi"
+                    )),
+                    Err(e) => self.notify(format!("install failed: {e}")),
+                }
+                if helper == Helper::Tailscale {
+                    self.probe_tailscale();
+                }
             }
-            Ok(()) => self.notify(format!(
-                "{helper} is still not found; open a new terminal or restart hashi"
-            )),
-            Err(e) => self.notify(format!("install failed: {e}")),
-        }
-        if helper == Helper::Tailscale {
-            self.probe_tailscale();
+            PendingCommand::SignIn { agent, name, .. } => {
+                match result {
+                    Ok(state) => {
+                        self.state
+                            .bus
+                            .log(format!("{agent}:{name} signed in: {state}"));
+                        self.notify(format!("{agent}:{name} signed in: {state}"));
+                    }
+                    Err(e) => self.notify(format!("sign-in failed: {e}")),
+                }
+                self.popup = Some(Popup::Accounts { selected: 0 });
+            }
+            PendingCommand::Update { .. } => match result {
+                Ok(msg) => {
+                    self.state.bus.log(msg.clone());
+                    self.notify(msg);
+                }
+                Err(e) => self.notify(format!("update failed: {e}")),
+            },
         }
         self.last_refresh = None;
     }
@@ -1757,7 +2039,7 @@ impl App {
         self.toast = Some((msg.into(), Instant::now()));
     }
 
-    fn copy(&mut self, text: &str, done: &str) {
+    pub(crate) fn copy(&mut self, text: &str, done: &str) {
         match super::clipboard::copy(text) {
             Ok(()) => self.notify(done),
             Err(e) => self.notify(format!("copy failed: {e}")),

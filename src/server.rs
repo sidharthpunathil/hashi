@@ -15,7 +15,7 @@ use crate::agent::{self, AgentConfig, AgentKind, Limits};
 use crate::api::{self, AgentInfo, AppState, RateLimiter, Runtime};
 use crate::events::{Bus, Event};
 use crate::guard::{ResourceGuard, ResourceSettings};
-use crate::net::{LimitedListener, NetLimits};
+use crate::net::NetLimits;
 use crate::queue::{self, Dispatcher, QueueConfig};
 use crate::store::{NewToken, Store};
 use crate::tailscale::{Mode as TailscaleMode, TsError};
@@ -500,6 +500,158 @@ fn launch_tailscale(
     Ok(())
 }
 
+/// The warning for listening on `bind` without TLS, printed at startup and
+/// shown by the dashboard before it moves there. `None` on loopback.
+#[must_use]
+pub fn plain_text_warning(bind: std::net::IpAddr, tls: bool) -> Option<String> {
+    if bind.is_loopback() {
+        return None;
+    }
+    Some(if tls {
+        format!("note: serving HTTPS on {bind}, reachable from your network")
+    } else {
+        format!(
+            "warning: listening on {bind} without TLS exposes the API to your network in plain \
+             text; add --tls-cert/--tls-key, or keep 127.0.0.1 and use --tunnel"
+        )
+    })
+}
+
+/// Why moving the server failed. It keeps serving where it was.
+#[derive(Debug, thiserror::Error)]
+pub enum RebindError {
+    /// The new address could not be bound.
+    #[error("{0}")]
+    Bind(String),
+    /// This server cannot be moved (it is not a running server).
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+/// What moving the server did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rebound {
+    /// Where it listens now.
+    pub addr: SocketAddr,
+    /// Its new local URL.
+    pub url: String,
+    /// Things the owner should know, such as a route being restarted.
+    pub notes: Vec<String>,
+}
+
+/// A bind failure in words the owner can act on.
+fn bind_error(addr: SocketAddr, e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::AddrInUse => format!("port {} is in use", addr.port()),
+        ErrorKind::AddrNotAvailable => format!("{} is not an address of this machine", addr.ip()),
+        ErrorKind::PermissionDenied => format!(
+            "permission denied for port {}; ports below 1024 need extra rights",
+            addr.port()
+        ),
+        _ => format!("cannot listen on {addr}: {e}"),
+    }
+}
+
+/// Moves a running server to `addr` without stopping it.
+///
+/// The new address is bound first; if that fails nothing changes and the
+/// error says why. Otherwise the server starts serving there with the same
+/// TLS settings, connection cap and limits, the old listener finishes its
+/// open requests within the usual grace period and closes, and the local
+/// URL changes. Queued and running prompts are not touched: they live in
+/// the queue, not the listener. An active quick tunnel or Tailscale route
+/// is restarted to point at the new port; a named tunnel cannot be, so a
+/// note says to update its hostname in the Cloudflare dashboard.
+///
+/// # Errors
+///
+/// See [`RebindError`].
+pub fn rebind(runtime: &Arc<Runtime>, bus: &Bus, addr: SocketAddr) -> Result<Rebound, RebindError> {
+    let listen = &runtime.listen;
+    if !listen.can_switch() {
+        return Err(RebindError::Unavailable(
+            "this dashboard is not attached to a running server".to_owned(),
+        ));
+    }
+    let old = listen.addr();
+    if old == Some(addr) {
+        return Ok(Rebound {
+            addr,
+            url: listen.url(),
+            notes: vec!["already listening there".to_owned()],
+        });
+    }
+    let tcp =
+        std::net::TcpListener::bind(addr).map_err(|e| RebindError::Bind(bind_error(addr, &e)))?;
+    let new = listen
+        .switch_to(tcp)
+        .map_err(|e| RebindError::Unavailable(e.to_string()))?;
+    let url = listen.url();
+    bus.log(format!("listening on {url}"));
+
+    let mut notes = Vec::new();
+    let tls = listen.tls();
+    runtime.tunnel.set_port(new.port());
+    runtime
+        .tailscale
+        .set_local(new.port(), tailscale_unreachable(new, tls));
+    let port_changed = old.is_none_or(|o| o.port() != new.port());
+    let named = runtime
+        .tunnel
+        .settings()
+        .is_some_and(|s| s.named_token.is_some());
+    if named && port_changed {
+        notes.push(format!(
+            "the named tunnel's hostname still points at the old port: update it to \
+             localhost:{} in the Cloudflare dashboard",
+            new.port()
+        ));
+    }
+    match active_route(runtime) {
+        Some(PublicRoute::Cloudflare) if named => {}
+        Some(route) => {
+            notes.push(format!("restarting {} on the new port", route.label()));
+            restart_route(runtime, bus, route);
+        }
+        None => {}
+    }
+    Ok(Rebound {
+        addr: new,
+        url,
+        notes,
+    })
+}
+
+/// Stops `route`, waits until it is off, and starts it again so it points
+/// at the current port. Failures arrive on the bus.
+fn restart_route(runtime: &Arc<Runtime>, bus: &Bus, route: PublicRoute) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        bus.log("could not restart the public route: no runtime");
+        return;
+    };
+    let runtime = Arc::clone(runtime);
+    let bus = bus.clone();
+    handle.spawn(async move {
+        let started = match route {
+            PublicRoute::Cloudflare => {
+                runtime.tunnel.stop();
+                runtime.tunnel.join().await;
+                // As at startup: a configured public URL still wins.
+                launch_tunnel(&runtime, &bus, false)
+            }
+            PublicRoute::Tailscale(mode) => {
+                runtime.tailscale.stop();
+                runtime.tailscale.join().await;
+                launch_tailscale(&runtime, &bus, mode)
+            }
+        };
+        if let Err(e) = started {
+            bus.emit(Event::TunnelDown(e.to_string()));
+        }
+    });
+}
+
 /// Why Tailscale cannot proxy to this server, if it cannot: it proxies
 /// only to `http://127.0.0.1`.
 #[must_use]
@@ -944,9 +1096,10 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         },
         net.tunnel_trust.clone(),
     );
+    let (listen, next_listener) = crate::net::Listen::switchable(local, tls_config.is_some());
     let runtime = Arc::new(Runtime {
         started: Instant::now(),
-        local_url: format!("{scheme}://{local}"),
+        listen,
         public_url: RwLock::new(cfg.public_url.clone()),
         agents,
         name: cfg.name.clone(),
@@ -1038,19 +1191,19 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
     }
 
     let mut app = api::router(state.clone(), &net);
-    let shutdown = cancel.clone();
-    match tls_config {
-        Some(config) => {
-            // Browsers should keep using HTTPS for this host from now on.
-            app = app.layer(axum::middleware::map_response(hsts));
-            let listener = crate::tls::TlsListener::new(listener, config, net.max_connections)?;
-            tasks.spawn(async move { crate::net::serve(listener, app, &net, shutdown).await });
-        }
-        None => {
-            let listener = LimitedListener::new(listener, net.max_connections);
-            tasks.spawn(async move { crate::net::serve(listener, app, &net, shutdown).await });
-        }
+    if tls_config.is_some() {
+        // Browsers should keep using HTTPS for this host from now on.
+        app = app.layer(axum::middleware::map_response(hsts));
     }
+    // One listener at a time; `rebind` hands the next one over.
+    tasks.spawn(crate::net::serve_switching(
+        listener,
+        next_listener,
+        app,
+        net,
+        tls_config,
+        cancel.clone(),
+    ));
     bus.log(format!("listening on {scheme}://{local}"));
 
     if tunnel_configured {

@@ -293,19 +293,23 @@ pub(super) async fn create(
     ))
 }
 
-pub(super) async fn update(
-    State(state): State<AppState>,
-    Admin(admin): Admin,
-    Path(id): Path<String>,
-    body: Result<Json<UpdateTokenBody>, axum::extract::rejection::JsonRejection>,
-) -> ApiResult<Json<Value>> {
-    let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
-    let mut token = state
-        .store
-        .get_token(&id)?
-        .ok_or(ApiError::NotFound("token not found"))?;
+/// Applies a `PATCH /v1/tokens/{id}` body to `token`, checking every field
+/// and the result's project binding. `actor` is the id of the token making
+/// the change, which may not pause itself. Returns the updated token and a
+/// list of what changed; nothing is saved. The API, `hashi token update`
+/// and the dashboard's edit form all go through here.
+///
+/// # Errors
+///
+/// Fails on the first invalid field, when nothing would change, or when the
+/// token would leave its project.
+pub fn apply_token_update(
+    store: &Store,
+    mut token: crate::token::Token,
+    body: UpdateTokenBody,
+    actor: Option<&str>,
+) -> ApiResult<(crate::token::Token, Vec<String>)> {
     let mut changes = Vec::new();
-
     if let Some(name) = body.name {
         token.name = validate_name(&name)?;
         changes.push("name".to_owned());
@@ -315,7 +319,7 @@ pub(super) async fn update(
         changes.push("note".to_owned());
     }
     if let Some(paused) = body.paused {
-        if paused && token.id == admin.id {
+        if paused && actor == Some(token.id.as_str()) {
             return Err(ApiError::Conflict("cannot pause the token you are using"));
         }
         token.paused = paused;
@@ -339,7 +343,7 @@ pub(super) async fn update(
         changes.push("limits".to_owned());
     }
     if let Some(map) = body.accounts {
-        token.accounts = check_accounts(&state.store, map)?;
+        token.accounts = check_accounts(store, map)?;
         changes.push(format!(
             "accounts {}",
             acct::format_bindings(&token.accounts)
@@ -358,14 +362,29 @@ pub(super) async fn update(
     // Checked on every change, so neither a new project nor new accounts
     // can take the token outside its project.
     super::check_binding(
-        &state.store,
+        store,
         token.project.as_deref(),
         &token.agents,
         &token.accounts,
     )?;
+    Ok((token, changes))
+}
 
+pub(super) async fn update(
+    State(state): State<AppState>,
+    Admin(admin): Admin,
+    Path(id): Path<String>,
+    body: Result<Json<UpdateTokenBody>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    let current = state
+        .store
+        .get_token(&id)?
+        .ok_or(ApiError::NotFound("token not found"))?;
+    let resumed = body.paused == Some(false);
+    let (token, changes) = apply_token_update(&state.store, current, body, Some(&admin.id))?;
     state.store.save_token_policy(&token)?;
-    if body.paused == Some(false) {
+    if resumed {
         // Its queued prompts can run again.
         state.dispatcher.wake_all();
     }

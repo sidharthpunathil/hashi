@@ -114,7 +114,7 @@ async fn harness_with(tweak: impl FnOnce(&Path, &mut UsageSettings)) -> Harness 
         usage,
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
-    let base = running.state.runtime.local_url.clone();
+    let base = running.state.runtime.local_url();
     let admin = running.bootstrap_token.clone().unwrap();
     Harness {
         dir,

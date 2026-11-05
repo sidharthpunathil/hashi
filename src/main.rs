@@ -227,12 +227,15 @@ impl AgentArgs {
 
 #[derive(Debug, Parser, Clone)]
 struct ServeArgs {
-    /// Address to listen on. Keep it on loopback and use --tunnel for remote access.
-    #[arg(long, default_value = "127.0.0.1", env = "HASHI_BIND")]
-    bind: std::net::IpAddr,
-    /// Port to listen on.
-    #[arg(short, long, default_value_t = 7878, env = "HASHI_PORT")]
-    port: u16,
+    /// Address to listen on. Keep it on loopback and use --tunnel for remote
+    /// access. Default: the one saved from the dashboard in
+    /// `<home>/settings.json`, else 127.0.0.1.
+    #[arg(long, env = "HASHI_BIND")]
+    bind: Option<std::net::IpAddr>,
+    /// Port to listen on. Default: the one saved from the dashboard in
+    /// `<home>/settings.json`, else 7878.
+    #[arg(short, long, env = "HASHI_PORT")]
+    port: Option<u16>,
     /// Expose the API through a Cloudflare quick tunnel (requires `cloudflared`).
     #[arg(long, env = "HASHI_TUNNEL")]
     tunnel: bool,
@@ -536,23 +539,21 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         );
     }
 
-    if !args.bind.is_loopback() {
-        if args.tls_cert.is_some() {
-            eprintln!(
-                "note: serving HTTPS on {}, reachable from your network",
-                args.bind
-            );
-        } else {
-            eprintln!(
-                "warning: listening on {} without TLS exposes the API to your network in plain text; \
-                 add --tls-cert/--tls-key, or keep 127.0.0.1 and use --tunnel",
-                args.bind
-            );
-        }
+    // A flag or variable wins over the dashboard's saved choice.
+    let saved = hashi::settings::load(home).unwrap_or_else(|why| {
+        tracing::warn!("{why}");
+        hashi::settings::Settings::default()
+    });
+    let (bind, bind_from) =
+        hashi::settings::resolve(args.bind, saved.bind, hashi::settings::DEFAULT_BIND);
+    let (port, port_from) =
+        hashi::settings::resolve(args.port, saved.port, hashi::settings::DEFAULT_PORT);
+    if let Some(warning) = server::plain_text_warning(bind, args.tls_cert.is_some()) {
+        eprintln!("{warning}");
     }
 
     let cfg = ServerConfig {
-        bind: SocketAddr::new(args.bind, args.port),
+        bind: SocketAddr::new(bind, port),
         home: home.to_path_buf(),
         agents: args.agents.configs(),
         default_agent: args.default_agent,
@@ -611,6 +612,14 @@ async fn serve(home: &std::path::Path, args: ServeArgs) -> Result<()> {
         ..hashi::net::NetLimits::default()
     };
     let running = server::start_with(cfg, net, bus).await?;
+    running
+        .state
+        .runtime
+        .listen
+        .set_overrides(hashi::net::Overrides {
+            port: port_from == hashi::settings::Source::Override,
+            bind: bind_from == hashi::settings::Source::Override,
+        });
     // Ctrl-C, SIGTERM and SIGHUP (or the Windows console closing) all stop
     // the server the same graceful way; a second one exits at once.
     let mut signals = hashi::shutdown::Signals::install().context("installing signal handlers")?;
@@ -658,7 +667,7 @@ fn print_banner(running: &server::Running) {
     println!();
     println!("  ✦ hashi {}  the bridge", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("  local    {}", rt.local_url);
+    println!("  local    {}", rt.local_url());
     for a in &rt.agents {
         let state = a.version.as_deref().unwrap_or("not found");
         println!("  {:<8} {}", a.agent.as_str(), state);
@@ -781,7 +790,6 @@ async fn connect(home: PathBuf, args: ConnectArgs) -> Result<()> {
 /// Writes the redacted diagnostic report. Nothing is uploaded.
 async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
     let agents = server::discover_agents(&args.agents.configs()).await;
-    let cloudflared = hashi::tunnel::locate();
     let db = home.join("hashi.db");
     // Opening creates the file, so only open a database that already exists.
     let store = if db.exists() {
@@ -789,21 +797,12 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
     } else {
         Err(format!("no database at {}", db.display()))
     };
-    let env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("HASHI_"))
-        .collect();
-    let now = time::OffsetDateTime::now_utc();
-    let text = diagnostics::build_report(&diagnostics::ReportInput {
-        store: store.as_ref().map_err(Clone::clone),
-        logs_dir: &home.join("logs"),
-        agents: &agents,
-        cloudflared: cloudflared.as_deref(),
-        env: &env,
-        include_prompts: args.include_prompts,
-        now_ms: hashi::util::now_ms(),
-    });
-
-    let name = format!("hashi-report-{}.md", diagnostics::file_timestamp(now));
+    let text = diagnostics::report_text(
+        home,
+        store.as_ref().map_err(Clone::clone),
+        &agents,
+        args.include_prompts,
+    );
     let issue = diagnostics::issue_url();
     if args.stdout {
         print!("{text}");
@@ -813,15 +812,9 @@ async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
         );
         return Ok(());
     }
-    let path = match args.out {
-        Some(p) if p.is_dir() => p.join(name),
-        Some(p) => p,
-        None => PathBuf::from(name),
-    };
-    diagnostics::write_private(&path, &text)
-        .with_context(|| format!("writing {}", path.display()))?;
+    let shown =
+        diagnostics::save_report(args.out.as_deref(), &text).context("writing the report")?;
     println!("\n  ✦ hashi report\n");
-    let shown = std::path::absolute(&path).unwrap_or(path);
     println!("  Saved {}", shown.display());
     println!();
     if args.include_prompts {
@@ -942,58 +935,12 @@ fn install(args: &InstallArgs) -> Result<()> {
     Ok(())
 }
 
-/// Doctor's lines for cloudflared and tailscale, with Tailscale's sign-in
-/// state read from `tailscale status --json` only when it is installed.
-async fn doctor_helpers(helpers: &HelperArgs) {
-    use hashi::install::{self, Helper};
-    match install::locate(Helper::Cloudflared, helpers.cloudflared_bin.as_deref()) {
-        Some(p) => println!("  ✓ {:<12} {}", "cloudflared", p.display()),
-        None => println!(
-            "  · {:<12} not installed (only needed for --tunnel): hashi install cloudflared",
-            "cloudflared"
-        ),
-    }
-    let Some(bin) = install::locate(Helper::Tailscale, helpers.tailscale_bin.as_deref()) else {
-        println!(
-            "  · {:<12} not installed (only needed for --tailscale): hashi install tailscale",
-            "tailscale"
-        );
-        return;
-    };
-    let shown = bin.display();
-    match hashi::tailscale::self_status(&bin).await {
-        Ok(me) if me.running() => match me.dns_name {
-            Some(name) => println!("  ✓ {:<12} {shown}, signed in as {name}", "tailscale"),
-            None => println!(
-                "  ! {:<12} {shown}, signed in but no DNS name: turn on MagicDNS",
-                "tailscale"
-            ),
-        },
-        Ok(me) => println!(
-            "  ! {:<12} {shown}, not connected ({}): {}",
-            "tailscale",
-            diagnostics::terminal_safe(&me.backend_state),
-            hashi::tailscale::sign_in_hint()
-        ),
-        Err(e) => println!(
-            "  · {:<12} {shown}, sign-in state unknown ({})",
-            "tailscale",
-            diagnostics::terminal_safe(&hashi::util::truncate(&e.to_string(), 80))
-        ),
-    }
-}
-
-/// Doctor's update line: always asks GitHub (ignoring the cache's age)
+/// Doctor's update state: always asks GitHub (ignoring the cache's age)
 /// unless `HASHI_NO_UPDATE_CHECK` is set.
-async fn doctor_update(home: &std::path::Path) {
-    let current = env!("CARGO_PKG_VERSION");
+async fn doctor_update(home: &std::path::Path) -> hashi::doctor::UpdateState {
+    use hashi::doctor::UpdateState;
     if hashi::update::opted_out() {
-        println!(
-            "  · {:<12} v{current}, update check off ({})",
-            "hashi",
-            hashi::update::OPT_OUT_ENV
-        );
-        return;
+        return UpdateState::OptedOut;
     }
     let home = home.to_path_buf();
     let latest = tokio::task::spawn_blocking(move || {
@@ -1006,87 +953,63 @@ async fn doctor_update(home: &std::path::Path) {
     })
     .await;
     match latest {
-        Ok(Ok(r)) if hashi::update::is_newer(&r.version, &hashi::update::current_version()) => {
-            println!(
-                "  ! {:<12} v{current}, latest v{}: update available, run hashi update",
-                "hashi", r.version
-            );
-        }
-        Ok(Ok(r)) => println!(
-            "  ✓ {:<12} v{current}, latest v{}: up to date",
-            "hashi", r.version
-        ),
-        Ok(Err(e)) => println!(
-            "  · {:<12} v{current}, could not check for updates ({})",
-            "hashi",
-            diagnostics::terminal_safe(&hashi::util::truncate(&format!("{e:#}"), 80))
-        ),
-        Err(_) => println!("  · {:<12} v{current}", "hashi"),
+        Ok(Ok(r)) => UpdateState::Latest(Ok(r.version)),
+        Ok(Err(e)) => UpdateState::Latest(Err(format!("{e:#}"))),
+        Err(_) => UpdateState::Unknown,
     }
 }
 
 async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
+    use hashi::doctor;
+    use hashi::install::{self, Helper};
     println!("\n  ✦ hashi doctor\n");
-    let mut found = 0;
-    for info in server::discover_agents(&args.agents.configs()).await {
-        match &info.version {
-            Some(v) => {
-                found += 1;
-                println!("  ✓ {:<12} {v}  ({})", info.agent.display_name(), info.path);
-                if let Some(note) = hashi::verified::newer_note(info.agent, v) {
-                    println!("  ! {:<12} {}", "", diagnostics::terminal_safe(&note));
-                }
-            }
-            None => println!(
-                "  · {:<12} not installed (optional)",
-                info.agent.display_name()
-            ),
-        }
-    }
-    if !args.agents.enable_crush {
+    let found_agents = server::discover_agents(&args.agents.configs()).await;
+    let (mut checks, found) = doctor::agents(&found_agents);
+    if args.agents.enable_crush {
+        checks.push(doctor::crush(Some(args.agents.crush_allow_newer), None));
+    } else {
         let installed = args
             .agents
             .crush_bin
             .clone()
             .or_else(|| agent::locate(AgentKind::Crush.binary_name()));
-        match installed {
-            Some(p) => println!(
-                "  · {:<12} installed ({}), not enabled: start with --enable-crush to offer it",
-                AgentKind::Crush.display_name(),
-                p.display()
-            ),
-            None => println!(
-                "  · {:<12} not enabled (opt-in: --enable-crush; hashi install crush)",
-                AgentKind::Crush.display_name()
-            ),
-        }
-    } else {
-        println!(
-            "  · {:<12} enabled (--enable-crush){}",
-            AgentKind::Crush.display_name(),
-            if args.agents.crush_allow_newer {
-                ", newer releases allowed (--crush-allow-newer)"
-            } else {
-                ""
-            }
-        );
+        checks.push(doctor::crush(None, installed.as_deref()));
     }
-    doctor_helpers(&args.helpers).await;
-    admin_cli::doctor_accounts(home);
-    doctor_update(home).await;
+    let cloudflared = install::locate(Helper::Cloudflared, args.helpers.cloudflared_bin.as_deref());
+    checks.push(doctor::cloudflared(cloudflared.as_deref()));
+    // Tailscale's sign-in state is read only when it is installed.
+    let tailscale = install::locate(Helper::Tailscale, args.helpers.tailscale_bin.as_deref());
+    let status = match &tailscale {
+        Some(bin) => Some(
+            hashi::tailscale::self_status(bin)
+                .await
+                .map_err(|e| e.to_string()),
+        ),
+        None => None,
+    };
+    checks.push(doctor::tailscale(tailscale.as_deref(), status));
+    // The database is read only when it exists: opening creates it.
+    match home
+        .join("hashi.db")
+        .exists()
+        .then(|| server::open_store(home))
+    {
+        Some(Err(_)) => checks.push(doctor::Check {
+            mark: doctor::Mark::Warn,
+            name: "accounts".to_owned(),
+            detail: "could not open the database".to_owned(),
+        }),
+        Some(Ok(store)) => checks.extend(doctor::accounts(Some(&store))),
+        None => checks.extend(doctor::accounts(None)),
+    }
+    checks.push(doctor::update(&doctor_update(home).await));
+    for check in &checks {
+        println!("  {}", check.line());
+    }
     println!();
-    if found == 0 {
-        println!(
-            "  No coding agent found. Install one (for example Claude Code or Codex) and sign in.\n"
-        );
-    } else {
-        println!(
-            "  Agents that are not installed answer 503; install one any time and restart Hashi.\n"
-        );
-    }
+    println!("  {}\n", doctor::advice(found));
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1118,5 +1041,102 @@ mod tests {
         let crush = &on[&AgentKind::Crush];
         assert_eq!(crush.bin, PathBuf::from("/opt/crush"));
         assert!(crush.allow_newer);
+    }
+
+    /// Every leaf subcommand path, such as `token update`.
+    fn leaf_paths(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+            let path = if prefix.is_empty() {
+                sub.get_name().to_owned()
+            } else {
+                format!("{prefix} {}", sub.get_name())
+            };
+            if sub.has_subcommands() {
+                leaf_paths(sub, &path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_subcommand_is_in_the_dashboard_or_excluded() {
+        use clap::CommandFactory;
+        use hashi::tui::parity::{self, Entry};
+        let mut paths = Vec::new();
+        leaf_paths(&Cli::command(), "", &mut paths);
+        assert!(paths.len() > 20, "{paths:?}");
+        let missing: Vec<&String> = paths
+            .iter()
+            .filter(|p| parity::entry(p).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "add these subcommands to src/tui/parity.rs: {missing:?}"
+        );
+        let stale: Vec<&str> = parity::TABLE
+            .iter()
+            .map(|(p, _)| *p)
+            .filter(|p| !paths.iter().any(|q| q == p))
+            .collect();
+        assert!(stale.is_empty(), "no such subcommands: {stale:?}");
+        // Only serve and uninstall stay out, and every row is a real row.
+        for (path, entry) in parity::TABLE {
+            match entry {
+                Entry::Excluded(_) => assert!(
+                    matches!(*path, "serve" | "uninstall"),
+                    "{path} must be in the dashboard"
+                ),
+                Entry::Row(action) | Entry::InPopup { row: action, .. } => {
+                    assert!(hashi::tui::app::Action::ALL.contains(action), "{path}");
+                }
+                Entry::Key { view, key } => {
+                    assert!(
+                        hashi::tui::app::Tab::ALL.iter().any(|t| t.title() == *view),
+                        "{path}: no view {view}"
+                    );
+                    assert!(!key.is_empty());
+                }
+            }
+        }
+        let mut seen: Vec<&str> = parity::TABLE.iter().map(|(p, _)| *p).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), parity::TABLE.len(), "a path is listed twice");
+    }
+
+    #[test]
+    fn port_and_bind_are_unset_without_a_flag_so_the_saved_value_can_apply() {
+        // HASHI_PORT or HASHI_BIND in the test's own environment would set them.
+        if std::env::var_os("HASHI_PORT").is_some() || std::env::var_os("HASHI_BIND").is_some() {
+            return;
+        }
+        let serve = |args: &[&str]| {
+            let mut argv = vec!["hashi", "serve"];
+            argv.extend_from_slice(args);
+            match Cli::try_parse_from(argv).map(|c| c.command) {
+                Ok(Some(Command::Serve(serve))) => (serve.port, serve.bind),
+                other => panic!("unexpected parse: {other:?}"),
+            }
+        };
+        assert_eq!(serve(&[]), (None, None));
+        assert_eq!(
+            serve(&["--port", "9000", "--bind", "0.0.0.0"]),
+            (Some(9000), Some("0.0.0.0".parse().unwrap()))
+        );
+        let home = tempfile::tempdir().unwrap();
+        hashi::settings::save(
+            home.path(),
+            &hashi::settings::Settings {
+                port: Some(8000),
+                bind: None,
+            },
+        )
+        .unwrap();
+        let saved = hashi::settings::load(home.path()).unwrap();
+        let (port, from) = hashi::settings::resolve(serve(&[]).0, saved.port, 7878);
+        assert_eq!((port, from), (8000, hashi::settings::Source::Saved));
+        let (port, from) = hashi::settings::resolve(serve(&["-p", "9001"]).0, saved.port, 7878);
+        assert_eq!((port, from), (9001, hashi::settings::Source::Override));
     }
 }

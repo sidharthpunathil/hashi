@@ -95,7 +95,7 @@ async fn harness_with(claude: &str) -> Harness {
         usage: Default::default(),
     };
     let running = server::start(cfg, Bus::default()).await.unwrap();
-    let base = running.state.runtime.local_url.clone();
+    let base = running.state.runtime.local_url();
     let admin = running
         .bootstrap_token
         .clone()

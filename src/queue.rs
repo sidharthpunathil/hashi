@@ -117,6 +117,8 @@ pub struct Dispatcher {
     notify: Arc<HashMap<AgentKind, Arc<Notify>>>,
     runs: Runs,
     usage: Arc<crate::usage::Hub>,
+    /// Accounts an admin pinned single requests to, by request id.
+    pins: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Registration of one run. Dropping it marks the run as finished.
@@ -150,6 +152,7 @@ impl Dispatcher {
             notify: Arc::new(map),
             runs: Runs::default(),
             usage: Arc::default(),
+            pins: Arc::default(),
         }
     }
 
@@ -158,6 +161,34 @@ impl Dispatcher {
     #[must_use]
     pub fn usage(&self) -> &Arc<crate::usage::Hub> {
         &self.usage
+    }
+
+    /// Runs request `id` on account `name` only, whatever its token lists:
+    /// an admin asking from the dashboard picks the account. The pin lives
+    /// in memory; after a restart the request uses its token's accounts.
+    pub fn pin_account(&self, id: &str, name: &str) {
+        self.pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.to_owned(), name.to_owned());
+    }
+
+    /// The account request `id` is pinned to, if any.
+    #[must_use]
+    pub fn pinned_account(&self, id: &str) -> Option<String> {
+        self.pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
+    /// Forgets the pin of a finished or cancelled request.
+    pub fn unpin(&self, id: &str) {
+        self.pins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
     }
 
     /// Signals that `agent` has queued work.
@@ -502,6 +533,7 @@ impl Worker {
                 (false, Some(msg))
             }
         };
+        self.dispatcher.unpin(&req.id);
         info!(id = %req.id, agent = %self.agent, ok, duration_ms, "request finished");
         self.bus.emit(Event::Finished {
             id: req.id,
@@ -704,7 +736,10 @@ impl Worker {
             .ok_or("agent is not configured")?;
 
         let token = self.token_gate(req)?;
-        let eff = self.effective(&token)?;
+        let mut eff = self.effective(&token)?;
+        if let Some(name) = self.dispatcher.pinned_account(&req.id) {
+            eff.accounts.insert(self.agent, vec![name]);
+        }
         if !eff.allows(self.agent) {
             return Err(Halt::Failed(format!(
                 "this token's project does not allow {}",
@@ -1005,6 +1040,7 @@ pub async fn cancel(
         return Ok(CancelOutcome::Finished(req));
     }
     if store.cancel_queued(id, CANCELLED_ERROR)? {
+        state.dispatcher.unpin(id);
         state.bus.emit(Event::Finished {
             id: id.to_owned(),
             agent: req.agent,

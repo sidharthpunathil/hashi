@@ -64,7 +64,7 @@ async fn start_full(rate_limit: u32, net: NetLimits, public_url: Option<String>)
         usage: Default::default(),
     };
     let running = server::start_with(cfg, net, Bus::default()).await.unwrap();
-    let base = running.state.runtime.local_url.clone();
+    let base = running.state.runtime.local_url();
     let port = base.rsplit(':').next().unwrap().parse().unwrap();
     let admin = running.bootstrap_token.clone().unwrap();
     Net {

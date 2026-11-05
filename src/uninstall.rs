@@ -49,6 +49,8 @@ pub fn is_hashi_entry(name: &str) -> bool {
         crate::update::CACHE_FILE,
         crate::server::PUBLIC_URL_FILE,
         crate::server::PID_FILE,
+        crate::settings::FILE,
+        crate::diagnostics::REPORTS_DIR,
         "cloudflared.yml",
         ".DS_Store",
     ];
@@ -1068,6 +1070,8 @@ mod tests {
             "update-0123abcd",
             "public-url",
             "server.pid",
+            "settings.json",
+            "reports",
         ] {
             assert!(is_hashi_entry(n), "{n}");
         }
