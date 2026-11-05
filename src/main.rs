@@ -1005,6 +1005,68 @@ mod tests {
         assert!(crush.allow_newer);
     }
 
+    /// Every leaf subcommand path, such as `token update`.
+    fn leaf_paths(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+            let path = if prefix.is_empty() {
+                sub.get_name().to_owned()
+            } else {
+                format!("{prefix} {}", sub.get_name())
+            };
+            if sub.has_subcommands() {
+                leaf_paths(sub, &path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_subcommand_is_in_the_dashboard_or_excluded() {
+        use clap::CommandFactory;
+        use hashi::tui::parity::{self, Entry};
+        let mut paths = Vec::new();
+        leaf_paths(&Cli::command(), "", &mut paths);
+        assert!(paths.len() > 20, "{paths:?}");
+        let missing: Vec<&String> = paths
+            .iter()
+            .filter(|p| parity::entry(p).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "add these subcommands to src/tui/parity.rs: {missing:?}"
+        );
+        let stale: Vec<&str> = parity::TABLE
+            .iter()
+            .map(|(p, _)| *p)
+            .filter(|p| !paths.iter().any(|q| q == p))
+            .collect();
+        assert!(stale.is_empty(), "no such subcommands: {stale:?}");
+        // Only serve and uninstall stay out, and every row is a real row.
+        for (path, entry) in parity::TABLE {
+            match entry {
+                Entry::Excluded(_) => assert!(
+                    matches!(*path, "serve" | "uninstall"),
+                    "{path} must be in the dashboard"
+                ),
+                Entry::Row(action) | Entry::InPopup { row: action, .. } => {
+                    assert!(hashi::tui::app::Action::ALL.contains(action), "{path}");
+                }
+                Entry::Key { view, key } => {
+                    assert!(
+                        hashi::tui::app::Tab::ALL.iter().any(|t| t.title() == *view),
+                        "{path}: no view {view}"
+                    );
+                    assert!(!key.is_empty());
+                }
+            }
+        }
+        let mut seen: Vec<&str> = parity::TABLE.iter().map(|(p, _)| *p).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), parity::TABLE.len(), "a path is listed twice");
+    }
+
     #[test]
     fn port_and_bind_are_unset_without_a_flag_so_the_saved_value_can_apply() {
         // HASHI_PORT or HASHI_BIND in the test's own environment would set them.

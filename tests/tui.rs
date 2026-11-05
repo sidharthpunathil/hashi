@@ -1034,7 +1034,10 @@ fn enter_in_the_install_popup_hands_the_command_to_the_terminal() {
     assert!(out.contains("run it"));
     app.on_key(key(KeyCode::Enter));
     assert!(app.popup.is_none());
-    assert_eq!(app.take_pending_command(), Some(linux));
+    assert_eq!(
+        app.take_pending_command(),
+        Some(hashi::tui::PendingCommand::Install(linux))
+    );
     assert_eq!(app.take_pending_command(), None);
 
     // A download page has nothing to run.
@@ -1216,4 +1219,647 @@ fn invite_popup_shows_a_qr_code_when_the_terminal_has_room() {
         "{small}"
     );
     assert!(!small.contains(qr[1].trim()));
+}
+
+// ── parity with the CLI ────────────────────────────────────────────────────
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+fn typed(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.on_key(key(KeyCode::Char(c)));
+    }
+}
+
+/// Like [`state`], with its store in a real Hashi home under `dir`, so
+/// files (keys, reports, settings, remotes) have somewhere to go.
+fn state_at(dir: &std::path::Path) -> AppState {
+    let mut st = state();
+    let store = hashi::server::open_store(dir).unwrap();
+    hashi::server::ensure_admin(&store).unwrap();
+    st.store = Arc::new(store);
+    st
+}
+
+#[test]
+fn every_commands_row_shows_its_cli_and_every_cli_command_has_a_place() {
+    let mut app = App::new(without_helpers(), None, false);
+    app.on_key(key(KeyCode::Char('5')));
+    let out = draw(&mut app, 190, 44);
+    for action in Action::ALL {
+        let cli = ui::action_cli(&app, action);
+        assert!(
+            cli.contains("hashi") || cli.contains("tailscale"),
+            "{action:?}: {cli}"
+        );
+        assert!(
+            out.contains(action.title()),
+            "row {action:?} is not on screen"
+        );
+    }
+    for text in [
+        "Ask",
+        "Manage",
+        "Server",
+        "hashi account list",
+        "hashi doctor",
+    ] {
+        assert!(out.contains(text), "missing {text:?}");
+    }
+    let (rows, keys, popups, excluded) = hashi::tui::parity::counts();
+    assert_eq!(excluded, 2);
+    assert_eq!(
+        rows + keys + popups + excluded,
+        hashi::tui::parity::TABLE.len()
+    );
+}
+
+#[test]
+fn no_two_actions_in_a_view_share_a_key() {
+    let mut app = App::new(state(), None, false);
+    share_invite(&mut app, "bob");
+    app.on_key(key(KeyCode::Esc));
+    for tab in ['1', '2', '3', '4', '5'] {
+        app.on_key(key(KeyCode::Char(tab)));
+        let mut keys: Vec<&str> = ui::footer_keys(&app).iter().map(|(k, _)| *k).collect();
+        let n = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "{:?}", app.tab);
+    }
+    // Commands rows with their own key use different ones.
+    let mut row_keys: Vec<&str> = Action::ALL
+        .iter()
+        .map(|a| a.key())
+        .filter(|k| *k != "enter")
+        .collect();
+    let n = row_keys.len();
+    row_keys.sort_unstable();
+    row_keys.dedup();
+    assert_eq!(row_keys.len(), n);
+    // The help lists the new keys.
+    app.on_key(key(KeyCode::Char('?')));
+    let help = draw(&mut app, 140, 44);
+    for text in ["ask an agent", "edit token", "ctrl-s"] {
+        assert!(help.contains(text), "help lacks {text:?}");
+    }
+}
+
+#[test]
+fn edit_token_form_checks_each_field_and_saves_through_the_shared_update() {
+    let mut app = App::new(state(), None, false);
+    add_user(&mut app, "alice");
+    app.on_key(key(KeyCode::Char('3')));
+    select_token(&mut app, "alice");
+    let id = token_id(&app, "alice");
+    app.on_key(key(KeyCode::Char('e')));
+    assert!(matches!(app.popup, Some(Popup::EditToken(_))));
+    assert!(draw(&mut app, 140, 44).contains("edit alice"));
+
+    // Daily prompts: not a number.
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Down));
+    }
+    typed(&mut app, "abc");
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::EditToken(_))));
+    assert!(draw(&mut app, 140, 44).contains("a whole number"));
+    for _ in 0..3 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, "50");
+
+    // Expiry: out of range, then a valid number of days.
+    app.on_key(key(KeyCode::Up));
+    typed(&mut app, "9999");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("1 to 3650"));
+    for _ in 0..4 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, "7");
+
+    // Accounts that do not exist are refused next to the field.
+    for _ in 0..6 {
+        app.on_key(key(KeyCode::Down));
+    }
+    typed(&mut app, "claude=ghost");
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::EditToken(form)) = &app.popup else {
+        panic!("expected the edit form")
+    };
+    assert_eq!(form.field, hashi::tui::forms::EditTokenForm::ACCOUNTS);
+    assert!(draw(&mut app, 140, 44).contains("ghost"));
+    for _ in 0.."claude=ghost".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+
+    // A note, then save.
+    for _ in 0..7 {
+        app.on_key(key(KeyCode::Up));
+    }
+    typed(&mut app, "for the CI");
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.popup.is_none(), "{:?}", app.popup);
+    let t = app.state.store.get_token(&id).unwrap().unwrap();
+    assert_eq!(t.note.as_deref(), Some("for the CI"));
+    assert_eq!(t.limits.daily_requests, Some(50));
+    assert!(t.expires_at.is_some());
+    assert!(toast(&app).contains("updated alice"));
+    let audit = app.state.store.list_audit(10).unwrap();
+    assert!(audit.iter().any(|e| e.actor == "dashboard"
+        && e.action == "token.update"
+        && e.detail.contains("limits")));
+
+    // Saving with no change says so.
+    app.on_key(key(KeyCode::Char('e')));
+    app.on_key(key(KeyCode::Enter));
+    assert!(toast(&app).contains("nothing changed"));
+}
+
+#[test]
+fn the_ask_popup_queues_as_the_owner_and_the_answer_shows_in_requests() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('a')));
+    let Some(Popup::Ask(_)) = &app.popup else {
+        panic!("expected the ask popup")
+    };
+    // Nothing typed yet.
+    app.on_key(ctrl('s'));
+    assert!(draw(&mut app, 140, 44).contains("type a prompt first"));
+    typed(&mut app, "Explain the build");
+    app.on_key(key(KeyCode::Enter));
+    typed(&mut app, "in two lines");
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("Explain the build") && out.contains("in two lines"));
+    app.on_key(ctrl('s'));
+    assert!(app.popup.is_none(), "{:?}", app.popup);
+    assert_eq!(app.tab, Tab::Requests);
+
+    // It is an ordinary queued request of the admin token.
+    let r = app.selected_request().unwrap().clone();
+    assert_eq!(r.message, "Explain the build\nin two lines");
+    assert_eq!(r.token_name, "admin");
+    assert_eq!(r.agent, AgentKind::Claude);
+    assert_eq!(r.status, hashi::store::RequestStatus::Queued);
+
+    // A fake agent answers it; the detail shows the answer.
+    let claimed = app
+        .state
+        .store
+        .claim_next(AgentKind::Claude)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, r.id);
+    app.state
+        .store
+        .complete_request(&r.id, "Fake agent says hi.", None)
+        .unwrap();
+    app.refresh();
+    assert!(draw(&mut app, 160, 44).contains("Fake agent says hi."));
+}
+
+#[test]
+fn an_admin_can_pin_the_ask_to_one_account() {
+    let mut app = App::new(state(), None, false);
+    app.state
+        .store
+        .add_account(
+            AgentKind::Claude,
+            "work",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    app.on_key(key(KeyCode::Char('a')));
+    typed(&mut app, "hi");
+    // The account field, then "default", then "work".
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Right));
+    assert!(draw(&mut app, 140, 44).contains("work"));
+    app.on_key(ctrl('s'));
+    let r = app.selected_request().unwrap().clone();
+    assert_eq!(
+        app.state.dispatcher.pinned_account(&r.id).as_deref(),
+        Some("work")
+    );
+}
+
+#[test]
+fn a_key_account_is_added_with_its_key_masked_and_never_rendered() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    let secret = "sk-ant-api03-VerySecretValue-1234567890";
+    select_action(&mut app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("see hashi account usage"));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(&mut app, "work");
+    // Kind: api-key.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, secret);
+    let out = draw(&mut app, 160, 44);
+    assert!(!out.contains(secret), "the key is on screen");
+    assert!(!out.contains("VerySecret"));
+    assert!(out.contains("••••"), "{out}");
+    assert!(!format!("{:?}", app.popup).contains("VerySecret"));
+    assert!(!format!("{app:?}").contains("VerySecret"));
+
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.popup, Some(Popup::Accounts { .. })),
+        "{:?}",
+        app.popup
+    );
+    let a = app
+        .state
+        .store
+        .get_account(AgentKind::Claude, "work")
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.kind, hashi::accounts::AccountKind::ApiKey);
+    assert_eq!(
+        hashi::accounts::read_key(dir.path(), AgentKind::Claude, "work").unwrap(),
+        secret
+    );
+    let out = draw(&mut app, 160, 44);
+    assert!(out.contains("key set") && !out.contains("VerySecret"));
+
+    // Disable, enable, then remove, each audited as the dashboard.
+    app.on_key(key(KeyCode::Char('d')));
+    assert!(
+        app.state
+            .store
+            .get_account(AgentKind::Claude, "work")
+            .unwrap()
+            .unwrap()
+            .disabled
+    );
+    app.on_key(key(KeyCode::Char('e')));
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(matches!(
+        app.popup,
+        Some(Popup::ConfirmRemoveAccount { .. })
+    ));
+    app.on_key(key(KeyCode::Char('y')));
+    assert!(
+        app.state
+            .store
+            .get_account(AgentKind::Claude, "work")
+            .unwrap()
+            .is_none()
+    );
+    let actions: Vec<String> = app
+        .state
+        .store
+        .list_audit(10)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.actor == "dashboard")
+        .map(|e| e.action)
+        .collect();
+    for a in [
+        "account.add",
+        "account.disable",
+        "account.enable",
+        "account.remove",
+    ] {
+        assert!(
+            actions.iter().any(|x| x == a),
+            "{a} not audited: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn the_account_form_checks_the_name_and_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(&mut app, "Bad Name");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 160, 44).contains("must be 1 to 32"));
+    for _ in 0.."Bad Name".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, "team");
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 160, 44).contains("paste the key"));
+    assert!(
+        app.state
+            .store
+            .get_account(AgentKind::Claude, "team")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_login_account_steps_aside_for_its_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(&mut app, "personal");
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.popup.is_none());
+    match app.take_pending_command() {
+        Some(hashi::tui::PendingCommand::SignIn { agent, name, .. }) => {
+            assert_eq!((agent, name.as_str()), (AgentKind::Claude, "personal"));
+        }
+        other => panic!("expected a sign-in, got {other:?}"),
+    }
+    assert!(dir.path().join("accounts/claude/personal").is_dir());
+}
+
+#[test]
+fn the_project_form_validates_and_adds_edits_and_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Projects);
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("No projects yet"));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(&mut app, "api");
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, "relative/folder");
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Project(_))));
+    assert!(draw(&mut app, 140, 44).contains("absolute"));
+    for _ in 0.."relative/folder".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, &folder.path().display().to_string());
+    // An unknown agent.
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, "claude,nope");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("nope"));
+    for _ in 0..5 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.popup, Some(Popup::Projects { .. })),
+        "{:?}",
+        app.popup
+    );
+    let p = app.state.store.get_project("api").unwrap().unwrap();
+    assert_eq!(p.agents, vec![AgentKind::Claude]);
+
+    // Edit its note.
+    app.on_key(key(KeyCode::Char('e')));
+    for _ in 0..5 {
+        app.on_key(key(KeyCode::Down));
+    }
+    typed(&mut app, "the API team");
+    app.on_key(key(KeyCode::Enter));
+    let p = app.state.store.get_project("api").unwrap().unwrap();
+    assert_eq!(p.note.as_deref(), Some("the API team"));
+
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Char('y')));
+    assert!(app.state.store.get_project("api").unwrap().is_none());
+    assert!(folder.path().is_dir(), "the folder is never touched");
+}
+
+#[test]
+fn the_listen_form_validates_confirms_and_moves_a_live_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = state_at(dir.path());
+    let start: std::net::SocketAddr = "127.0.0.1:7878".parse().unwrap();
+    let (listen, mut next) = hashi::net::Listen::switchable(start, false);
+    let rt = Arc::get_mut(&mut st.runtime).unwrap();
+    rt.listen = listen;
+    let mut app = App::new(st, None, false);
+    select_action(&mut app, Action::Listen);
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("port and bind address"));
+
+    // Port 0 is refused.
+    for _ in 0..4 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, "0");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("a port from 1 to 65535"));
+    // Letters never get in.
+    typed(&mut app, "x");
+    let Some(Popup::Listen(form)) = &app.popup else {
+        panic!("expected the listen form")
+    };
+    assert_eq!(form.port, "0");
+
+    // A typed address that is not one.
+    app.on_key(key(KeyCode::Backspace));
+    typed(&mut app, "8080");
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Left));
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, "not-an-ip");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("an IP address"));
+
+    // All interfaces without TLS asks first, with the startup warning.
+    app.on_key(key(KeyCode::Up));
+    app.on_key(key(KeyCode::Left));
+    app.on_key(key(KeyCode::Left));
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::ConfirmListen { warning, .. }) = &app.popup else {
+        panic!("expected the confirmation, got {:?}", app.popup)
+    };
+    assert!(warning.contains("without TLS"), "{warning}");
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(matches!(app.popup, Some(Popup::Listen(_))));
+
+    // Back to loopback on a free port: it moves and is kept.
+    app.on_key(key(KeyCode::Left));
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    app.on_key(key(KeyCode::Up));
+    for _ in 0..4 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, &port.to_string());
+    app.on_key(key(KeyCode::Enter));
+    assert!(app.popup.is_none(), "{:?}", app.popup);
+    let moved = next.try_recv().unwrap();
+    assert_eq!(moved.local_addr().unwrap().port(), port);
+    assert_eq!(
+        app.state.runtime.local_url(),
+        format!("http://127.0.0.1:{port}")
+    );
+    let saved = hashi::settings::load(dir.path()).unwrap();
+    assert_eq!(saved.port, Some(port));
+    assert_eq!(saved.bind, Some("127.0.0.1".parse().unwrap()));
+    assert!(toast(&app).contains("kept for the next start"));
+}
+
+#[test]
+fn the_listen_form_says_when_a_flag_wins_and_reports_a_server_it_cannot_move() {
+    let st = state();
+    st.runtime.listen.set_overrides(hashi::net::Overrides {
+        port: true,
+        bind: false,
+    });
+    let mut app = App::new(st, None, false);
+    select_action(&mut app, Action::Listen);
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("--port or HASHI_PORT is set"));
+    for _ in 0..4 {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(&mut app, "8123");
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("not attached to a running server"));
+}
+
+#[test]
+fn the_connect_form_checks_the_link_before_any_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Connect);
+    app.on_key(key(KeyCode::Enter));
+    typed(&mut app, "not a link");
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::Connect(form)) = &app.popup else {
+        panic!("expected the connect form")
+    };
+    assert!(form.error.is_some() && !form.busy);
+    for _ in 0.."not a link".len() {
+        app.on_key(key(KeyCode::Backspace));
+    }
+    typed(
+        &mut app,
+        "https://hashi.example.com/claim/hashi_inv_0123456789abcdef0123456789abcdef",
+    );
+    app.on_key(key(KeyCode::Down));
+    typed(&mut app, "Bad Name");
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::Connect(form)) = &app.popup else {
+        panic!("expected the connect form")
+    };
+    assert_eq!(form.error.as_ref().map(|e| e.0), Some(1), "{form:?}");
+    assert!(!form.busy);
+}
+
+#[test]
+fn bridges_list_names_and_urls_never_tokens_and_forget_one() {
+    let dir = tempfile::tempdir().unwrap();
+    hashi::remote::save(
+        dir.path(),
+        &[hashi::remote::Remote {
+            name: "friend".into(),
+            base_url: "https://friend.example.com".into(),
+            token: "hashi_sk_secret_never_shown".into(),
+        }],
+    )
+    .unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Bridges);
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("friend") && out.contains("https://friend.example.com"));
+    assert!(!out.contains("secret_never_shown"));
+    // Ask it: the prompt popup aims at the bridge.
+    app.on_key(key(KeyCode::Char('a')));
+    assert!(draw(&mut app, 140, 44).contains("bridge friend"));
+    app.on_key(key(KeyCode::Esc));
+    select_action(&mut app, Action::Bridges);
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Char('y')));
+    assert!(hashi::remote::load(dir.path()).unwrap().is_empty());
+}
+
+#[test]
+fn the_report_is_written_owner_only_with_prompts_off_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    select_action(&mut app, Action::Report);
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::Report(form)) = &app.popup else {
+        panic!("expected the report popup")
+    };
+    assert!(!form.include_prompts);
+    // Save in the home's reports folder, not the current one.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::ReportSaved {
+        path,
+        include_prompts,
+    }) = &app.popup
+    else {
+        panic!("expected the saved popup, got {:?}", app.popup)
+    };
+    assert!(!include_prompts);
+    let path = std::path::PathBuf::from(path);
+    assert!(
+        path.starts_with(std::fs::canonicalize(dir.path()).unwrap_or(dir.path().into()))
+            || path.starts_with(dir.path())
+    );
+    assert!(path.parent().unwrap().ends_with("reports"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("left out"), "{text}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    assert!(draw(&mut app, 160, 44).contains("report saved"));
+}
+
+#[test]
+fn doctor_audit_and_update_popups_open_from_commands() {
+    let mut app = App::new(without_helpers(), None, false);
+    select_action(&mut app, Action::Doctor);
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    for text in [
+        "doctor",
+        "cloudflared",
+        "tailscale",
+        "accounts",
+        "home",
+        "guard",
+    ] {
+        assert!(out.contains(text), "doctor lacks {text:?}");
+    }
+    app.on_key(key(KeyCode::Esc));
+
+    // A change, then the audit log shows it.
+    add_user(&mut app, "carol");
+    app.on_key(key(KeyCode::Char('3')));
+    select_token(&mut app, "carol");
+    app.on_key(key(KeyCode::Char('p')));
+    select_action(&mut app, Action::Audit);
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    assert!(
+        out.contains("token.update") && out.contains("carol"),
+        "{out}"
+    );
+    app.on_key(key(KeyCode::Esc));
+
+    // Installing an update asks first and never runs in a test dashboard.
+    select_action(&mut app, Action::InstallUpdate);
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::ConfirmUpdate)));
+    app.on_key(key(KeyCode::Char('y')));
+    assert!(app.take_pending_command().is_none());
+    assert!(toast(&app).contains("hashi update"));
 }

@@ -2,6 +2,10 @@
 
 pub mod app;
 mod clipboard;
+pub mod forms;
+mod manage;
+mod panels;
+pub mod parity;
 pub mod qr;
 pub mod theme;
 pub mod ui;
@@ -14,7 +18,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::broadcast::error::RecvError;
 
-pub use app::App;
+pub use app::{App, PendingCommand};
 
 use crate::api::AppState;
 use crate::events::Event;
@@ -97,10 +101,10 @@ async fn event_loop(
                         // The stream's reader thread must stop before the
                         // command reads the terminal, or it eats keystrokes.
                         drop(input);
-                        let helper = plan.helper();
+                        let done = plan.clone();
                         let result = run_attached(terminal, plan).await;
                         input = EventStream::new();
-                        app.command_finished(helper, result);
+                        app.command_finished(&done, result);
                     }
                     dirty = true;
                 }
@@ -127,24 +131,61 @@ async fn event_loop(
     Ok(())
 }
 
-/// Leaves the dashboard, runs `plan` with the terminal attached (so `sudo`
-/// can prompt), waits for Enter, then takes the terminal back. The server
-/// keeps running throughout; bus events wait in the subscription.
+/// Leaves the dashboard, runs `cmd` with the terminal attached (so `sudo`
+/// or an agent's sign-in can prompt), waits for Enter, then takes the
+/// terminal back. The server keeps running throughout; bus events wait in
+/// the subscription. Returns a line for the dashboard to show.
 async fn run_attached(
     terminal: &mut DefaultTerminal,
-    plan: crate::install::Plan,
-) -> Result<(), String> {
+    cmd: PendingCommand,
+) -> Result<String, String> {
     ratatui::restore();
     COMMAND_RUNNING.store(true, Ordering::Release);
-    let helper = plan.helper();
-    println!("\n  ✦ hashi install {helper}\n");
-    println!("  {}\n", plan.text().replace('\n', "\n  "));
-    let result = tokio::task::spawn_blocking(move || crate::install::run(&plan))
+    println!("\n  ✦ {}\n", cmd.title());
+    let job = match cmd {
+        PendingCommand::Install(plan) => {
+            println!("  {}\n", plan.text().replace('\n', "\n  "));
+            tokio::task::spawn_blocking(move || {
+                crate::install::run(&plan).map(|()| "done.".to_owned())
+            })
+        }
+        PendingCommand::SignIn {
+            home,
+            agent,
+            name,
+            bin,
+        } => {
+            if let Some(line) = crate::accounts::ops::sign_in_line(&home, agent, &name, &bin) {
+                println!("  {line}\n");
+            }
+            if let Some(hint) = crate::accounts::sign_in(agent).and_then(|s| s.hint) {
+                println!("  ({hint})\n");
+            }
+            tokio::task::spawn_blocking(move || {
+                let clean = crate::accounts::ops::run_sign_in(&home, agent, &name, &bin)?;
+                let state = crate::accounts::ops::signed_in(
+                    &home,
+                    agent,
+                    &name,
+                    crate::accounts::AccountKind::Login,
+                    &bin,
+                    true,
+                );
+                Ok(if clean {
+                    state
+                } else {
+                    format!("{state} (the sign-in command did not exit cleanly)")
+                })
+            })
+        }
+        PendingCommand::Update { home } => tokio::task::spawn_blocking(move || update(&home)),
+    };
+    let result = job
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r.map_err(|e| format!("{e:#}")));
     match &result {
-        Ok(()) => println!("\n  done."),
+        Ok(msg) => println!("\n  {msg}"),
         Err(e) => println!("\n  {e}"),
     }
     println!("  Press Enter to go back to the dashboard.");
@@ -158,6 +199,22 @@ async fn run_attached(
         return Err(format!("could not restore the dashboard: {e}"));
     }
     result
+}
+
+/// `hashi update`, already confirmed in the dashboard.
+fn update(home: &std::path::Path) -> anyhow::Result<String> {
+    use crate::update::{Outcome, Sources};
+    let exe = std::env::current_exe()?;
+    let current = env!("CARGO_PKG_VERSION");
+    Ok(
+        match crate::update::install(home, &Sources::default(), &exe, None, &mut |_| true)? {
+            Outcome::UpToDate(tag) => format!("hashi v{current} is already the latest ({tag})"),
+            Outcome::Declined => "not updated".to_owned(),
+            Outcome::Updated(tag) => {
+                format!("updated to {tag}: quit (q) and start hashi again to use it")
+            }
+        },
+    )
 }
 
 /// Takes the terminal back after [`ratatui::restore`].

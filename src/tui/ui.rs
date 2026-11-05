@@ -23,9 +23,9 @@ use crate::tailscale::Mode;
 use crate::token::{Role, SessionMode, Token, TokenStatus};
 use crate::util::{human_age, human_bytes, human_duration, one_line, truncate};
 
-const PANEL: Rgb = Rgb(22, 16, 42);
-const SELECT: Rgb = Rgb(46, 32, 92);
-const TEXT: Rgb = Rgb(232, 228, 245);
+pub(super) const PANEL: Rgb = Rgb(22, 16, 42);
+pub(super) const SELECT: Rgb = Rgb(46, 32, 92);
+pub(super) const TEXT: Rgb = Rgb(232, 228, 245);
 
 /// Draws the whole UI.
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -276,12 +276,15 @@ fn render_tabs(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(tabs, area.inner(Margin::new(1, 0)));
 }
 
-fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let keys: &[(&str, &str)] = match app.tab {
+/// The key hints in the footer of the current view.
+#[must_use]
+pub fn footer_keys(app: &App) -> &'static [(&'static str, &'static str)] {
+    match app.tab {
         Tab::Overview => &[
             ("1-5", "views"),
             ("c", "copy url"),
             ("t", "go public"),
+            ("a", "ask"),
             ("r", "refresh"),
             ("?", "help"),
             ("q", "quit"),
@@ -305,6 +308,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Tab::Tokens if !app.invites.is_empty() => &[
             ("↑↓", "select"),
             ("n", "new"),
+            ("e", "edit"),
             ("s", "share"),
             ("p", "pause"),
             ("d", "revoke"),
@@ -315,22 +319,28 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
         Tab::Tokens => &[
             ("↑↓", "select"),
             ("n", "new"),
+            ("e", "edit"),
             ("s", "share"),
             ("p", "pause"),
             ("d", "revoke"),
             ("?", "help"),
             ("q", "quit"),
         ],
-        Tab::Logs => &[("1-5", "views"), ("?", "help"), ("q", "quit")],
+        Tab::Logs => &[("1-5", "views"), ("a", "ask"), ("?", "help"), ("q", "quit")],
         Tab::Commands => &[
             ("↑↓", "select"),
             ("enter", "run"),
             ("t", "go public"),
+            ("a", "ask"),
             ("1-5", "views"),
             ("?", "help"),
             ("q", "quit"),
         ],
-    };
+    }
+}
+
+fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
+    let keys = footer_keys(app);
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
         spans.push(Span::styled(
@@ -1384,7 +1394,7 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     let [inner, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "Something wrong? Run `hashi report` and attach the file to an issue.",
+            "Something wrong? Commands, Diagnostic report (or `hashi report`) writes a file for an issue.",
             t::muted(),
         )),
         hint,
@@ -1470,11 +1480,11 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             1 => ("1 token".to_owned(), TEXT),
             n => (format!("{n} tokens"), TEXT),
         },
-        Action::InstallCloudflared | Action::InstallTailscale => {
-            let helper = if action == Action::InstallCloudflared {
-                Helper::Cloudflared
-            } else {
-                Helper::Tailscale
+        Action::InstallCloudflared | Action::InstallTailscale | Action::InstallCrush => {
+            let helper = match action {
+                Action::InstallCloudflared => Helper::Cloudflared,
+                Action::InstallTailscale => Helper::Tailscale,
+                _ => Helper::Crush,
             };
             match app.helper_path(helper) {
                 Some(path) => (format!("installed: {}", path.display()), t::MINT),
@@ -1485,13 +1495,40 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             Some(v) => (format!("v{v} available: run hashi update"), t::ORCHID),
             None => (format!("v{} running", env!("CARGO_PKG_VERSION")), TEXT),
         },
+        Action::InstallUpdate => match &app.update {
+            Some(v) => (format!("v{v} available"), t::ORCHID),
+            None => ("installs the latest release, if newer".to_owned(), TEXT),
+        },
+        Action::Ask => match app.owner_token() {
+            Some(t) => (format!("sends as {}", t.name), TEXT),
+            None => ("no active admin token".to_owned(), t::AMBER),
+        },
+        Action::Accounts => match app.account_rows().len() {
+            0 => ("only the default logins".to_owned(), TEXT),
+            1 => ("1 account".to_owned(), TEXT),
+            n => (format!("{n} accounts"), TEXT),
+        },
+        Action::Projects => match app.state.store.list_projects().map_or(0, |l| l.len()) {
+            0 => ("none yet".to_owned(), TEXT),
+            1 => ("1 project".to_owned(), TEXT),
+            n => (format!("{n} projects"), TEXT),
+        },
+        Action::Bridges => match app.remote_names().len() {
+            0 => ("none saved".to_owned(), TEXT),
+            1 => ("1 saved".to_owned(), TEXT),
+            n => (format!("{n} saved"), TEXT),
+        },
+        Action::Listen => (rt.local_url(), TEXT),
         Action::CopyUrl => (rt.base_url(), TEXT),
-        Action::Help => (String::new(), TEXT),
+        Action::Connect | Action::Doctor | Action::Report | Action::Audit | Action::Help => {
+            (String::new(), TEXT)
+        }
     }
 }
 
 /// The CLI command that does the same thing, so the owner learns it.
-fn action_cli(app: &App, action: Action) -> String {
+#[must_use]
+pub fn action_cli(app: &App, action: Action) -> String {
     let rt = &app.state.runtime;
     match action {
         Action::Cloudflare => "hashi serve --tunnel".to_owned(),
@@ -1505,15 +1542,29 @@ fn action_cli(app: &App, action: Action) -> String {
                     .map_or(crate::tailscale::DEFAULT_PORT, |s| s.https_port);
                 crate::tailscale::off_command(mode, port)
             }
-            _ => "-".to_owned(),
+            _ => "hashi serve without --tunnel".to_owned(),
         },
         Action::NewInvite => "hashi share <label>".to_owned(),
         Action::NewToken => "hashi token create <name>".to_owned(),
+        Action::Ask => "hashi ask \"<prompt>\"".to_owned(),
+        Action::Accounts => "hashi account list".to_owned(),
+        Action::Projects => "hashi project list".to_owned(),
+        Action::Bridges => "hashi remote list".to_owned(),
+        Action::Connect => "hashi connect <invite link>".to_owned(),
+        Action::Listen => match rt.listen.addr() {
+            Some(a) => format!("hashi serve --port {} --bind {}", a.port(), a.ip()),
+            None => "hashi serve --port <n> --bind <ip>".to_owned(),
+        },
+        Action::CopyUrl => "printed by hashi serve".to_owned(),
         Action::InstallCloudflared => "hashi install cloudflared".to_owned(),
         Action::InstallTailscale => "hashi install tailscale".to_owned(),
+        Action::InstallCrush => "hashi install crush".to_owned(),
         Action::CheckUpdate if app.update.is_some() => "hashi update".to_owned(),
         Action::CheckUpdate => "hashi update --check".to_owned(),
-        Action::CopyUrl => "-".to_owned(),
+        Action::InstallUpdate => "hashi update".to_owned(),
+        Action::Doctor => "hashi doctor".to_owned(),
+        Action::Report => "hashi report".to_owned(),
+        Action::Audit => "hashi audit".to_owned(),
         Action::Help => "hashi --help".to_owned(),
     }
 }
@@ -1522,27 +1573,21 @@ fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
     let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(5)]).areas(area);
     let block = panel("commands", t::VIOLET);
     let inner_w = usize::from(block.inner(list).width);
-    let state_w = (inner_w / 4).clamp(14, 44);
-    let cli_w = (inner_w / 4).clamp(14, 34);
+    let state_w = (inner_w / 4).clamp(14, 40);
+    let cli_w = (inner_w / 4).clamp(14, 40);
     let mut rows = Vec::new();
-    let mut selected_row = 0;
     let mut group = "";
-    for (i, action) in Action::ALL.into_iter().enumerate() {
-        if action.group() != group {
+    for action in Action::ALL {
+        // The heading sits on its group's first row, so every row fits.
+        let heading = if action.group() == group {
+            ""
+        } else {
             group = action.group();
-            if !rows.is_empty() {
-                rows.push(Row::new(vec![Cell::from("")]).height(1));
-            }
-            rows.push(Row::new(vec![
-                Cell::from(""),
-                Cell::from(Span::styled(group, t::bold(t::ORCHID))),
-            ]));
-        }
-        if i == app.commands_selected {
-            selected_row = rows.len();
-        }
+            group
+        };
         let (state, color) = action_state(app, action);
         rows.push(Row::new(vec![
+            Cell::from(Span::styled(heading, t::bold(t::ORCHID))),
             Cell::from(Span::styled(
                 format!(" {} ", action.key()),
                 t::bold(t::PINK),
@@ -1552,22 +1597,28 @@ fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
                 Span::styled(format!("  {}", action.description()), t::muted()),
             ])),
             Cell::from(Span::styled(truncate(&state, state_w), t::fg(color))),
-            Cell::from(Span::styled(action_cli(app, action), t::fg(t::ORCHID))),
+            Cell::from(Span::styled(
+                truncate(&action_cli(app, action), cli_w),
+                t::fg(t::ORCHID),
+            )),
         ]));
     }
     let widths = [
-        Constraint::Length(8),
+        Constraint::Length(11),
+        Constraint::Length(7),
         Constraint::Fill(1),
         Constraint::Length(u16::try_from(state_w).unwrap_or(30)),
         Constraint::Length(u16::try_from(cli_w).unwrap_or(30)),
     ];
     let table = Table::new(rows, widths)
-        .header(Row::new(vec!["key", "what", "state", "same from a terminal"]).style(t::muted()))
+        .header(
+            Row::new(vec!["", "key", "what", "state", "same from a terminal"]).style(t::muted()),
+        )
         .row_highlight_style(Style::new().bg(SELECT.into()).add_modifier(Modifier::BOLD))
         .highlight_symbol("› ")
         .highlight_spacing(HighlightSpacing::Always)
         .block(block);
-    let mut state = TableState::default().with_selected(Some(selected_row));
+    let mut state = TableState::default().with_selected(Some(app.commands_selected));
     frame.render_stateful_widget(table, list, &mut state);
 
     let action = app.selected_action();
@@ -1607,7 +1658,7 @@ fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
 
 // ── popups ─────────────────────────────────────────────────────────────────
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let w = width.min(area.width.saturating_sub(4));
     let h = height.min(area.height.saturating_sub(2));
     Rect {
@@ -1618,7 +1669,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn modal<'a>(title: &'a str) -> Block<'a> {
+pub(super) fn modal<'a>(title: &'a str) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(t::fg(t::PURPLE))
@@ -1636,7 +1687,7 @@ fn modal<'a>(title: &'a str) -> Block<'a> {
         )
 }
 
-fn key_hint(keys: &[(&str, &str)]) -> Line<'static> {
+pub(super) fn key_hint(keys: &[(&str, &str)]) -> Line<'static> {
     let mut spans = Vec::new();
     for (k, label) in keys {
         spans.push(Span::styled(
@@ -1655,16 +1706,19 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
     let area = frame.area();
     match popup {
         Popup::Help => {
-            let rows: [(&str, &str); 19] = [
+            let rows: [(&str, &str); 23] = [
                 ("1 2 3 4 5", "jump to a view (5: Commands)"),
                 ("tab / ←→", "next / previous view"),
                 ("↑↓ / j k", "move selection"),
                 ("PgUp PgDn", "scroll request detail"),
                 ("c", "copy the API base URL"),
                 ("t", "go public: start a Cloudflare quick tunnel"),
+                ("a", "ask an agent here or on a bridge you use"),
                 ("enter", "run the selected command (Commands view)"),
-                ("", "Commands also starts Tailscale, stops going public"),
+                ("", "Commands also has accounts, projects, bridges,"),
+                ("", "the port, doctor, report, audit and updates"),
                 ("n", "new token (Tokens and Commands views)"),
+                ("e", "edit token: name, note, expiry, limits (Tokens)"),
                 ("d", "revoke token (Tokens view)"),
                 ("p", "pause or resume token (Tokens view)"),
                 ("s", "share: create an invite link (Tokens, Commands)"),
@@ -1674,6 +1728,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 ("?", "this help"),
                 ("q", "quit (asks first if work is running)"),
                 ("esc", "close a popup"),
+                ("ctrl-s", "send, in the ask popup"),
                 ("ctrl-c", "quit immediately"),
             ];
             let mut lines: Vec<Line> = rows
@@ -1972,6 +2027,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 rect,
             );
         }
+        other => super::panels::render(app, frame, other),
     }
 }
 
@@ -2058,7 +2114,7 @@ fn render_install(frame: &mut Frame, area: Rect, plan: &crate::install::Plan) {
 }
 
 /// One form row: focus marker, label column and value.
-fn form_field(
+pub(super) fn form_field(
     focused: bool,
     label: &str,
     width: usize,
@@ -2076,7 +2132,7 @@ fn form_field(
 }
 
 /// A `‹ value ›` choice.
-fn form_toggle(s: &str, focused: bool) -> Vec<Span<'static>> {
+pub(super) fn form_toggle(s: &str, focused: bool) -> Vec<Span<'static>> {
     let style = if focused { t::bold(t::ORCHID) } else { plain() };
     vec![
         Span::styled("‹ ", t::fg(t::DUSK)),
@@ -2086,7 +2142,7 @@ fn form_toggle(s: &str, focused: bool) -> Vec<Span<'static>> {
 }
 
 /// A text input with a blinking cursor, or a placeholder when empty and unfocused.
-fn form_text(
+pub(super) fn form_text(
     value: &str,
     focused: bool,
     placeholder: &'static str,
@@ -2106,7 +2162,7 @@ fn form_text(
     ]
 }
 
-fn form_error(error: Option<&String>, indent: usize) -> Line<'static> {
+pub(super) fn form_error(error: Option<&String>, indent: usize) -> Line<'static> {
     match error {
         Some(err) => Line::from(vec![
             Span::raw(" ".repeat(indent)),
@@ -2243,12 +2299,12 @@ fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64)
 
 /// Body text: inherits the terminal (or popup) foreground so it stays
 /// readable on both light and dark themes.
-fn plain() -> Style {
+pub(super) fn plain() -> Style {
     Style::new()
 }
 
 /// Emphasised body text.
-fn strong() -> Style {
+pub(super) fn strong() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
 
