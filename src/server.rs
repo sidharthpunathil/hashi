@@ -55,6 +55,8 @@ pub struct ServerConfig {
     pub tls: Option<crate::tls::TlsFiles>,
     /// Run a named Cloudflare tunnel with this token (needs `public_url`).
     pub tunnel_token: Option<String>,
+    /// Check GitHub for a newer release in the background (once a day).
+    pub update_check: bool,
 }
 
 /// A running server.
@@ -551,6 +553,14 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
                 Err(e) => bus.emit(Event::TunnelDown(e.to_string())),
             }
         });
+    }
+
+    if cfg.update_check {
+        crate::update::spawn_check(
+            cfg.home.clone(),
+            crate::update::LATEST_URL.to_owned(),
+            bus.clone(),
+        );
     }
 
     Ok(Running {

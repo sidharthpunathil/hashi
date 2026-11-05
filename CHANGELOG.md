@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Update check: on start, Hashi asks GitHub for the latest release at most once a day (cached in `~/.hashi/update-check.json`, failures included) and the dashboard header shows `update vX.Y.Z: hashi update` when one is out. Headless mode logs one line. Turn it off with `--no-update-check` or `HASHI_NO_UPDATE_CHECK=1`.
+- `hashi update [--check] [--version vX.Y.Z] [--yes]` downloads the release archive for your platform, verifies its SHA-256 checksum, checks that the new binary reports the expected version and replaces the running one. It refuses Cargo installs and directories you cannot write to.
+- `hashi doctor` shows the current and latest version and whether an update is available.
+
 ## [0.2.0] - 2026-11-05
 
 ### Added

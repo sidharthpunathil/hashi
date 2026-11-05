@@ -65,6 +65,8 @@ The script downloads the build for your platform, checks its SHA-256 checksum an
 
 Other options: download an archive from the [releases page](https://github.com/sidharthpunathil/hashi/releases) (Linux x64 and ARM64, macOS Intel and Apple Silicon, Windows x64), run `cargo install --locked --git https://github.com/sidharthpunathil/hashi` (Rust 1.89 or later), or pin a version with `HASHI_VERSION` ([installer options](docs/configuration.md#installer-options)). To uninstall, delete the `hashi` binary, and `~/.hashi` if you also want to remove tokens and history.
 
+**Updating:** run `hashi update` (the dashboard shows when a new release is out); a Cargo install updates with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`.
+
 ## Quick start
 
 1. **Have at least one agent installed and signed in**, for example `claude --version` or `codex --version`.

@@ -17,5 +17,6 @@ pub mod tls;
 pub mod token;
 pub mod tui;
 pub mod tunnel;
+pub mod update;
 pub mod util;
 pub mod web;

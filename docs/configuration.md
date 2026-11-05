@@ -16,6 +16,7 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--tls-cert`, `--tls-key` | `HASHI_TLS_CERT`, `HASHI_TLS_KEY` | none. Serve HTTPS with these PEM files |
 | `--name` | `HASHI_NAME` | `Hashi`. Shown on invite and My access pages |
 | `--headless` | | off (on when stdout is not a terminal) |
+| `--no-update-check` | `HASHI_NO_UPDATE_CHECK` | off. Set to skip the daily check for a newer release (also skipped by `hashi doctor`) |
 | | `HASHI_REDUCED_MOTION` | off. Set to `1` to freeze dashboard animation |
 | `--default-agent` | `HASHI_DEFAULT_AGENT` | `claude` |
 | `--concurrency` | `HASHI_CONCURRENCY` | `1` run per agent |
@@ -55,7 +56,10 @@ hashi invite list                          # pending, claimed and expired invite
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
+hashi update                               # install the latest release (--check, --version v0.3.0, --yes)
 ```
+
+The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (`hashi/0.2.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`.
 
 ## Dashboard keys
 

@@ -101,6 +101,7 @@ async fn harness_with(tweak: impl FnOnce(&mut ServerConfig)) -> Harness {
         name: "Test Hashi".to_owned(),
         tls: None,
         tunnel_token: None,
+        update_check: false,
     };
     tweak(&mut cfg);
 

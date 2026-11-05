@@ -384,6 +384,9 @@ pub fn headless_line(ev: &crate::events::Event) -> String {
         Event::Held { reason, detail } => format!("  ! held     {reason}: {detail}"),
         Event::TunnelReady(url) => format!("  ⌁ public   {url}"),
         Event::TunnelDown(why) => format!("  ! tunnel   {why}"),
+        Event::UpdateAvailable { version, url } => {
+            format!("  ↑ update   v{version} is available, run hashi update ({url})")
+        }
         Event::Log(msg) => format!("  · {msg}"),
     };
     terminal_safe(&line)
@@ -1210,6 +1213,10 @@ mod tests {
             Event::TunnelDown("x\u{1b}[2Jy".into()),
             Event::TunnelReady("https://a\u{7}.example".into()),
             Event::Log("a\u{9b}b".into()),
+            Event::UpdateAvailable {
+                version: "9.9.9".into(),
+                url: "https://x\u{1b}[2J.example".into(),
+            },
         ] {
             assert!(!has_unsafe_terminal_chars(&headless_line(&ev)));
         }
