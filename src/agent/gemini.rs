@@ -216,9 +216,11 @@ pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
         return Some(
             super::limit::leading_seconds(&rest)
                 .filter(|n| *n > MIN_RETRY_SECS)
-                .map(|n| {
-                    time::OffsetDateTime::now_utc()
-                        + std::time::Duration::from_secs(n).min(super::limit::MAX_RESET)
+                .and_then(|n| {
+                    super::limit::add_capped(
+                        time::OffsetDateTime::now_utc(),
+                        std::time::Duration::from_secs(n),
+                    )
                 }),
         );
     }
