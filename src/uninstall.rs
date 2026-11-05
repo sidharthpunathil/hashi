@@ -50,6 +50,7 @@ pub fn is_hashi_entry(name: &str) -> bool {
         crate::update::CACHE_FILE,
         crate::server::PUBLIC_URL_FILE,
         crate::server::PID_FILE,
+        crate::server::LOCK_FILE,
         crate::settings::FILE,
         crate::diagnostics::REPORTS_DIR,
         "cloudflared.yml",
@@ -437,16 +438,25 @@ pub struct Removed {
     pub failed: Vec<String>,
 }
 
+/// `true` when `path` is the running binary. Both sides are canonicalised,
+/// since the plan keeps the path as Windows reports it, without the prefix
+/// a canonical Windows path carries.
+fn is_running_exe(path: &Path, current_exe: Option<&Path>) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    current_exe.is_some_and(|c| canon(c) == canon(path))
+}
+
 fn delete_binary(path: &Path, current_exe: Option<&Path>) -> std::io::Result<()> {
+    let running = is_running_exe(path, current_exe);
     #[cfg(windows)]
     {
-        if current_exe == Some(path) {
+        if running {
             // A running exe cannot delete itself on Windows; self-replace
             // schedules the delete for when this process exits.
             return self_replace::self_delete_at(path);
         }
     }
-    let _ = current_exe;
+    let _ = running;
     std::fs::remove_file(path)
 }
 
@@ -699,9 +709,13 @@ pub fn execute(
     tty: bool,
     confirm: &mut dyn FnMut() -> Result<bool>,
 ) -> Result<Outcome> {
-    if let Some(pid) = running_server(&target.home, std::process::id(), is_hashi) {
+    // The lock catches a server whose pid file another one overwrote.
+    let running = running_server(&target.home, std::process::id(), is_hashi)
+        .map(|pid| format!(" (pid {pid})"))
+        .or_else(|| crate::server::home_locked(&target.home).then(String::new));
+    if let Some(pid) = running {
         let msg = format!(
-            "a Hashi server is running from this home (pid {pid}). Quit the dashboard \
+            "a Hashi server is running from this home{pid}. Quit the dashboard \
              (press q) or stop the service, then run hashi uninstall again."
         );
         if !opts.dry_run {
@@ -918,6 +932,24 @@ mod tests {
     }
 
     #[test]
+    fn execute_refuses_while_a_server_holds_the_home_lock() {
+        let root = tmp();
+        let t = fake_install(root.path());
+        // No pid file: another server removed it, but this one still runs.
+        let lock = crate::server::InstanceLock::acquire(&t.home).unwrap();
+        let opts = Options {
+            yes: true,
+            ..Options::default()
+        };
+        let e = err_text(execute(&t, opts, &|_| false, true, &mut never_asked));
+        assert!(e.contains("server is running"), "{e}");
+        assert!(intact(&t));
+        drop(lock);
+        let out = execute(&t, opts, &|_| false, true, &mut never_asked);
+        assert!(matches!(out, Ok(Outcome::Done(..))), "{out:?}");
+    }
+
+    #[test]
     fn execute_refuses_while_a_server_runs() {
         let root = tmp();
         let t = fake_install(root.path());
@@ -1065,6 +1097,28 @@ mod tests {
         assert!(outside.join("keep.txt").is_file());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_running_exe_matches_through_a_non_canonical_path() {
+        let root = tmp();
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("hashi");
+        write(&exe, "bin");
+        let canonical = exe.canonicalize().unwrap();
+        // The plan's path, spelled differently from the canonical one, as
+        // Windows' plain and `\\?\` forms are.
+        std::os::unix::fs::symlink(&bin, root.path().join("link")).unwrap();
+        let spelled = root.path().join("link").join("hashi");
+        assert_ne!(spelled, canonical);
+        assert!(is_running_exe(&spelled, Some(&canonical)));
+        assert!(is_running_exe(&canonical, Some(&spelled)));
+        let other = bin.join("other");
+        write(&other, "bin");
+        assert!(!is_running_exe(&other, Some(&canonical)));
+        assert!(!is_running_exe(&exe, None));
+    }
+
     #[test]
     fn recognises_hashi_entries() {
         for n in [
@@ -1081,6 +1135,7 @@ mod tests {
             "update-0123abcd",
             "public-url",
             "server.pid",
+            "server.lock",
             "settings.json",
             "reports",
         ] {

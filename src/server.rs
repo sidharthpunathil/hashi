@@ -124,6 +124,8 @@ pub struct Running {
     pub cancel: CancellationToken,
     tasks: JoinSet<()>,
     home: PathBuf,
+    // Released last, after `shutdown` removed the pid file.
+    _lock: InstanceLock,
 }
 
 impl Running {
@@ -148,12 +150,93 @@ impl Running {
 /// `hashi uninstall` can refuse while a server is up.
 pub const PID_FILE: &str = "server.pid";
 
+/// File in the data directory a running server holds an exclusive OS lock
+/// on, so a second server on the same home refuses to start.
+pub const LOCK_FILE: &str = "server.lock";
+
+/// The single-instance lock on a home, held for as long as a server runs
+/// from it. The OS releases it when the file closes, also after a crash.
+#[derive(Debug)]
+pub struct InstanceLock {
+    file: std::fs::File,
+    home: PathBuf,
+}
+
+impl InstanceLock {
+    /// Takes the lock on `home`, creating the directory and the lock file
+    /// when needed.
+    ///
+    /// # Errors
+    ///
+    /// Fails, saying so, while another server holds the lock, or when the
+    /// file cannot be opened.
+    pub fn acquire(home: &Path) -> Result<Self> {
+        std::fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+        let path = home.join(LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self {
+                file,
+                home: home.to_path_buf(),
+            }),
+            Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+                "another Hashi server is already running from {}{}. Quit it (press q in its \
+                 dashboard) or stop the service first, or use another --home.",
+                home.display(),
+                read_server_pid(home).map_or_else(String::new, |p| format!(" (pid {p})"))
+            ),
+            Err(std::fs::TryLockError::Error(e)) => {
+                Err(e).with_context(|| format!("locking {}", path.display()))
+            }
+        }
+    }
+
+    /// Records this process as the running server. Only the lock holder
+    /// writes the pid file.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file cannot be written.
+    pub fn write_pid(&self) -> std::io::Result<()> {
+        write_server_pid(&self.home)
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        // Closing the file releases the lock too; this makes it prompt.
+        let _ = self.file.unlock();
+    }
+}
+
+/// `true` while a server holds the single-instance lock on `home`.
+#[must_use]
+pub fn home_locked(home: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.join(LOCK_FILE))
+    else {
+        return false;
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+    }
+}
+
 /// Records this process as the running server, readable only by its owner.
-///
-/// # Errors
-///
-/// Fails if the file cannot be written.
-pub fn write_server_pid(home: &Path) -> std::io::Result<()> {
+fn write_server_pid(home: &Path) -> std::io::Result<()> {
     crate::diagnostics::write_private(&home.join(PID_FILE), &format!("{}\n", std::process::id()))
 }
 
@@ -167,12 +250,20 @@ pub fn read_server_pid(home: &Path) -> Option<u32> {
         .ok()
 }
 
-/// Removes the recorded process id. A missing file is not an error.
+/// Removes the recorded process id if it is this process's. A file naming
+/// another server, or no file, is left alone.
 ///
 /// # Errors
 ///
-/// Fails if the file exists but cannot be removed.
+/// Fails if the file is ours but cannot be removed.
 pub fn remove_server_pid(home: &Path) -> std::io::Result<()> {
+    remove_pid_if(home, std::process::id())
+}
+
+fn remove_pid_if(home: &Path, pid: u32) -> std::io::Result<()> {
+    if read_server_pid(home) != Some(pid) {
+        return Ok(());
+    }
     match std::fs::remove_file(home.join(PID_FILE)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
@@ -1021,6 +1112,9 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
     {
         anyhow::bail!("{}", TsError::FunnelPort(cfg.helpers.tailscale_port));
     }
+    // Before anything touches the home: a second server would requeue this
+    // one's running requests and take over its pid file.
+    let lock = InstanceLock::acquire(&cfg.home)?;
     let store = Arc::new(open_store(&cfg.home)?);
     let recovered = store.recover_interrupted()?;
     if recovered > 0 {
@@ -1114,7 +1208,7 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
     if let Err(e) = recorded {
         bus.log(format!("could not record the public URL: {e}"));
     }
-    if let Err(e) = write_server_pid(&cfg.home) {
+    if let Err(e) = lock.write_pid() {
         bus.log(format!("could not record the server pid: {e}"));
     }
     let dispatcher = Dispatcher::new();
@@ -1231,12 +1325,43 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         cancel,
         tasks,
         home: cfg.home.clone(),
+        _lock: lock,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_lock_on_the_same_home_is_refused_until_the_first_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        assert!(!home_locked(&home));
+        let first = InstanceLock::acquire(&home).unwrap();
+        first.write_pid().unwrap();
+        assert!(home_locked(&home));
+        let e = InstanceLock::acquire(&home).unwrap_err().to_string();
+        assert!(e.contains("already running"), "{e}");
+        assert!(e.contains(&format!("pid {}", std::process::id())), "{e}");
+        drop(first);
+        assert!(!home_locked(&home));
+        drop(InstanceLock::acquire(&home).unwrap());
+    }
+
+    #[test]
+    fn a_server_removes_the_pid_file_only_when_it_holds_its_own_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let lock = InstanceLock::acquire(home).unwrap();
+        lock.write_pid().unwrap();
+        // Another server exiting does not take this one's record with it.
+        remove_pid_if(home, std::process::id().wrapping_add(1)).unwrap();
+        assert_eq!(read_server_pid(home), Some(std::process::id()));
+        remove_server_pid(home).unwrap();
+        assert_eq!(read_server_pid(home), None);
+        remove_server_pid(home).unwrap();
+    }
 
     #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
