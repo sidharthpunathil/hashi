@@ -3,6 +3,7 @@
 use tokio::sync::broadcast;
 
 use crate::agent::AgentKind;
+use crate::guard::HoldReason;
 
 /// Something worth telling observers about.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +36,14 @@ pub enum Event {
         duration_ms: u64,
         /// Failure reason, when `ok` is false.
         error: Option<String>,
+    },
+    /// Queued work is held back because the machine is short of a resource.
+    /// Published at most once a minute.
+    Held {
+        /// Which resource is short.
+        reason: HoldReason,
+        /// Figures for the owner's dashboard and log.
+        detail: String,
     },
     /// The public tunnel is up.
     TunnelReady(String),

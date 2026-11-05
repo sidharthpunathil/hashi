@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use crate::agent::{self, AgentConfig, AgentKind, Limits};
 use crate::api::{self, AgentInfo, AppState, RateLimiter, Runtime};
 use crate::events::{Bus, Event};
+use crate::guard::{ResourceGuard, ResourceSettings};
 use crate::queue::{self, Dispatcher, QueueConfig};
 use crate::store::{NewToken, Store};
 use crate::token::{Role, SessionMode};
@@ -29,8 +30,12 @@ pub struct ServerConfig {
     pub agents: HashMap<AgentKind, AgentConfig>,
     /// Agent used when a request does not name one.
     pub default_agent: AgentKind,
-    /// Workers per agent.
+    /// Workers per agent. The total running at once is still capped by
+    /// [`ResourceSettings::max_running`].
     pub concurrency: usize,
+    /// Machine protection: global run cap, memory reserve, per-run memory
+    /// limit, disk floor and priority.
+    pub resources: ResourceSettings,
     /// Per-run limits.
     pub limits: Limits,
     /// Authenticated requests per minute per token. Zero disables limiting.
@@ -203,7 +208,16 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         name: cfg.name.clone(),
     });
     let dispatcher = Dispatcher::new();
+    let guard = Arc::new(ResourceGuard::new(
+        &cfg.resources,
+        cfg.home.clone(),
+        bus.clone(),
+    ));
+    let summary = guard.describe();
+    info!("{summary}");
+    bus.log(summary);
     let state = AppState {
+        guard: Arc::clone(&guard),
         store: Arc::clone(&store),
         bus: bus.clone(),
         dispatcher: dispatcher.clone(),
@@ -218,7 +232,7 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
     let queue_cfg = Arc::new(QueueConfig {
         agents: cfg.agents.clone(),
         concurrency: cfg.concurrency,
-        limits: cfg.limits,
+        limits: cfg.limits.clone(),
         workspace: cfg.home.join("workspaces"),
     });
     let mut tasks = queue::spawn_workers(
@@ -226,6 +240,7 @@ pub async fn start(cfg: ServerConfig, bus: Bus) -> Result<Running> {
         bus.clone(),
         &dispatcher,
         queue_cfg,
+        guard,
         cancel.clone(),
     );
 

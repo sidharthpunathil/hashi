@@ -12,6 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hashi::agent::{AgentKind, Usage};
 use hashi::api::{AgentInfo, AppState, RateLimiter, Runtime};
 use hashi::events::{Bus, Event};
+use hashi::guard::{GIB, HoldReason, ManualProbe, ResourceGuard, ResourceSettings};
 use hashi::queue::Dispatcher;
 use hashi::store::{NewRequest, NewToken, Store};
 use hashi::token::{Role, SessionMode};
@@ -91,6 +92,14 @@ fn state() -> AppState {
         default_agent: AgentKind::Claude,
         queue_limit: 100,
         run_timeout_secs: 600,
+        guard: Arc::new(ResourceGuard::new(
+            &ResourceSettings {
+                max_running: Some(2),
+                ..ResourceSettings::with_probe(Arc::new(ManualProbe::new(16 * GIB, 10 * GIB)))
+            },
+            std::path::PathBuf::from("."),
+            Bus::default(),
+        )),
     }
 }
 
@@ -597,4 +606,31 @@ fn overview_shows_a_card_per_installed_agent() {
         );
     }
     assert!(!out.contains("Cursor CLI"));
+}
+
+#[test]
+fn overview_shows_memory_and_run_slots() {
+    let mut app = App::new(state(), None, false);
+    let out = draw(&mut app, 140, 40);
+    let line = out.lines().find(|l| l.contains(" memory ")).unwrap();
+    assert!(line.contains("6.0 GiB / 16.0 GiB"), "{line}");
+    assert!(line.contains("running 0/2"), "{line}");
+    assert!(!line.contains("held"), "{line}");
+}
+
+#[test]
+fn overview_says_when_work_is_held() {
+    let mut st = state();
+    let p: Arc<dyn hashi::guard::Probe> = Arc::new(ManualProbe::new(16 * GIB, GIB));
+    st.guard = Arc::new(ResourceGuard::new(
+        &ResourceSettings::with_probe(p),
+        std::path::PathBuf::from("."),
+        Bus::default(),
+    ));
+    let hold = st.guard.check().unwrap_err();
+    assert_eq!(hold.reason, HoldReason::Memory);
+    st.guard.hold(&hold);
+    let mut app = App::new(st, None, false);
+    let out = draw(&mut app, 140, 40);
+    assert!(out.contains("held: low memory"), "{out}");
 }

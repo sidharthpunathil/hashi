@@ -8,7 +8,7 @@
 //! | `GET`    | `/v1/ask/{id}`        | token | Poll (or long-poll) a result       |
 //! | `DELETE` | `/v1/session/{agent}` | token | Reset a stateful conversation      |
 //! | `GET`    | `/v1/me`              | any   | The token's own access and usage   |
-//! | `GET`    | `/v1/stats`           | admin | Queue and request counters         |
+//! | `GET`    | `/v1/stats`           | admin | Counters and machine resources     |
 //! | `GET`    | `/v1/tokens`          | admin | List tokens                        |
 //! | `POST`   | `/v1/tokens`          | admin | Create a token                     |
 //! | `PATCH`  | `/v1/tokens/{id}`     | admin | Pause, resume, extend, set limits  |
@@ -48,6 +48,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::agent::AgentKind;
 use crate::events::Bus;
+use crate::guard::ResourceGuard;
 use crate::queue::Dispatcher;
 use crate::store::{Store, StoreError};
 use crate::token::{Token, TokenStatus};
@@ -128,6 +129,8 @@ pub struct AppState {
     pub queue_limit: u64,
     /// Per-run time limit, in seconds. MCP calls wait this long for an answer.
     pub run_timeout_secs: u64,
+    /// Machine protection. Its figures are shown to admins only.
+    pub guard: Arc<ResourceGuard>,
 }
 
 /// Builds the router.
@@ -455,7 +458,12 @@ async fn stats(
     State(state): State<AppState>,
     Admin(_): Admin,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({ "stats": state.store.stats()? })))
+    // Memory and disk figures fingerprint the host, so they live here, behind
+    // the admin check, and nowhere else.
+    Ok(Json(json!({
+        "stats": state.store.stats()?,
+        "resources": state.guard.snapshot(),
+    })))
 }
 
 #[cfg(test)]
