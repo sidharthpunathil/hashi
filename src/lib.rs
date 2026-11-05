@@ -25,4 +25,5 @@ pub mod tunnel;
 pub mod uninstall;
 pub mod update;
 pub mod util;
+pub mod verified;
 pub mod web;

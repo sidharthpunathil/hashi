@@ -880,7 +880,12 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
     let agents = discover_agents(&cfg.agents).await;
     for a in &agents {
         match &a.version {
-            Some(v) => bus.log(format!("{} ready ({v})", a.agent.display_name())),
+            Some(v) => {
+                bus.log(format!("{} ready ({v})", a.agent.display_name()));
+                if let Some(note) = crate::verified::newer_note(a.agent, v) {
+                    bus.log(note);
+                }
+            }
             None => bus.log(format!(
                 "{} not found at {}",
                 a.agent.display_name(),
