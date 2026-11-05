@@ -62,6 +62,36 @@ These are the expected gaps. The inventory may find more.
    - List saved remotes, and remove one.
    - Connect takes a pasted invite link.
    - Ask on a remote uses the prompt popup with a target selector.
+10. **Port and bind address, live.**
+    - A Commands-tab row opens a form with the port (1 to 65535) and the bind
+      address. The bind choices are loopback `127.0.0.1`, all interfaces
+      `0.0.0.0` or `::`, or a typed IP such as a Tailscale address.
+    - **Applying:**
+      1. Bind the new listener first. If that fails (port in use, address
+         not on this machine, permission denied), show the error next to
+         the field and keep serving on the old address.
+      2. Move to the new listener with the same TLS settings, connection
+         cap and limits, and update the URL in the header.
+      3. Let the old listener finish its open requests (the existing
+         10 second graceful drain), then close it.
+    - Running agent requests are not interrupted: they live in the queue,
+      not the listener.
+    - Any active public route (a Cloudflare quick tunnel, or Tailscale serve
+      or funnel) is restarted to point at the new local port. A named
+      tunnel's public hostname cannot be retargeted by Hashi, so changing the
+      port while one is configured warns that the Cloudflare dashboard
+      hostname must be updated too.
+    - Choosing a non-loopback bind without TLS asks for confirmation with
+      the same warning the CLI prints at startup.
+    - **Keeping the change:**
+      - A "keep for next start" toggle (on by default) saves the choice in
+        an owner-only settings file, `<home>/settings.json`.
+      - At startup the order is: flag, then environment variable, then
+        settings file, then default. When a flag or environment variable
+        overrides the saved value, the form says so.
+      - `hashi uninstall` treats the file as Hashi's own (add it to
+        `is_hashi_entry`).
+
 9. **Already there**: share, invites (list and cancel), new token, revoke,
    pause, copy URL, go public (Cloudflare and Tailscale), stop, install
    helpers, and help. Verify that each is reachable and that its
