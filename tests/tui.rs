@@ -2404,3 +2404,122 @@ fn the_edit_form_turns_usage_sharing_on_and_off() {
     app.on_key(key(KeyCode::Enter));
     assert!(toast(&app).contains("nothing changed"));
 }
+
+/// Opens the add-account form, types `name` and picks the remote kind.
+fn open_remote_account_form(app: &mut App, name: &str) {
+    select_action(app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Char('a')));
+    typed(app, name);
+    // Kind: remote is the last kind, left of login.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Left));
+    let Some(Popup::AddAccount(form)) = &app.popup else {
+        panic!("expected the add-account form, got {:?}", app.popup)
+    };
+    assert_eq!(form.kind, hashi::accounts::AccountKind::Remote);
+}
+
+#[test]
+fn the_account_form_adds_a_remote_account_through_a_saved_bridge() {
+    let dir = tempfile::tempdir().unwrap();
+    hashi::remote::save(
+        dir.path(),
+        &[
+            hashi::remote::Remote {
+                name: "friend".into(),
+                // Nothing listens here, so the loop check cannot run.
+                base_url: "http://127.0.0.1:9".into(),
+                token: "hashi_sk_secret_never_shown".into(),
+            },
+            hashi::remote::Remote {
+                name: "other".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                token: "hashi_sk_other".into(),
+            },
+        ],
+    )
+    .unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    open_remote_account_form(&mut app, "pal");
+    let out = draw(&mut app, 160, 44);
+    assert!(
+        out.contains("friend") && out.contains("same (claude)"),
+        "{out}"
+    );
+    assert!(out.contains("privacy: the friend who runs that bridge can see every"));
+    assert!(
+        out.contains("never see that this account is remote."),
+        "{out}"
+    );
+    assert!(!out.contains("secret_never_shown"));
+
+    // The second bridge, and codex on it.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Down));
+    for _ in 0..=AgentKind::ALL.len() {
+        if draw(&mut app, 160, 44).contains("‹ codex ›") {
+            break;
+        }
+        app.on_key(key(KeyCode::Right));
+    }
+    assert!(draw(&mut app, 160, 44).contains("other"));
+    app.on_key(key(KeyCode::Enter));
+    let deadline = Instant::now() + std::time::Duration::from_secs(20);
+    while matches!(app.popup, Some(Popup::AddAccount(_))) {
+        assert!(Instant::now() < deadline, "the account was never added");
+        app.on_tick();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        matches!(app.popup, Some(Popup::Accounts { .. })),
+        "{:?}",
+        app.popup
+    );
+    // Unreachable, so added with the CLI's warning.
+    assert!(toast(&app).contains("could not reach"), "{}", toast(&app));
+    let a = app
+        .state
+        .store
+        .get_account(AgentKind::Claude, "pal")
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.kind, hashi::accounts::AccountKind::Remote);
+    assert_eq!(a.remote.as_deref(), Some("other"));
+    assert_eq!(a.remote_agent, Some(AgentKind::Codex));
+    let audited = app
+        .state
+        .store
+        .list_audit(10)
+        .unwrap()
+        .into_iter()
+        .any(|e| e.actor == "dashboard" && e.action == "account.add" && e.target == "claude:pal");
+    assert!(audited);
+    let out = draw(&mut app, 160, 44);
+    assert!(out.contains("pal") && out.contains("remote"), "{out}");
+}
+
+#[test]
+fn a_remote_account_needs_a_saved_bridge_and_a_good_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    open_remote_account_form(&mut app, "Bad Name");
+    assert!(draw(&mut app, 160, 44).contains("none saved (connect to a bridge first)"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 160, 44).contains("must be 1 to 32"));
+    let Some(Popup::AddAccount(form)) = &mut app.popup else {
+        panic!("expected the add-account form")
+    };
+    form.name = "pal".into();
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 160, 44);
+    assert!(out.contains("no bridges saved"), "{out}");
+    assert!(
+        app.state
+            .store
+            .get_account(AgentKind::Claude, "pal")
+            .unwrap()
+            .is_none()
+    );
+}

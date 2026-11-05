@@ -65,6 +65,25 @@ fn fitted(frame: &mut Frame, width: u16, title: &str, lines: Vec<Line<'static>>)
     show(frame, rect, title, lines);
 }
 
+/// `text` broken into lines of at most `width` characters, at spaces.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 fn muted_line(s: impl Into<String>) -> Line<'static> {
     Line::from(Span::styled(s.into(), t::muted()))
 }
@@ -659,13 +678,43 @@ fn add_account(frame: &mut Frame, form: &AccountForm, tick: u64) {
             form_text(&masked, f(3), "paste it here; it is not shown", tick),
         ));
     }
+    let remote = form.kind == crate::accounts::AccountKind::Remote;
+    if remote {
+        fields.push(form_field(
+            f(AccountForm::REMOTE),
+            "bridge",
+            W,
+            form_toggle(&form.remote_label(), f(AccountForm::REMOTE)),
+        ));
+        fields.push(form_field(
+            f(AccountForm::REMOTE_AGENT),
+            "there",
+            W,
+            form_toggle(&form.remote_agent_label(), f(AccountForm::REMOTE_AGENT)),
+        ));
+    }
     let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
     lines.push(Line::raw(""));
-    lines.push(muted_line(if form.kind.is_key() {
-        "  The key is stored owner-only in the account's directory, never in the database."
+    if remote {
+        lines.push(muted_line(if form.busy {
+            "  checking the bridge and adding the account…"
+        } else {
+            "  Runs on this account go to the friend's bridge you connected to."
+        }));
+        // Wrapped by hand: the popup is sized to its line count.
+        for line in wrap_words(crate::accounts::ops::REMOTE_PRIVACY, 76) {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                t::fg(t::AMBER),
+            )));
+        }
     } else {
-        "  enter adds it, then the dashboard steps aside for the agent's own sign-in."
-    }));
+        lines.push(muted_line(if form.kind.is_key() {
+            "  The key is stored owner-only in the account's directory, never in the database."
+        } else {
+            "  enter adds it, then the dashboard steps aside for the agent's own sign-in."
+        }));
+    }
     lines.push(Line::raw(""));
     lines.push(key_hint(&[
         ("↑↓", "field"),

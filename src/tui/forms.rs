@@ -476,6 +476,14 @@ pub struct AccountForm {
     pub kind: AccountKind,
     /// The key, for a key account. Masked on screen.
     pub key: Secret,
+    /// The bridges saved by `hashi connect`, for a remote account.
+    pub remotes: Vec<String>,
+    /// The picked bridge, an index into `remotes`.
+    pub remote: usize,
+    /// The agent to ask for on the bridge; `None` is the account's own.
+    pub remote_agent: Option<AgentKind>,
+    /// Set while the bridge is being checked and the account added.
+    pub busy: bool,
     /// The field that failed and why.
     pub error: Option<FieldError>,
 }
@@ -485,6 +493,10 @@ impl AccountForm {
     pub const FIELDS: usize = 4;
     /// Index of the key field.
     pub const KEY: usize = 3;
+    /// Index of the bridge selector, for a remote account.
+    pub const REMOTE: usize = 3;
+    /// Index of the remote agent selector, for a remote account.
+    pub const REMOTE_AGENT: usize = 4;
     /// Longest key accepted, in characters.
     pub const KEY_CHARS: usize = 4096;
 
@@ -497,21 +509,75 @@ impl AccountForm {
             name: String::new(),
             kind: AccountKind::Login,
             key: Secret::default(),
+            remotes: Vec::new(),
+            remote: 0,
+            remote_agent: None,
+            busy: false,
             error: None,
         }
     }
 
-    /// The kinds `agent` supports.
+    /// An empty form that can pick one of `remotes` for a remote account.
+    #[must_use]
+    pub fn with_remotes(remotes: Vec<String>) -> Self {
+        Self {
+            remotes,
+            ..Self::new()
+        }
+    }
+
+    /// The kinds `agent` supports, a remote account last.
     #[must_use]
     pub fn kinds(agent: AgentKind) -> Vec<AccountKind> {
         [
             AccountKind::Login,
             AccountKind::ApiKey,
             AccountKind::OauthToken,
+            AccountKind::Remote,
         ]
         .into_iter()
         .filter(|k| acct::supports(agent, *k))
         .collect()
+    }
+
+    /// Whether the focused field is a choice that left and right change.
+    #[must_use]
+    pub fn on_choice(&self) -> bool {
+        match self.field {
+            0 | 2 => true,
+            Self::REMOTE | Self::REMOTE_AGENT => self.kind == AccountKind::Remote,
+            _ => false,
+        }
+    }
+
+    /// The picked bridge, for a remote account.
+    #[must_use]
+    pub fn selected_remote(&self) -> Option<&str> {
+        self.remotes.get(self.remote).map(String::as_str)
+    }
+
+    /// The agent asked for on the bridge.
+    #[must_use]
+    pub fn remote_agent(&self) -> AgentKind {
+        self.remote_agent.unwrap_or(self.agent)
+    }
+
+    /// The bridge selector's label.
+    #[must_use]
+    pub fn remote_label(&self) -> String {
+        match self.selected_remote() {
+            Some(name) => crate::diagnostics::terminal_safe(name),
+            None => "none saved (connect to a bridge first)".to_owned(),
+        }
+    }
+
+    /// The remote agent selector's label.
+    #[must_use]
+    pub fn remote_agent_label(&self) -> String {
+        match self.remote_agent {
+            None => format!("same ({})", self.agent.as_str()),
+            Some(a) => a.as_str().to_owned(),
+        }
     }
 
     /// Moves the focused choice by `by`.
@@ -535,16 +601,32 @@ impl AccountForm {
                     self.kind = *k;
                 }
             }
+            Self::REMOTE if self.kind == AccountKind::Remote => {
+                self.remote = cycle(self.remote, self.remotes.len(), by);
+            }
+            Self::REMOTE_AGENT if self.kind == AccountKind::Remote => {
+                let options: Vec<Option<AgentKind>> = std::iter::once(None)
+                    .chain(AgentKind::ALL.into_iter().map(Some))
+                    .collect();
+                let i = options
+                    .iter()
+                    .position(|a| *a == self.remote_agent)
+                    .unwrap_or(0);
+                self.remote_agent = options[cycle(i, options.len(), by)];
+            }
             _ => {}
         }
         self.error = None;
     }
 
-    /// The fields shown: the key only for a key account.
+    /// The fields shown: the key only for a key account, the bridge and
+    /// the agent there only for a remote one.
     #[must_use]
     pub fn fields(&self) -> usize {
         if self.kind.is_key() {
             Self::FIELDS
+        } else if self.kind == AccountKind::Remote {
+            Self::FIELDS + 1
         } else {
             Self::FIELDS - 1
         }

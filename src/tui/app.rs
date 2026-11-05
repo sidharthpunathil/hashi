@@ -810,6 +810,18 @@ pub enum Done {
     },
     /// `hashi request status`: what checking each outgoing request found.
     RequestStatus(Result<Vec<crate::access_client::Checked>, String>),
+    /// `hashi account add --remote`: the account added, and a warning
+    /// when the bridge could not be checked, or why it was not added.
+    RemoteAccount {
+        /// The agent.
+        agent: AgentKind,
+        /// The account.
+        name: String,
+        /// The bridge it goes through.
+        remote: String,
+        /// The warning to show, or the error.
+        result: Result<Option<String>, String>,
+    },
 }
 
 /// Public tunnel state.
