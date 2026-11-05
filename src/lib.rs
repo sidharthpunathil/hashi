@@ -6,6 +6,7 @@ pub mod api;
 pub mod diagnostics;
 pub mod events;
 pub mod guard;
+pub mod install;
 pub mod maintenance;
 pub mod mcp;
 pub mod net;
