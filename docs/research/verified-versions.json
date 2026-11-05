@@ -1,0 +1,60 @@
+{
+  "comment": "The upstream release each agent's headless flags, environment variables, account isolation and limit messages were last verified against. Update an entry only after re-checking that agent's research notes in docs/research/agent-clis.md against the new release.",
+  "agents": {
+    "claude": {
+      "name": "Claude Code",
+      "source": "npm:@anthropic-ai/claude-code",
+      "repo": "anthropics/claude-code",
+      "version": "2.1.318",
+      "verified": "2026-11-06"
+    },
+    "codex": {
+      "name": "Codex",
+      "source": "github:openai/codex",
+      "repo": "openai/codex",
+      "version": "0.166.0",
+      "tag": "rust-v0.166.0",
+      "verified": "2026-11-06"
+    },
+    "gemini": {
+      "name": "Gemini CLI",
+      "source": "github:google-gemini/gemini-cli",
+      "repo": "google-gemini/gemini-cli",
+      "version": "0.67.0",
+      "tag": "v0.67.0",
+      "verified": "2026-11-06"
+    },
+    "opencode": {
+      "name": "opencode",
+      "source": "github:anomalyco/opencode",
+      "repo": "anomalyco/opencode",
+      "version": "2.2.5",
+      "tag": "v2.2.5",
+      "verified": "2026-11-06"
+    },
+    "qwen": {
+      "name": "Qwen Code",
+      "source": "github:QwenLM/qwen-code",
+      "repo": "QwenLM/qwen-code",
+      "version": "0.26.8",
+      "tag": "v0.26.8",
+      "tag_pattern": "^v[0-9]",
+      "verified": "2026-11-06"
+    },
+    "cursor": {
+      "name": "Cursor CLI",
+      "source": "installer:https://cursor.com/install",
+      "repo": null,
+      "version": "2026.11.05-86047df",
+      "verified": "2026-11-06"
+    },
+    "crush": {
+      "name": "Crush",
+      "source": "github:charmbracelet/crush",
+      "repo": "charmbracelet/crush",
+      "version": "0.100.0",
+      "tag": "v0.100.0",
+      "verified": "2026-11-06"
+    }
+  }
+}
