@@ -43,7 +43,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::agent::AgentKind;
@@ -135,19 +135,78 @@ pub struct AppState {
     pub waits: Arc<ask::WaitSlots>,
 }
 
-/// Builds the router.
-pub fn router(state: AppState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PATCH,
-            axum::http::Method::DELETE,
-        ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+/// Cross-origin access for the configured origins only. With none, no CORS
+/// headers are sent and browsers keep other sites' pages away from the API.
+fn cors(origins: &[String]) -> Option<CorsLayer> {
+    let origins: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|o| match HeaderValue::from_str(o) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!(origin = %o, "ignoring an unusable CORS origin");
+                None
+            }
+        })
+        .collect();
+    if origins.is_empty() {
+        return None;
+    }
+    Some(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PATCH,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+    )
+}
 
-    Router::new()
+/// What the `Host` check accepts besides IP addresses and `localhost`.
+#[derive(Debug, Clone)]
+struct HostPolicy {
+    runtime: Arc<Runtime>,
+    extra: Arc<[String]>,
+}
+
+/// Refuses requests whose `Host` names some other site, which is what a
+/// DNS-rebinding page sends. Native TLS needs no check: a rebound name fails
+/// the certificate.
+async fn host_check(
+    State(policy): State<HostPolicy>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !policy.runtime.local_url.starts_with("https://") {
+        let host = req
+            .headers()
+            .get(header::HOST)
+            .map(|v| v.to_str().unwrap_or(""));
+        let public = policy
+            .runtime
+            .public_url()
+            .and_then(|u| crate::net::url_host(&u));
+        if !crate::net::host_allowed(host, public.as_deref(), &policy.extra) {
+            return ApiError::coded(
+                StatusCode::MISDIRECTED_REQUEST,
+                "unknown_host",
+                "this Hashi does not answer to that host name; add it with --allowed-host",
+            )
+            .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Builds the router, with the CORS origins and extra host names from `net`.
+pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
+    let hosts = HostPolicy {
+        runtime: Arc::clone(&state.runtime),
+        extra: net.allowed_hosts.clone().into(),
+    };
+    let mut app = Router::new()
         .route("/", get(root))
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/status", get(status))
@@ -164,48 +223,57 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/audit", get(tokens::audit))
         .route("/v1/invites", get(invites::list).post(invites::create))
         .route("/v1/invites/{id}", delete(invites::cancel))
-        .route(
-            "/v1/claim/preview",
-            post(invites::preview).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                claim_limit,
-            )),
-        )
-        .route(
-            "/v1/claim/redeem",
-            post(invites::redeem).layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                claim_limit,
-            )),
-        )
+        .route("/v1/claim/preview", post(invites::preview))
+        .route("/v1/claim/redeem", post(invites::redeem))
         .merge(crate::web::routes())
         .route(
             "/mcp",
             post(crate::mcp::handle).get(crate::mcp::get_not_allowed),
         )
         .fallback(|| async { ApiError::NotFound("no such route") })
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
-        .layer(cors)
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+    if let Some(cors) = cors(&net.cors_origins) {
+        app = app.layer(cors);
+    }
+    app.layer(axum::middleware::from_fn_with_state(hosts, host_check))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(state)
 }
 
-/// Charges invite claims to the client's address, before the body is read or
-/// the database is touched, so one client cannot lock everyone out of their
-/// invite links.
-async fn claim_limit(
-    State(state): State<AppState>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Response {
-    let key = format!(
-        "claim:{}",
-        crate::net::request_client_key(req.extensions(), req.headers())
-    );
-    if !state.limiter.check(&key) {
-        return ApiError::TooManyRequests("too many claim attempts, slow down").into_response();
+/// The rate-limit key of the client behind a request (see
+/// [`crate::net::client_key`]).
+#[derive(Debug, Clone)]
+pub struct ClientKey(pub String);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientKey {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(crate::net::request_client_key(
+            &parts.extensions,
+            &parts.headers,
+        )))
     }
-    next.run(req).await
+}
+
+/// Charges a failed invite claim (unknown, used or expired code, or a bad
+/// body) to the client's address, and turns failures past the budget into
+/// 429s. Claims that succeed are never charged or refused, so one client
+/// guessing codes cannot lock everyone who shares its address out of their
+/// real invite links.
+fn claim_outcome<T>(state: &AppState, client: &ClientKey, result: ApiResult<T>) -> ApiResult<T> {
+    match result {
+        Err(e) if !matches!(e, ApiError::Internal(_)) => {
+            if state.limiter.check(&format!("claim:{}", client.0)) {
+                Err(e)
+            } else {
+                Err(ApiError::TooManyRequests(
+                    "too many claim attempts, slow down",
+                ))
+            }
+        }
+        other => other,
+    }
 }
 
 async fn security_headers(mut res: Response) -> Response {
@@ -423,8 +491,9 @@ fn bearer(parts: &Parts) -> ApiResult<&str> {
 }
 
 /// Looks up the bearer token, throttling clients that keep presenting
-/// unknown ones. The check runs before hashing and the database lookup, and
-/// only failures are charged, so a shared address does not slow real users.
+/// unknown ones. A token that looks up is never refused here: only failures
+/// are charged, and the budget only turns further failures into 429s, so a
+/// client sending garbage cannot lock out real users who share its address.
 fn authenticate(
     parts: &Parts,
     state: &AppState,
@@ -432,21 +501,19 @@ fn authenticate(
     rejection: &'static str,
 ) -> ApiResult<Token> {
     let secret = bearer(parts)?;
+    if let Some(token) = lookup(&state.store, secret)? {
+        return Ok(token);
+    }
     let key = format!(
         "authfail:{}",
         crate::net::request_client_key(&parts.extensions, &parts.headers)
     );
-    if state.limiter.exhausted(&key) {
-        return Err(ApiError::TooManyRequests(
+    if state.limiter.check(&key) {
+        Err(ApiError::Unauthorized(rejection))
+    } else {
+        Err(ApiError::TooManyRequests(
             "too many invalid tokens from this address, slow down",
-        ));
-    }
-    match lookup(&state.store, secret)? {
-        Some(token) => Ok(token),
-        None => {
-            state.limiter.check(&key);
-            Err(ApiError::Unauthorized(rejection))
-        }
+        ))
     }
 }
 

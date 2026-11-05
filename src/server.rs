@@ -303,7 +303,7 @@ pub async fn start_with(cfg: ServerConfig, mut net: NetLimits, bus: Bus) -> Resu
         cancel.clone(),
     );
 
-    let mut app = api::router(state.clone());
+    let mut app = api::router(state.clone(), &net);
     let shutdown = cancel.clone();
     let local_tls = tls_config.is_some();
     match tls_config {
