@@ -440,6 +440,9 @@ pub async fn wait_until_done(
     let Some(_slot) = state.waits.try_acquire(waiter) else {
         return Ok(current);
     };
+    // The request is read again when the wait ends. Holding this copy (and
+    // its prompt) for the whole wait would only cost memory per connection.
+    drop(current);
     let deadline = Duration::from_secs(secs.min(cap));
     let _ = tokio::time::timeout(deadline, async {
         loop {
@@ -527,7 +530,12 @@ pub(super) async fn ask(
     )
     .await?;
     let req = match wait {
-        Some(secs) => wait_until_done(&state, &token.id, &req.id, secs, MAX_WAIT_SECS).await?,
+        Some(secs) => {
+            // Only the id is needed while waiting; the result is read again.
+            let id = req.id.clone();
+            drop(req);
+            wait_until_done(&state, &token.id, &id, secs, MAX_WAIT_SECS).await?
+        }
         None => req,
     };
     let (code, v) = request_json(&state.store, req, reads_any_request(&token))?;
@@ -558,6 +566,8 @@ pub(super) async fn poll(
     }
     let req = match q.wait {
         Some(secs) if !req.status.is_terminal() => {
+            // Read again when the wait ends; do not hold this copy meanwhile.
+            drop(req);
             wait_until_done(&state, &token.id, &id, secs, MAX_WAIT_SECS).await?
         }
         _ => req,
