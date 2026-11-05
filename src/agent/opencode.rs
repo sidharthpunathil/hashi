@@ -62,10 +62,27 @@ pub fn env(workdir: &Path) -> Vec<(String, String)> {
 /// opencode allows most tools, including `bash` and `edit`, unless told
 /// otherwise, and it has no OS sandbox. Inline config loads after the global
 /// and project files (packages/core/src/config.ts, "Inline config ...
-/// runtime overrides"), so these denials win over the owner's own settings
-/// for Hashi runs. Reading files in the workspace stays allowed.
-pub const PERMISSIONS: &str =
-    r#"{"permission":{"bash":"deny","edit":"deny","external_directory":"deny","webfetch":"deny"}}"#;
+/// runtime overrides"), so these rules win over the owner's own settings for
+/// Hashi runs.
+///
+/// The rules are default deny. opencode evaluates permission rules last match
+/// wins, and its default agent starts from `"*": "allow"`, so a deny list
+/// alone would leave every unnamed action open, including each MCP tool from
+/// the owner's global config (asserted as `<server>_<tool>`), web search and
+/// code execution. `"*": "deny"` comes first and only the read-only tools are
+/// allowed after it: `read` (but not `.env` files, apart from `.env.example`),
+/// `glob`, `grep`, `list` and `lsp`. `bash`, `edit`, `external_directory` and
+/// `webfetch` are also denied by name, so they stay denied even if opencode
+/// changes how `*` is matched.
+pub const PERMISSIONS: &str = concat!(
+    r#"{"permission":{"*":"deny","#,
+    r#""read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"#,
+    r#""glob":"allow","grep":"allow","list":"allow","lsp":"allow","#,
+    r#""bash":"deny","edit":"deny","external_directory":"deny","webfetch":"deny"}}"#,
+);
+
+/// The only actions [`PERMISSIONS`] allows.
+pub const READ_ONLY_TOOLS: [&str; 5] = ["read", "glob", "grep", "list", "lsp"];
 
 /// Builds the argument vector for a headless `opencode run`.
 ///
@@ -393,10 +410,41 @@ mod tests {
         for tool in ["bash", "edit", "external_directory", "webfetch"] {
             assert_eq!(cfg["permission"][tool], "deny", "{tool} must be denied");
         }
-        assert!(
-            cfg["permission"].get("read").is_none(),
-            "reads stay allowed"
-        );
+        let read = &cfg["permission"]["read"];
+        assert_eq!(read["*"], "allow", "reads stay allowed");
+        assert_eq!(read["*.env"], "deny");
+        assert_eq!(read["*.env.*"], "deny");
+        assert_eq!(read["*.env.example"], "allow");
+    }
+
+    #[test]
+    fn permissions_are_default_deny_with_only_read_only_allows() {
+        let cfg: serde_json::Value = serde_json::from_str(PERMISSIONS).unwrap();
+        let rules = cfg["permission"].as_object().unwrap();
+        assert_eq!(rules["*"], "deny");
+        // opencode is last match wins, so the catch-all must come first. The
+        // parsed map does not keep key order, so check the raw text.
+        let star = PERMISSIONS.find(r#""*":"deny""#).unwrap();
+        for key in rules.keys().filter(|k| *k != "*") {
+            let at = PERMISSIONS.find(&format!("\"{key}\":")).unwrap();
+            assert!(star < at, "`*` must precede `{key}`");
+        }
+        for (key, rule) in rules {
+            let allows = match rule {
+                serde_json::Value::String(s) => s == "allow",
+                serde_json::Value::Object(m) => m.values().any(|v| v == "allow"),
+                _ => false,
+            };
+            if allows {
+                assert!(
+                    READ_ONLY_TOOLS.contains(&key.as_str()),
+                    "`{key}` is allowed but is not a read-only tool"
+                );
+            }
+        }
+        for tool in READ_ONLY_TOOLS {
+            assert!(rules.contains_key(tool), "{tool} must be allowed");
+        }
     }
 
     #[test]
