@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - `hashi ask --remote [<name>] "<prompt>"` sends a prompt to a saved bridge and waits for the answer.
 - The claim page offers "Set up from a terminal": one command (sh or PowerShell) that installs Hashi and connects it with the invite link. The installers run `hashi connect "$HASHI_CONNECT"` when `HASHI_CONNECT` is set.
 - After claiming, the claim page has Add to Cursor and Add to VS Code buttons and a Codex MCP snippet (`codex mcp add --url ... --bearer-token-env-var`).
+- Tailscale Serve and Funnel: `hashi serve --tailscale serve|funnel` (`HASHI_TAILSCALE`, `--tailscale-port`, `--tailscale-bin`), or the Commands view, publishes Hashi at `https://<machine>.<tailnet>.ts.net`. Hashi checks the sign-in state and refuses a port that serves something it did not set up, shows any approval link Tailscale prints, and while the route is up uses its URL for invite links, accepts its host name and trusts `X-Forwarded-For` from loopback. On stop and shutdown it runs only the matching `off` command, never `reset`.
+- The Cloudflare quick tunnel can be stopped at runtime, and only one public route runs at a time: starting another asks to switch.
+- `hashi install cloudflared|tailscale [--yes]` shows the vendor's documented install command for this platform and runs it after you confirm, or prints the download page where there is none. In the dashboard, a missing helper opens a popup that runs the command in the terminal (`enter`), copies it (`c`) or cancels (`esc`). `--cloudflared-bin` / `HASHI_CLOUDFLARED_BIN` point at a specific `cloudflared`.
+- `hashi doctor` reports `tailscale` and whether it is signed in, next to `cloudflared`.
+- Dashboard tab 5, Commands: every action grouped (go public, share, install, maintenance, help), each with its key, its current state and the equivalent CLI command. `↑` `↓` or `j` `k` select and `enter` runs the row.
 
 ## [0.2.0] - 2026-11-05
 

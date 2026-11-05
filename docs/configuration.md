@@ -8,6 +8,10 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--bind` | `HASHI_BIND` | `127.0.0.1` |
 | `--port` | `HASHI_PORT` | `7878` |
 | `--tunnel` | `HASHI_TUNNEL` | off |
+| `--tailscale serve\|funnel` | `HASHI_TAILSCALE` | off. Go public through Tailscale Serve (your tailnet) or Funnel (the internet); see [remote access](remote-access.md#tailscale-serve-and-funnel). Not with `--tunnel` |
+| `--tailscale-port` | `HASHI_TAILSCALE_PORT` | `443`. HTTPS port for `--tailscale` (Funnel: 443, 8443 or 10000) |
+| `--tailscale-bin` | `HASHI_TAILSCALE_BIN` | found on `PATH`. Also read by `hashi doctor` |
+| `--cloudflared-bin` | `HASHI_CLOUDFLARED_BIN` | found on `PATH`. Also read by `hashi doctor` |
 | `--tunnel-token` | `HASHI_TUNNEL_TOKEN` | none. Runs a named tunnel; needs `--public-url`. Prefer the variable: the flag shows in the process list, and Hashi warns |
 | `--trust-proxy` | `HASHI_TRUST_PROXY` | off. Read client addresses from `X-Forwarded-For` on loopback connections |
 | `--cors-origin` | `HASHI_CORS_ORIGINS` (comma separated) | none. Origins allowed to call Hashi from a browser |
@@ -46,7 +50,9 @@ Logs always go to `~/.hashi/logs/hashi.log` with secrets redacted (rotated past 
 ```bash
 hashi                                      # start the bridge with the dashboard
 hashi serve --headless                     # start it with plain log lines instead
-hashi doctor                               # are the agents and cloudflared installed?
+hashi doctor                               # agents, cloudflared, tailscale and its sign-in
+hashi install cloudflared                  # show the official install command, run it on yes
+hashi install tailscale --yes              # run it without asking
 hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
 hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, --clear-limits
@@ -58,6 +64,8 @@ hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
 hashi update                               # install the latest release (--check, --version v0.3.0, --yes)
 ```
+
+`hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
 The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (`hashi/0.2.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`.
 
@@ -85,20 +93,35 @@ Run `hashi` in a terminal and the dashboard takes over the screen. When stdout i
 
 | Key | Action |
 |---|---|
-| `1` `2` `3` `4`, `Tab`, `h` `l` | Overview, Requests, Tokens, Logs |
+| `1` `2` `3` `4` `5`, `Tab`, `h` `l` | Overview, Requests, Tokens, Logs, Commands |
 | `↑` `↓` / `j` `k` | Move the selection |
 | `PgUp` `PgDn` / `J` `K` | Scroll the request detail |
-| `n` / `d` | Create or revoke a token (Tokens view) |
-| `s` | Share: create an invite link (Tokens view) |
+| `Enter` | Run the selected row (Commands view) |
+| `n` / `d` | Create a token (Tokens and Commands views) / revoke one (Tokens view) |
+| `s` | Share: create an invite link (Tokens and Commands views) |
 | `p` | Pause or resume the selected token |
 | `i` / `x` | Switch to pending invites / cancel one |
 | `c` | Copy the API URL, or the token or invite link being shown |
-| `t` | Go public: start a Cloudflare quick tunnel on the running server (needs `cloudflared`) |
+| `t` | Go public: start a Cloudflare quick tunnel on the running server. Without `cloudflared`, opens its install popup; with Tailscale public, asks to switch |
 | `r` | Refresh |
 | `?` | All key bindings |
 | `Esc` | Close a popup |
 | `q` | Quit and stop the bridge. Asks first while requests are in flight |
 | `Ctrl-C` | Quit immediately |
+
+### Commands view
+
+Tab `5` lists everything the owner can do, grouped, one row each with its key (or `enter`), what it does, its state right now and the command that does the same from a terminal:
+
+| Group | Rows |
+|---|---|
+| Go public | Cloudflare quick tunnel (`t`), Tailscale serve, Tailscale funnel, stop going public |
+| Share | new invite (`s`), new token (`n`) |
+| Install | cloudflared, tailscale |
+| Maintenance | check for updates (shows `hashi update` when one is out), copy the API URL (`c`) |
+| Help | all key bindings (`?`) |
+
+States include "live at <url>", "starting", "approve at <url>", "not installed" and "signed out". In an install popup, `enter` runs the command with the terminal attached and brings the dashboard back afterwards, `c` copies it and `esc` cancels. Ctrl-C while it runs goes to the install, not to Hashi.
 
 Running requests count up their elapsed time, and every status pairs a symbol with its colour (`✓` done, `✗` failed, `◌` queued, a spinner for running). Body text uses your terminal's own foreground colour, so light and dark themes both stay readable.
 
