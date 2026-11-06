@@ -119,8 +119,15 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     ("account list", Entry::Row(Action::Accounts)),
-    // Usage gauges show for the selected account in the Accounts popup.
-    ("account usage", Entry::Row(Action::Accounts)),
+    // Usage gauges show for the selected account in the Accounts popup,
+    // and u reads them now (`--refresh`).
+    (
+        "account usage",
+        Entry::InPopup {
+            row: Action::Accounts,
+            key: "u",
+        },
+    ),
     (
         "account disable",
         Entry::InPopup {

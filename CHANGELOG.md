@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- Usage is read for every enabled login and remote account, not only the ones a token or project already uses, so a new account shows what it has left right away.
+- The dashboard Accounts popup reads the selected account's usage now with `u`, as `hashi account usage --refresh` does.
+
 ## [0.3.0] - 2026-11-06
 
 ### Upgrading from 0.2

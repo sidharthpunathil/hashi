@@ -929,6 +929,29 @@ impl App {
 
     // ── accounts ───────────────────────────────────────────────────────────
 
+    /// Reads `agent:name`'s usage now, in the background, as `hashi account
+    /// usage --refresh` does. The figures arrive through the usage event and
+    /// show in the popup; a failure is logged and shown as a toast.
+    fn refresh_usage(&mut self, agent: crate::agent::AgentKind, name: &str) {
+        let Some(poller) = self.state.dispatcher.usage().poller() else {
+            self.notify("usage reads are off (started with --no-usage-poll)");
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            self.notify("usage reads need the running server");
+            return;
+        };
+        let bus = self.state.bus.clone();
+        let name = name.to_owned();
+        self.notify(format!("reading usage for {agent}:{name}"));
+        rt.spawn(async move {
+            match poller.poll(agent, &name).await {
+                Ok(()) => bus.log(format!("usage read: {agent}:{name}")),
+                Err(e) => bus.log(format!("usage read for {agent}:{name}: {e}")),
+            }
+        });
+    }
+
     fn accounts_key(&mut self, mut selected: usize, code: KeyCode) -> Option<Popup> {
         let rows = self.account_rows();
         if closes(code) {
@@ -964,6 +987,7 @@ impl App {
                     Err(e) => self.notify(format!("{e:#}")),
                 }
             }
+            (KeyCode::Char('u'), Some(a)) => self.refresh_usage(a.agent, &a.name),
             (KeyCode::Char('c'), Some(a)) => {
                 match acct::ops::clear_limit(&self.state.store, a.agent, &a.name, ACTOR) {
                     Ok(true) => {

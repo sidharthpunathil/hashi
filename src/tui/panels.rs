@@ -614,7 +614,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
         None => foot.push(Line::from(vec![
             Span::styled("usage  ", t::muted()),
             Span::styled(
-                "no figures yet for this account (hashi account usage --refresh)",
+                "no figures yet for this account: press u to read them now",
                 t::muted(),
             ),
         ])),
@@ -626,6 +626,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
         ("d", "disable"),
         ("e", "enable"),
         ("c", "clear limit"),
+        ("u", "read usage"),
         ("x", "remove"),
         ("esc", "close"),
     ]));

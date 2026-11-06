@@ -1480,7 +1480,7 @@ fn a_key_account_is_added_with_its_key_masked_and_never_rendered() {
     let secret = "sk-ant-api03-VerySecretValue-1234567890";
     select_action(&mut app, Action::Accounts);
     app.on_key(key(KeyCode::Enter));
-    assert!(draw(&mut app, 140, 44).contains("hashi account usage --refresh"));
+    assert!(draw(&mut app, 140, 44).contains("press u to read them now"));
     app.on_key(key(KeyCode::Char('a')));
     typed(&mut app, "work");
     // Kind: api-key.
@@ -2677,4 +2677,34 @@ fn scrub_removes_format_characters_from_any_widget() {
     assert!(invisible_cells(&buf).is_empty());
     let text: String = buf.content.iter().map(|c| c.symbol()).collect();
     assert!(text.starts_with("abc"), "{text:?}");
+}
+
+/// `u` in the Accounts popup reads the selected account's usage now, or says
+/// why it cannot; either way the owner gets an answer instead of silence.
+#[test]
+fn u_in_the_accounts_popup_asks_for_a_usage_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    app.state
+        .store
+        .add_account(
+            AgentKind::Claude,
+            "work",
+            hashi::accounts::AccountKind::Login,
+        )
+        .unwrap();
+    select_action(&mut app, Action::Accounts);
+    app.on_key(key(KeyCode::Enter));
+    let frame = draw(&mut app, 160, 44);
+    assert!(frame.contains("read usage"), "{frame}");
+    assert!(frame.contains("press u to read them now"), "{frame}");
+    app.on_key(key(KeyCode::Char('u')));
+    assert!(matches!(app.popup, Some(Popup::Accounts { .. })));
+    let frame = draw(&mut app, 160, 44);
+    assert!(
+        frame.contains("reading usage for claude:work")
+            || frame.contains("usage reads are off")
+            || frame.contains("usage reads need the running server"),
+        "{frame}"
+    );
 }

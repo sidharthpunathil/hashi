@@ -903,7 +903,7 @@ read -r _rest
     }
 
     #[tokio::test]
-    async fn only_defaults_and_bound_login_accounts_are_polled() {
+    async fn defaults_and_every_enabled_login_account_are_polled() {
         let r = rig();
         r.login(AgentKind::Claude, "bound");
         r.login(AgentKind::Claude, "loose");
@@ -955,6 +955,7 @@ read -r _rest
             [
                 "claude:default",
                 "claude:bound",
+                "claude:loose",
                 "codex:default",
                 "codex:team"
             ]

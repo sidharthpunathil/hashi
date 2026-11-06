@@ -170,46 +170,29 @@ impl Poller {
     }
 
     /// The accounts the background loop reads: each supported agent's
-    /// default account, its enabled login accounts bound to a token or
-    /// project, and every enabled remote account bound to one, whatever
-    /// its agent.
+    /// default account, all of its enabled login accounts, and every enabled
+    /// remote account, whatever its agent. Accounts are read even before a
+    /// token or project uses them, so the owner sees what is left while
+    /// deciding where to put them.
     #[must_use]
     pub fn eligible(&self) -> Vec<Key> {
         let mut out = Vec::new();
         let accounts = self.store.list_accounts().unwrap_or_default();
-        let projects = self.store.list_projects().unwrap_or_default();
-        // One read of the tokens for every account, not one per account. A
-        // failed read binds nothing, as a failed count did.
-        let counts = self.store.account_token_counts().unwrap_or_default();
-        let bound = |agent: AgentKind, name: &str| {
-            counts
-                .get(&(agent, name.to_owned()))
-                .is_some_and(|n| *n > 0)
-                || projects.iter().any(|p| {
-                    p.accounts
-                        .get(&agent)
-                        .is_some_and(|l| l.iter().any(|n| n == name))
-                })
-        };
         for agent in &self.agents {
             out.push((*agent, acct::DEFAULT.to_owned()));
-            for a in accounts
+            out.extend(
+                accounts
+                    .iter()
+                    .filter(|a| a.agent == *agent && a.kind == AccountKind::Login && !a.disabled)
+                    .map(|a| (*agent, a.name.clone())),
+            );
+        }
+        out.extend(
+            accounts
                 .iter()
-                .filter(|a| a.agent == *agent && a.kind == AccountKind::Login && !a.disabled)
-            {
-                if bound(*agent, &a.name) {
-                    out.push((*agent, a.name.clone()));
-                }
-            }
-        }
-        for a in accounts
-            .iter()
-            .filter(|a| a.kind == AccountKind::Remote && !a.disabled)
-        {
-            if bound(a.agent, &a.name) {
-                out.push((a.agent, a.name.clone()));
-            }
-        }
+                .filter(|a| a.kind == AccountKind::Remote && !a.disabled)
+                .map(|a| (a.agent, a.name.clone())),
+        );
         out
     }
 
