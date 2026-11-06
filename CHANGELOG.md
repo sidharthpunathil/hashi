@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-06
+
 ### Changed
 
 - Usage is read for every enabled login and remote account, not only the ones a token or project already uses, so a new account shows what it has left right away.
