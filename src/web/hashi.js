@@ -47,10 +47,45 @@ function retryDelay(failures) {
   return Math.min(10000 * 2 ** Math.max(0, failures - 1), 60000);
 }
 
+const AGENT_NAMES = {
+  claude: "Claude Code",
+  codex: "Codex",
+  gemini: "Gemini CLI",
+  opencode: "opencode",
+  qwen: "Qwen Code",
+  cursor: "Cursor CLI",
+  crush: "Crush",
+};
+const agentName = (a) => AGENT_NAMES[a] || a;
+
+// "Claude Code, Codex and Gemini CLI", in the reader's language.
 function agentsText(agents) {
-  const names = { claude: "Claude Code", codex: "Codex" };
-  return (agents || []).map((a) => names[a] || a).join(" and ");
+  const names = (agents || []).map(agentName);
+  try {
+    return new Intl.ListFormat(undefined, { style: "long", type: "conjunction" }).format(names);
+  } catch {
+    return names.join(", ");
+  }
 }
+
+// Fills a list with one chip per agent, or says none is available.
+function renderAgents(list, agents) {
+  list.replaceChildren();
+  for (const a of agents || []) {
+    const li = document.createElement("li");
+    li.className = "chip";
+    li.textContent = agentName(a);
+    list.append(li);
+  }
+  if (!list.children.length) {
+    const li = document.createElement("li");
+    li.className = "muted";
+    li.textContent = "None installed right now";
+    list.append(li);
+  }
+}
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 function limitsText(l) {
   const parts = [];
@@ -62,9 +97,27 @@ function limitsText(l) {
   return parts.length ? parts.join(", ") : "No limits";
 }
 
+// "in 23 hours (Sat, Nov 7, 12:17 PM)" or "3 minutes ago (...)": the
+// relative part answers "how long", the date part "exactly when".
 function when(iso) {
-  return iso ? new Date(iso).toLocaleString() : "Never";
+  if (!iso) return "Never";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "Unknown";
+  const exact = at.toLocaleString(undefined, {
+    weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  try {
+    const secs = (at.getTime() - Date.now()) / 1000;
+    const units = [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]];
+    const [unit, size] = units.find(([, n]) => Math.abs(secs) >= n) || ["minute", 60];
+    const rel = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(Math.round(secs / size), unit);
+    return `${rel} (${exact})`;
+  } catch {
+    return exact;
+  }
 }
+
+const sentence = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
 
 async function copy(text, button) {
   try {
@@ -108,17 +161,25 @@ function showProject(name) {
 
 function claimPage() {
   const code = decodeURIComponent(location.pathname.split("/claim/")[1] || "");
-  const fail = (msg) => { show("loading", false); show("preview", false); $("error-text").textContent = msg; show("error"); };
+  const fail = (msg) => {
+    show("loading", false);
+    show("preview", false);
+    show("done", false);
+    $("title").textContent = "This link doesn't work";
+    show("server", false);
+    $("error-text").textContent = sentence(msg);
+    show("error");
+  };
 
   api("/v1/claim/preview", { method: "POST", body: { code } })
     .then((p) => {
       $("server").textContent = `to ${p.server}`;
       $("label").textContent = p.label;
-      $("agents").textContent = agentsText(p.agents);
+      renderAgents($("agents"), p.agents);
       showProject(p.project);
       $("session").textContent = p.sessionMode === "stateful" ? "Remembers your conversation" : "Each prompt starts fresh";
       $("limits").textContent = limitsText(p.limits);
-      $("lifetime").textContent = p.tokenExpiresInDays ? `${p.tokenExpiresInDays} day(s) after you claim it` : "Until the owner revokes it";
+      $("lifetime").textContent = p.tokenExpiresInDays ? `${plural(p.tokenExpiresInDays, "day")} after you claim it` : "Until the owner revokes it";
       $("link-expires").textContent = when(p.linkExpiresAt);
       $("notice").textContent = p.notice;
       show("share-usage", p.shareUsage === true);
@@ -155,8 +216,10 @@ function claimPage() {
       };
       document.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => select(b.dataset.tab)));
       select("curl");
+      $("title").textContent = "You're in";
       show("preview", false);
       show("done");
+      $("title").focus?.();
     } catch (e) {
       fail(e.message);
     }
@@ -169,7 +232,7 @@ function claimPage() {
 function askPage() {
   const KEY = "hashi.pickup";
   const code = decodeURIComponent(location.pathname.split("/ask-access/")[1] || "");
-  const fail = (msg) => { show("loading", false); show("ask", false); $("error-text").textContent = msg; show("error"); };
+  const fail = (msg) => { show("loading", false); show("ask", false); $("error-text").textContent = sentence(msg); show("error"); };
   const forget = () => { try { sessionStorage.removeItem(KEY); } catch { /* ignore */ } };
   let timer = null;
 
@@ -306,7 +369,7 @@ function askedText(r) {
   if (a.dailyBudgetUsd != null) parts.push(`$${a.dailyBudgetUsd} a day`);
   if (a.monthlyBudgetUsd != null) parts.push(`$${a.monthlyBudgetUsd} a month`);
   if ((r.agents || []).length) parts.push(`also ${agentsText(r.agents)}`);
-  if (a.expiresInDays != null) parts.push(`${a.expiresInDays} more day(s)`);
+  if (a.expiresInDays != null) parts.push(`${plural(a.expiresInDays, "more day", "more days")}`);
   return parts.length ? parts.join(", ") : "see message";
 }
 
@@ -373,7 +436,7 @@ function mePage() {
     $("name").textContent = m.name;
     $("status").textContent = m.status;
     $("status").className = `pill ${m.status}`;
-    $("agents").textContent = agentsText(m.agents);
+    renderAgents($("agents"), m.agents);
     showProject(m.project);
     $("session").textContent = m.sessionMode === "stateful" ? "Remembers your conversation" : "Each prompt starts fresh";
     $("expires").textContent = when(m.expiresAt);
@@ -408,7 +471,7 @@ function mePage() {
       }
       meters.append(wrap);
     }
-    $("resets").textContent = `Daily limits reset ${when(m.resets.day)}. Spend is the estimate the agent reports (Claude only).`;
+    $("resets").textContent = `Daily limits reset ${when(m.resets.day)}. Spend is the agent's own estimate; Claude Code, opencode and Crush report one.`;
     // Admin tokens change their own access, so they have nobody to ask.
     show("more", m.role !== "admin");
     // Shown only when the bridge owner shares how much quota is left.
@@ -416,7 +479,7 @@ function mePage() {
     const parts = shared.map(([agent, u]) => {
       const left = typeof u.headroom === "number" ? `${u.headroom}% left` : "unknown";
       const reset = u.nextReset ? `, resets ${when(u.nextReset)}` : "";
-      return `${agent}: ${left} (${u.state})${reset}`;
+      return `${agentName(agent)}: ${left} (${u.state})${reset}`;
     });
     $("headroom").textContent = parts.length ? `Quota left: ${parts.join("; ")}` : "";
     show("headroom", parts.length > 0);

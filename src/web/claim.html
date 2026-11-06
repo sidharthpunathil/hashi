@@ -16,7 +16,7 @@
         <path d="M14 26a18 18 0 0 1 36 0z" fill="url(#sun)"/>
         <path class="bridge" d="M4 36 12 30V18h4v10c5-3 11-4 16-4s11 1 16 4V18h4v12l8 6H44a4 4 0 0 0-8 0h-8a4 4 0 0 0-8 0z"/>
       </svg>
-      <div><h1>You're invited</h1><p class="muted" id="server">to a Hashi bridge</p></div>
+      <div><h1 id="title" tabindex="-1">You're invited</h1><p class="muted" id="server">to a Hashi bridge</p></div>
     </header>
 
     <section id="loading"><p class="muted">Checking your link…</p></section>
@@ -29,7 +29,7 @@
     <section id="preview" hidden>
       <p>This link gives <strong id="label"></strong> their own access to the coding agents on this machine.</p>
       <dl class="facts">
-        <dt>Agents</dt><dd id="agents"></dd>
+        <dt>Agents</dt><dd><ul class="chips" id="agents"></ul></dd>
         <dt id="project-label" hidden>Project</dt><dd id="project" hidden></dd>
         <dt>Conversation</dt><dd id="session"></dd>
         <dt>Limits</dt><dd id="limits"></dd>
@@ -38,28 +38,29 @@
       </dl>
       <p class="notice" id="notice"></p>
       <p class="muted small" id="share-usage" hidden>The bridge owner lets you see how much quota is left.</p>
-      <button id="claim" class="primary">Get my access</button>
+      <button id="claim" class="primary" type="button">Get my access</button>
       <p class="muted small">The link works once. Your token is shown a single time on the next screen.</p>
 
-      <section id="terminal" class="terminal" hidden>
-        <h2>Set up from a terminal</h2>
-        <p class="muted small">Installs Hashi from GitHub, then connects it with this link and saves your token for you.</p>
-        <p class="small">macOS and Linux</p>
-        <div class="snippet"><pre><code id="setup-sh"></code></pre><button data-copy="setup-sh">Copy</button></div>
-        <p class="small">Windows PowerShell</p>
-        <div class="snippet"><pre><code id="setup-ps"></code></pre><button data-copy="setup-ps">Copy</button></div>
-        <p class="muted small">The link works once, whichever way you use first: this page or the command.</p>
-      </section>
+      <details id="terminal" class="terminal" hidden>
+        <summary>Or set up from a terminal</summary>
+        <p class="muted small">Installs Hashi from GitHub, then connects it with this link and saves your token for you. The link works once, whichever way you use first.</p>
+        <p class="small label">macOS and Linux</p>
+        <div class="snippet command"><pre><code id="setup-sh"></code></pre><button type="button" data-copy="setup-sh">Copy</button></div>
+        <p class="small label">Windows PowerShell</p>
+        <div class="snippet command"><pre><code id="setup-ps"></code></pre><button type="button" data-copy="setup-ps">Copy</button></div>
+      </details>
     </section>
 
     <section id="done" hidden>
-      <p class="good">✓ You're in. Save this token now, it cannot be shown again.</p>
-      <div class="secret"><code id="token"></code><button data-copy="token">Copy</button></div>
+      <h2 class="step"><span aria-hidden="true">1</span> Save your token</h2>
+      <p class="muted small">It is shown only this once. Keep it like a password.</p>
+      <div class="secret"><code id="token"></code><button type="button" data-copy="token">Copy</button></div>
+      <h2 class="step"><span aria-hidden="true">2</span> Connect a tool</h2>
       <div class="install" id="install-links" hidden>
         <a class="button" id="cursor-link" href="#">Add to Cursor</a>
         <a class="button" id="vscode-link" href="#">Add to VS Code</a>
       </div>
-      <div class="tabs" role="tablist">
+      <div class="tabs" role="tablist" aria-label="Ways to use your token">
         <button role="tab" data-tab="curl" aria-selected="true">curl</button>
         <button role="tab" data-tab="python">Python</button>
         <button role="tab" data-tab="typescript">TypeScript</button>
@@ -67,7 +68,7 @@
         <button role="tab" data-tab="codexMcp">Codex MCP</button>
         <button role="tab" data-tab="mcpJson">MCP JSON</button>
       </div>
-      <div class="snippet"><pre><code id="snippet"></code></pre><button data-copy="snippet">Copy</button></div>
+      <div class="snippet"><pre><code id="snippet"></code></pre><button type="button" data-copy="snippet">Copy</button></div>
       <p class="muted small">Check your limits and usage any time at <a id="me-link" href="/me">My access</a>.</p>
     </section>
   </main>

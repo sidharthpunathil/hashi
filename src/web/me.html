@@ -30,16 +30,16 @@
     <section id="access" hidden>
       <p><strong id="name"></strong> <span class="pill" id="status"></span></p>
       <dl class="facts">
-        <dt>Agents</dt><dd id="agents"></dd>
+        <dt>Agents</dt><dd><ul class="chips" id="agents"></ul></dd>
         <dt id="project-label" hidden>Project</dt><dd id="project" hidden></dd>
         <dt>Conversation</dt><dd id="session"></dd>
         <dt>Expires</dt><dd id="expires"></dd>
-        <dt>In flight</dt><dd id="pending"></dd>
+        <dt>Running now</dt><dd id="pending"></dd>
       </dl>
       <div id="meters"></div>
       <p class="muted small" id="headroom" hidden></p>
       <p class="muted small" id="resets"></p>
-      <button id="forget">Forget token</button>
+      <button id="forget" type="button">Forget token</button>
 
       <section class="more" id="more" hidden>
         <h2>Ask for more</h2>
@@ -50,7 +50,7 @@
             <div><label for="more-monthly">Prompts a month</label><input id="more-monthly" type="number" min="0" step="1"></div>
             <div><label for="more-daily-budget">Budget a day (USD)</label><input id="more-daily-budget" type="number" min="0" step="0.01"></div>
             <div><label for="more-monthly-budget">Budget a month (USD)</label><input id="more-monthly-budget" type="number" min="0" step="0.01"></div>
-            <div><label for="more-agents">More agents</label><input id="more-agents" type="text" spellcheck="false" placeholder="codex, gemini"></div>
+            <div><label for="more-agents">More agents</label><span class="hint" id="more-agents-help">Comma separated</span><input id="more-agents" type="text" spellcheck="false" placeholder="codex, gemini" aria-describedby="more-agents-help"></div>
             <div><label for="more-expiry">Access for (days)</label><input id="more-expiry" type="number" min="1" max="3650" step="1"></div>
           </div>
           <label for="more-message">Anything else (optional)</label>

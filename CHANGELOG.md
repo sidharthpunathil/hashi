@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - Usage is read for every enabled login and remote account, not only the ones a token or project already uses, so a new account shows what it has left right away.
 - The dashboard Accounts popup reads the selected account's usage now with `u`, as `hashi account usage --refresh` does.
+- The claim, ask-access and My access pages were reworked from screenshots at phone and desktop sizes in light and dark mode:
+  - agents show as chips with their real names, and only the ones this machine can run;
+  - dates read "in 24 hours (Sat, Nov 7, 12:19 PM)";
+  - the terminal setup folds away under the main button;
+  - after claiming, the page says "You're in" and lists numbered steps;
+  - a broken link says "This link doesn't work";
+  - commands scroll on one line instead of breaking mid-word, and the page never gets wider than a phone screen;
+  - every control is at least 44px tall on touch screens.
 
 ## [0.3.0] - 2026-11-06
 

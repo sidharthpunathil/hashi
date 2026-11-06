@@ -343,6 +343,24 @@ async fn json_by_default(mut req: axum::extract::Request) -> axum::extract::Requ
     req
 }
 
+/// The agents in `agents` that this server can run right now (installed and,
+/// for Crush, enabled), in Hashi's usual order. The pages for the people you
+/// share with list these, so nobody is offered an agent that is not there.
+#[must_use]
+pub fn runnable_agents(state: &AppState, agents: &[AgentKind]) -> Vec<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .filter(|a| agents.contains(a))
+        .filter(|a| {
+            state
+                .runtime
+                .agents
+                .iter()
+                .any(|i| i.agent == *a && i.available)
+        })
+        .collect()
+}
+
 /// The rate-limit key of the client behind a request (see
 /// [`crate::net::client_key`]).
 #[derive(Debug, Clone)]

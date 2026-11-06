@@ -345,7 +345,7 @@ fn preview_code(state: &AppState, body: ClaimJson) -> ApiResult<Json<Value>> {
         InviteState::Pending(i) => Ok(Json(json!({
             "label": i.label,
             "server": state.runtime.name,
-            "agents": i.agents,
+            "agents": super::runnable_agents(state, &i.agents),
             "sessionMode": i.session_mode,
             "limits": i.limits,
             "tokenExpiresInDays": i.token_expires_in_days,

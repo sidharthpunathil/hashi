@@ -678,7 +678,7 @@ pub async fn me_json(state: &AppState, token: &Token) -> ApiResult<Value> {
         "role": token.role,
         "status": token.status(now),
         "sessionMode": token.session_mode,
-        "agents": super::usable_agents(&state.store, token),
+        "agents": super::runnable_agents(state, &super::usable_agents(&state.store, token)),
         // The project's name only: never its folder or accounts.
         "project": token.project,
         "expiresAt": token.expires_at.and_then(rfc3339),

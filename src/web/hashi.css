@@ -11,6 +11,7 @@
   --good: #34d3b4;
   --bad: #fb7185;
   --amber: #f5b83d;
+  --code-bg: color-mix(in srgb, #2a1463 35%, #17122a);
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {
@@ -24,6 +25,7 @@
     --good: #0f8a72;
     --bad: #c42a4a;
     --amber: #9a6200;
+    --code-bg: #f4f0fd;
     color-scheme: light;
   }
 }
@@ -93,7 +95,7 @@ button.primary:disabled { opacity: 0.6; cursor: progress; }
   margin: 0;
   padding: 12px 84px 12px 12px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--ink) 35%, var(--panel));
+  background: var(--code-bg);
   border: 1px solid var(--line);
   font: 0.86rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow-x: auto;
@@ -155,3 +157,70 @@ textarea { font: 0.95rem/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, s
 .pill.accepted, .pill.claimed { color: var(--good); }
 .pill.declined { color: var(--bad); }
 .wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ── 0.3.1 polish ─────────────────────────────────────────────────────── */
+h1:focus { outline: none; }
+.facts dd { min-width: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--violet) 10%, transparent);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+/* Commands read best on one line; scroll them sideways instead of breaking
+   words. The token stays wrapped, since it is copied, not read. */
+.snippet pre { white-space: pre; word-break: normal; padding-right: 12px; padding-top: 44px; }
+.snippet button { top: 6px; right: 6px; }
+.secret code { padding-right: 84px; }
+.step { display: flex; align-items: center; gap: 10px; margin: 20px 0 4px; font-size: 1.02rem; }
+.step span {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--violet), var(--purple));
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+#done > .step:first-child { margin-top: 0; }
+details.terminal > summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+details.terminal > summary::-webkit-details-marker { display: none; }
+details.terminal > summary::before { content: "▸"; color: var(--purple); transition: transform 120ms ease; }
+details.terminal[open] > summary::before { transform: rotate(90deg); }
+details.terminal .label { margin: 12px 0 0; font-weight: 600; }
+.hint { display: block; margin: -2px 0 6px; font-size: 0.8rem; color: var(--muted); }
+.tabs { gap: 8px; }
+button[aria-selected="true"] { background: color-mix(in srgb, var(--purple) 14%, transparent); }
+/* Touch screens: every control at least 44px tall. */
+@media (pointer: coarse) {
+  button, a.button, .tabs button { min-height: 44px; }
+  .snippet button, .secret button { min-height: 36px; min-width: 64px; }
+  input[type="checkbox"] { width: 22px; height: 22px; }
+}
+@media (max-width: 480px) {
+  body { padding: 12px; place-items: start center; }
+  .card { padding: 20px; border-radius: 14px; }
+  .facts { grid-template-columns: 1fr; gap: 2px; }
+  .facts dt { margin-top: 8px; font-size: 0.85rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  details.terminal > summary::before { transition: none; }
+}
+/* A grid item grows to its content by default; long one-line commands must
+   scroll inside their box instead of widening the page. */
+.card, .snippet, .secret, .facts dd, details.terminal { min-width: 0; max-width: 100%; }
+html, body { overflow-x: hidden; }
