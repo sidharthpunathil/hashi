@@ -17,8 +17,8 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{Path, State};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::sse::{Event as SseEvent, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -58,6 +58,7 @@ pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(models))
+        .route("/v1/models/{*model}", get(model))
 }
 
 // ── errors ─────────────────────────────────────────────────────────────────
@@ -84,8 +85,22 @@ fn error_type(status: StatusCode) -> &'static str {
     }
 }
 
+/// The request field an error is about, as OpenAI's `param`.
+fn error_param(code: &str) -> Option<&'static str> {
+    match code {
+        "model_not_found" => Some("model"),
+        "unsupported_content" | "unsupported_role" => Some("messages"),
+        _ => None,
+    }
+}
+
 fn error_object(status: StatusCode, code: &str, message: &str) -> Value {
-    json!({ "message": message, "type": error_type(status), "param": null, "code": code })
+    json!({
+        "message": message,
+        "type": error_type(status),
+        "param": error_param(code),
+        "code": code,
+    })
 }
 
 impl IntoResponse for OpenAiError {
@@ -111,10 +126,7 @@ impl IntoResponse for OpenAiError {
             obj.extend(extra.clone());
         }
         let mut res = (status, Json(json!({ "error": error }))).into_response();
-        if status == StatusCode::UNAUTHORIZED {
-            res.headers_mut()
-                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        }
+        super::error_headers(&mut res, &e);
         res
     }
 }
@@ -279,6 +291,9 @@ struct Meta {
     id: String,
     created: i64,
     model: String,
+    /// Whether the client asked for a usage chunk, in which case every
+    /// other chunk carries `"usage": null`, as OpenAI's do.
+    include_usage: bool,
 }
 
 impl Meta {
@@ -287,17 +302,43 @@ impl Meta {
             id: format!("chatcmpl-{}", req.id),
             created: req.created_at / 1000,
             model,
+            include_usage: false,
         }
     }
 
-    fn chunk(&self, delta: Value, finish: Option<&str>) -> Value {
-        json!({
+    /// A `chat.completion.chunk` with these `choices`.
+    fn chunk_with(&self, choices: Value) -> Value {
+        let mut v = json!({
             "id": self.id,
             "object": "chat.completion.chunk",
             "created": self.created,
             "model": self.model,
-            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
-        })
+            "system_fingerprint": null,
+            "choices": choices,
+        });
+        if let (true, Some(obj)) = (self.include_usage, v.as_object_mut()) {
+            obj.insert("usage".to_owned(), Value::Null);
+        }
+        v
+    }
+
+    fn chunk(&self, delta: Value, finish: Option<&str>) -> Value {
+        self.chunk_with(json!([{
+            "index": 0,
+            "delta": delta,
+            "logprobs": null,
+            "finish_reason": finish,
+        }]))
+    }
+
+    /// The last chunk before `[DONE]` when the client asked for usage: no
+    /// choices, and the run's usage (`null` when the agent reported none).
+    fn usage_chunk(&self, usage: Option<Usage>) -> Value {
+        let mut v = self.chunk_with(json!([]));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("usage".to_owned(), usage_json(usage).unwrap_or(Value::Null));
+        }
+        v
     }
 }
 
@@ -307,9 +348,15 @@ fn completion(meta: &Meta, req: &Request) -> Value {
         "object": "chat.completion",
         "created": meta.created,
         "model": meta.model,
+        "system_fingerprint": null,
         "choices": [{
             "index": 0,
-            "message": { "role": "assistant", "content": req.response.clone().unwrap_or_default() },
+            "message": {
+                "role": "assistant",
+                "content": req.response.clone().unwrap_or_default(),
+                "refusal": null,
+            },
+            "logprobs": null,
             "finish_reason": "stop",
         }],
     });
@@ -336,7 +383,7 @@ fn not_ready(req: &Request) -> Value {
         "status": req.status,
         "poll": format!("/v1/ask/{}", req.id),
         "message": format!(
-            "the answer is not ready yet; poll /v1/ask/{} or send \"stream\": true",
+            "the answer is not ready yet; read it with GET /v1/ask/{}?wait=30, or send \"stream\": true next time",
             req.id
         ),
     })
@@ -356,20 +403,46 @@ async fn models(
     auth: Result<Auth, ApiError>,
 ) -> OaResult<Json<Value>> {
     let Auth(token) = auth?;
-    let usable = crate::api::usable_agents(&state.store, &token);
-    let data: Vec<Value> = AgentKind::ALL
+    let data: Vec<Value> = super::offered_agents(&state, &token)?
         .into_iter()
-        .filter(|a| usable.contains(a))
-        .filter(|a| {
-            state
-                .runtime
-                .agents
-                .iter()
-                .any(|i| i.agent == *a && i.available)
-        })
-        .map(|a| json!({ "id": a.as_str(), "object": "model", "created": 0, "owned_by": "hashi" }))
+        .map(model_json)
         .collect();
     Ok(Json(json!({ "object": "list", "data": data })))
+}
+
+/// One agent as an OpenAI `model` object. Agents have no release date to
+/// give, so `created` is 0.
+fn model_json(agent: AgentKind) -> Value {
+    json!({ "id": agent.as_str(), "object": "model", "created": 0, "owned_by": "hashi" })
+}
+
+/// `GET /v1/models/{model}`: one model this token may use, as `/v1/models`
+/// lists it. `claude/opus` names the agent `claude` and answers with it.
+async fn model(
+    State(state): State<AppState>,
+    auth: Result<Auth, ApiError>,
+    Path(name): Path<String>,
+) -> OaResult<Json<Value>> {
+    let Auth(token) = auth?;
+    let agent = name
+        .split_once('/')
+        .map_or(name.as_str(), |(a, _)| a)
+        .parse::<AgentKind>()
+        .ok()
+        .filter(|a| {
+            super::offered_agents(&state, &token)
+                .map(|o| o.contains(a))
+                .unwrap_or(false)
+        });
+    match agent {
+        Some(a) => Ok(Json(model_json(a))),
+        None => Err(ApiError::coded(
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            format!("this token has no model `{name}`; GET /v1/models lists the ones it may use"),
+        )
+        .into()),
+    }
 }
 
 async fn chat_completions(
@@ -406,22 +479,25 @@ async fn chat_completions(
             return Err(ApiError::coded(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_waits",
-                format!("this token already holds {MAX_WAITS_PER_TOKEN} open waits or streams"),
+                format!(
+                    "this token already holds {MAX_WAITS_PER_TOKEN} open waits or streams; \
+                     let one finish, or send without \"stream\" and poll the request id"
+                ),
             )
             .into());
         };
         let req = submit(&state, &token, input).await?;
-        let include_usage = body
+        let mut meta = Meta::new(&req, shown_model);
+        meta.include_usage = body
             .stream_options
             .unwrap_or_default()
             .include_usage
             .unwrap_or(false);
-        let meta = Meta::new(&req, shown_model);
         let id = req.id.clone();
         let (tx, rx) = futures::channel::mpsc::channel::<SseEvent>(16);
         tokio::spawn(async move {
             let _slot = slot;
-            stream(&state, &id, &meta, include_usage, tx).await;
+            stream(&state, &id, &meta, tx).await;
         });
         let res = Sse::new(rx.map(Ok::<_, Infallible>)).into_response();
         return Ok(with_request_id(res, &req.id));
@@ -468,19 +544,23 @@ fn stream_cut(state: &AppState, req: &Request, past_deadline: bool) -> Option<Va
             StatusCode::GATEWAY_TIMEOUT,
             "stream_timeout",
             format!(
-                "the answer is not ready yet; poll /v1/ask/{} for it",
+                "the answer is not ready yet; read it later with GET /v1/ask/{}",
                 req.id
             ),
         ),
         Some(TokenStatus::Paused) => (
             StatusCode::FORBIDDEN,
             "token_paused",
-            "this token is paused by the owner".to_owned(),
+            format!(
+                "{}; request {} keeps its place in the queue",
+                super::TOKEN_PAUSED,
+                req.id
+            ),
         ),
         Some(TokenStatus::Expired) | None => (
             StatusCode::UNAUTHORIZED,
             "unauthorized",
-            "invalid or expired token".to_owned(),
+            super::INVALID_TOKEN.to_owned(),
         ),
     };
     Some(json!({ "error": error_object(status, code, &message) }))
@@ -495,7 +575,6 @@ async fn stream(
     state: &AppState,
     id: &str,
     meta: &Meta,
-    include_usage: bool,
     mut tx: futures::channel::mpsc::Sender<SseEvent>,
 ) {
     // Subscribe before the first read, so a finish in between is not missed.
@@ -568,15 +647,8 @@ async fn stream(
     );
     let finish = meta.chunk(json!({}), Some("stop"));
     let mut out = vec![data(&content), data(&finish)];
-    if include_usage {
-        out.push(data(&json!({
-            "id": meta.id,
-            "object": "chat.completion.chunk",
-            "created": meta.created,
-            "model": meta.model,
-            "choices": [],
-            "usage": usage_json(req.usage),
-        })));
+    if meta.include_usage {
+        out.push(data(&meta.usage_chunk(req.usage)));
     }
     out.push(SseEvent::default().data("[DONE]"));
     for ev in out {

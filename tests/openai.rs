@@ -700,3 +700,165 @@ async fn a_stream_ends_when_its_token_is_paused() {
     openai_error(&e, "permission_error", "token_paused");
     h.running.shutdown().await;
 }
+
+/// Asserts that `v` has every field the OpenAI spec marks required on a
+/// non-streaming `chat.completion`, with the types strict clients check.
+fn assert_strict_completion(v: &Value) {
+    assert_eq!(v["object"], "chat.completion", "{v}");
+    assert!(v["id"].is_string() && v["model"].is_string(), "{v}");
+    assert!(v["created"].is_i64(), "{v}");
+    assert!(v.get("system_fingerprint").is_some(), "{v}");
+    let choices = v["choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 1, "{v}");
+    let c = &choices[0];
+    assert_eq!(c["index"], 0, "{v}");
+    assert_eq!(c["finish_reason"], "stop", "{v}");
+    assert!(c.get("logprobs").is_some_and(Value::is_null), "{v}");
+    let m = &c["message"];
+    assert_eq!(m["role"], "assistant", "{v}");
+    assert!(m["content"].is_string(), "{v}");
+    assert!(m.get("refusal").is_some_and(Value::is_null), "{v}");
+    let u = &v["usage"];
+    for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+        assert!(u[key].is_u64(), "{key}: {v}");
+    }
+    assert_eq!(
+        u["total_tokens"].as_u64(),
+        Some(u["prompt_tokens"].as_u64().unwrap() + u["completion_tokens"].as_u64().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn responses_have_every_field_strict_clients_require() {
+    let h = harness().await;
+    let user = h.user_token(json!({})).await;
+    let (status, v) = h
+        .chat(
+            &user,
+            json!({ "model": "claude", "messages": user_says("hi") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_strict_completion(&v);
+
+    // With include_usage every chunk carries `usage`: null until the last,
+    // which has no choices and the counts. Every choice has its index,
+    // delta and finish_reason.
+    let (status, _, body) = h
+        .chat_stream(
+            &user,
+            json!({ "model": "claude", "messages": user_says("hi"), "stream": true,
+                    "stream_options": { "include_usage": true } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let chunks: Vec<Value> = sse_lines(&body)
+        .iter()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .map(|d| serde_json::from_str(d).unwrap())
+        .collect();
+    let (last, rest) = chunks.split_last().unwrap();
+    for c in rest {
+        assert_eq!(c["object"], "chat.completion.chunk", "{c}");
+        assert!(c["created"].is_i64(), "{c}");
+        assert!(c.get("usage").is_some_and(Value::is_null), "{c}");
+        let choice = &c["choices"][0];
+        assert_eq!(choice["index"], 0, "{c}");
+        assert!(choice["delta"].is_object(), "{c}");
+        assert!(choice.get("finish_reason").is_some(), "{c}");
+    }
+    assert_eq!(last["choices"], json!([]), "{last}");
+    assert_eq!(last["usage"]["prompt_tokens"], 5, "{last}");
+
+    // Without include_usage no chunk has a usage field.
+    let (_, _, body) = h
+        .chat_stream(
+            &user,
+            json!({ "model": "claude", "messages": user_says("hi"), "stream": true }),
+        )
+        .await;
+    assert!(!body.contains("\"usage\""), "{body}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn errors_name_the_param_and_caps_send_retry_after() {
+    let h = harness().await;
+    let user = h
+        .user_token(json!({ "limits": { "dailyRequests": 1 } }))
+        .await;
+    let (status, v) = h
+        .chat(
+            &user,
+            json!({ "model": "gpt-4o", "messages": user_says("hi") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        openai_error(&v, "invalid_request_error", "model_not_found")["param"],
+        "model"
+    );
+    let (_, v) = h
+        .chat(
+            &user,
+            json!({ "model": "claude", "messages": [{ "role": "tool", "content": "42" }] }),
+        )
+        .await;
+    assert_eq!(
+        openai_error(&v, "invalid_request_error", "unsupported_role")["param"],
+        "messages"
+    );
+
+    let (status, _) = h
+        .chat(
+            &user,
+            json!({ "model": "claude", "messages": user_says("one") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let res = h
+        .http
+        .post(format!("{}/v1/chat/completions", h.base))
+        .bearer_auth(&user)
+        .json(&json!({ "model": "claude", "messages": user_says("two") }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait: u64 = res.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=86_400).contains(&wait), "{wait}");
+    let v: Value = res.json().await.unwrap();
+    let e = openai_error(&v, "rate_limit_error", "limit_reached");
+    assert_eq!(e["retryAfter"], wait, "{v}");
+    assert!(e["param"].is_null(), "{v}");
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_single_model_can_be_retrieved() {
+    let h = harness().await;
+    let user = h.user_token(json!({ "agents": ["claude"] })).await;
+    let (status, v) = h.get("/v1/models/claude", Some(&user)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        json!({ "id": "claude", "object": "model", "created": 0, "owned_by": "hashi" })
+    );
+    let (status, v) = h.get("/v1/models/claude/opus", Some(&user)).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["id"], "claude");
+    for missing in ["codex", "gemini", "gpt-4o"] {
+        let (status, v) = h.get(&format!("/v1/models/{missing}"), Some(&user)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{missing}: {v}");
+        openai_error(&v, "not_found_error", "model_not_found");
+    }
+    let (status, v) = h.get("/v1/models/claude", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    openai_error(&v, "authentication_error", "unauthorized");
+    h.running.shutdown().await;
+}

@@ -2164,3 +2164,99 @@ async fn unauthenticated_form_posts_are_not_read_as_json() {
     assert!(text.contains("Content-Type"), "{status} {text}");
     h.running.shutdown().await;
 }
+
+/// The `Retry-After` header of a response, in seconds.
+fn retry_after(res: &reqwest::Response) -> u64 {
+    res.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn caps_and_rate_limits_say_when_to_retry() {
+    let h = harness_with(|c| c.rate_limit = 3).await;
+    let token = h.user_token(json!({"limits": {"dailyRequests": 1}})).await;
+    let (status, _) = h
+        .post("/v1/ask", &token, json!({"message": "hi", "wait": 10}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A daily cap: Retry-After is the seconds left until the next UTC day,
+    // and the body says the same as `retryAfter`.
+    let res = h
+        .http
+        .post(format!("{}/v1/ask", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"message": "again"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait = retry_after(&res);
+    let v: Value = res.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "limit_reached", "{v}");
+    assert_eq!(v["error"]["retryAfter"], wait, "{v}");
+    assert!((1..=86_400).contains(&wait), "{wait}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(message.contains("it resets at"), "{v}");
+
+    // The per-token rate limit: the third request this minute passes, the
+    // fourth waits for the window to start over.
+    assert_eq!(h.get("/v1/me", Some(&token)).await.0, StatusCode::OK);
+    let res = h
+        .http
+        .get(format!("{}/v1/me", h.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait = retry_after(&res);
+    assert!((1..=60).contains(&wait), "{wait}");
+    let v: Value = res.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "rate_limited", "{v}");
+    assert_eq!(v["error"]["retryAfter"], wait, "{v}");
+    let message = v["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("try again in {wait} second")),
+        "{v}"
+    );
+
+    // An error with no known wait sends no Retry-After.
+    let res = h
+        .http
+        .get(format!("{}/v1/ask/none", h.base))
+        .bearer_auth(&h.admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert!(res.headers().get("retry-after").is_none());
+    h.running.shutdown().await;
+}
+
+#[tokio::test]
+async fn root_points_at_the_docs_and_refusals_name_the_allowed_agents() {
+    let h = harness().await;
+    let (status, v) = h.get("/", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(v["docs"].as_str().unwrap().ends_with("/docs/api.md"), "{v}");
+    assert!(v["usage"].as_str().unwrap().contains("/mcp"), "{v}");
+
+    let token = h.user_token(json!({"agents": ["codex"]})).await;
+    let (status, v) = h
+        .post(
+            "/v1/ask",
+            &token,
+            json!({"message": "hi", "agent": "claude"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        v["error"]["message"],
+        "this token may not use claude; it may use codex"
+    );
+    h.running.shutdown().await;
+}

@@ -430,3 +430,117 @@ async fn my_usage_shares_headroom_only_with_share_usage() {
     assert!(me["agentUsage"].is_object(), "{me}");
     h.running.shutdown().await;
 }
+
+/// Every tool an LLM sees has a description, a title and an object input
+/// schema whose every property is described, and the bounds the server
+/// enforces are in the schema.
+#[tokio::test]
+async fn tool_schemas_describe_every_argument_and_its_bounds() {
+    let h = harness().await;
+    let token = h.user_token(json!({})).await;
+    let (_, v) = h.rpc(&token, "tools/list", json!({})).await;
+    let tools = v["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    // Only the agents this server can run: the harness installs two.
+    assert_eq!(
+        names,
+        [
+            "ask_claude",
+            "ask_codex",
+            "get_result",
+            "cancel",
+            "my_usage",
+            "request_more"
+        ]
+    );
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        assert!(t["title"].is_string(), "{name}");
+        assert!(t["description"].as_str().unwrap().len() > 40, "{name}");
+        assert!(t["annotations"]["readOnlyHint"].is_boolean(), "{name}");
+        let schema = &t["inputSchema"];
+        assert_eq!(schema["type"], "object", "{name}");
+        assert_eq!(schema["additionalProperties"], false, "{name}");
+        for (prop, s) in schema["properties"].as_object().unwrap() {
+            assert!(
+                s["description"].as_str().is_some_and(|d| !d.is_empty()),
+                "{name}.{prop} has no description"
+            );
+            assert!(s["type"].is_string(), "{name}.{prop} has no type");
+        }
+    }
+    let ask = &tools[0];
+    let description = ask["description"].as_str().unwrap();
+    assert!(description.contains("up to 10 seconds"), "{description}");
+    assert!(description.contains("get_result"), "{description}");
+    let prompt = &ask["inputSchema"]["properties"]["prompt"];
+    assert_eq!(prompt["maxLength"], 32 * 1024);
+    assert_eq!(prompt["minLength"], 1);
+    let model = &ask["inputSchema"]["properties"]["model"];
+    assert_eq!(model["maxLength"], 128);
+    assert!(model["pattern"].is_string());
+    let get_result = &tools[2];
+    assert!(
+        get_result["description"]
+            .as_str()
+            .unwrap()
+            .contains("30 seconds")
+    );
+    assert_eq!(get_result["annotations"]["readOnlyHint"], true);
+    assert_eq!(tools[3]["annotations"]["destructiveHint"], true);
+    let agents = &tools[5]["inputSchema"]["properties"]["agents"]["items"]["enum"];
+    assert!(
+        agents.as_array().unwrap().contains(&json!("gemini")),
+        "{agents}"
+    );
+
+    let (_, v) = h.rpc(&token, "initialize", json!({})).await;
+    let instructions = v["result"]["instructions"].as_str().unwrap();
+    for needle in [
+        "up to 10 seconds",
+        "get_result",
+        "cancel",
+        "Do not send the prompt again",
+        "cannot see your files",
+        "my_usage",
+        "request_more",
+    ] {
+        assert!(instructions.contains(needle), "{needle}: {instructions}");
+    }
+    h.running.shutdown().await;
+}
+
+/// A refused call tells the model what happened, what to do next and the
+/// error code; a failed run names its request.
+#[tokio::test]
+async fn tool_errors_say_what_to_do_next() {
+    let h = harness().await;
+    let token = h.user_token(json!({"limits": {"dailyRequests": 1}})).await;
+    let r = h
+        .tool(&token, "ask_claude", json!({"prompt": "fail now"}))
+        .await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).starts_with("Request "), "{r}");
+    assert!(text(&r).contains("failed: "), "{r}");
+
+    let r = h
+        .tool(&token, "ask_claude", json!({"prompt": "again"}))
+        .await;
+    assert_eq!(r["isError"], true, "{r}");
+    let t = text(&r);
+    assert!(t.contains("daily limit of 1 prompt reached"), "{t}");
+    assert!(t.contains("it resets at "), "{t}");
+    assert!(t.contains("request_more"), "{t}");
+    assert!(t.ends_with("(error code: limit_reached)"), "{t}");
+
+    let r = h
+        .tool(
+            &token,
+            "get_result",
+            json!({"id": "00000000-0000-0000-0000-000000000000"}),
+        )
+        .await;
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).ends_with("(error code: not_found)"), "{r}");
+    h.running.shutdown().await;
+}
