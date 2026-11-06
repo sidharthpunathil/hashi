@@ -1480,7 +1480,7 @@ fn a_key_account_is_added_with_its_key_masked_and_never_rendered() {
     let secret = "sk-ant-api03-VerySecretValue-1234567890";
     select_action(&mut app, Action::Accounts);
     app.on_key(key(KeyCode::Enter));
-    assert!(draw(&mut app, 140, 44).contains("press u to read them now"));
+    assert!(draw(&mut app, 140, 44).contains("No accounts yet"));
     app.on_key(key(KeyCode::Char('a')));
     typed(&mut app, "work");
     // Kind: api-key.

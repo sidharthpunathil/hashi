@@ -89,26 +89,34 @@ pub fn scrub(buf: &mut ratatui::buffer::Buffer) {
 
 // ── chrome ─────────────────────────────────────────────────────────────────
 
+/// Columns the brand text beside the logo needs to stay whole.
+const BRAND_W: u16 = 36;
+
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
-    let [logo, _, brand, status] = Layout::horizontal([
-        Constraint::Length(u16::try_from(t::LOGO_W).unwrap_or(30) + 2),
-        Constraint::Length(2),
+    let logo_w = u16::try_from(t::LOGO_W).unwrap_or(30) + 2;
+    // The logo goes first when the brand and status would collide.
+    let show_logo = area.width >= 2 + logo_w + 2 + BRAND_W + 2 + 52;
+    let [logo, _, brand, _, status] = Layout::horizontal([
+        Constraint::Length(if show_logo { logo_w } else { 0 }),
+        Constraint::Length(if show_logo { 2 } else { 0 }),
         Constraint::Fill(1),
+        Constraint::Length(2),
         Constraint::Length(52),
     ])
     .areas(area.inner(Margin::new(1, 0)));
 
-    frame.render_widget(Paragraph::new(t::logo()), logo);
-
-    // Sparkle twinkles above the right pillar, like the logo.
-    let (glyph, color) = t::sparkle(app.tick);
-    let spark = Rect {
-        x: logo.x + 25,
-        y: logo.y + 1,
-        width: 1,
-        height: 1,
-    };
-    frame.render_widget(Paragraph::new(Span::styled(glyph, t::bold(color))), spark);
+    if show_logo {
+        frame.render_widget(Paragraph::new(t::logo()), logo);
+        // Sparkle twinkles above the right pillar, like the logo.
+        let (glyph, color) = t::sparkle(app.tick);
+        let spark = Rect {
+            x: logo.x + 25,
+            y: logo.y + 1,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(Span::styled(glyph, t::bold(color))), spark);
+    }
 
     let mut lines = vec![Line::raw("")];
     for row in t::WORDMARK {
@@ -218,6 +226,12 @@ fn status_lines(app: &App) -> Vec<Line<'static>> {
             agents.push(Span::styled(format!("{} ", info.agent), plain()));
         }
         agents.push(Span::styled(format!("{mark}   "), style));
+    }
+    if agents.len() == 1 {
+        agents.push(Span::styled(
+            "✗ none found: see Doctor in 5 Commands",
+            t::fg(t::ROSE),
+        ));
     }
     vec![
         Line::raw(""),
@@ -342,8 +356,8 @@ pub fn footer_keys(app: &App) -> &'static [(&'static str, &'static str)] {
             ("?", "help"),
             ("q", "quit"),
         ],
+        // No arrow hint: it would push revoke out of 80 columns.
         Tab::Tokens if !app.invites.is_empty() => &[
-            ("↑↓", "select"),
             ("n", "new"),
             ("e", "edit"),
             ("s", "share"),
@@ -376,10 +390,60 @@ pub fn footer_keys(app: &App) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+/// Columns one hint takes: the key chip, its label and a space after it.
+fn hint_width(k: &str, label: &str) -> usize {
+    Span::raw(k).width() + 2 + Span::raw(label).width() + 2
+}
+
+/// The hints that fit in `width` columns after a one-column margin, in
+/// order. Hints are dropped whole from the end of the list, never cut, and
+/// `?` and `q` stay last so help and quit are always on screen.
+#[must_use]
+pub fn fit_hints<'a>(keys: &[(&'a str, &'a str)], width: usize) -> Vec<(&'a str, &'a str)> {
+    let pinned = |k: &str| matches!(k, "?" | "q");
+    let tail: Vec<_> = keys.iter().copied().filter(|(k, _)| pinned(k)).collect();
+    let mut used: usize = 1 + tail.iter().map(|(k, l)| hint_width(k, l)).sum::<usize>();
+    if used > width {
+        // Too narrow even for help and quit: what fits from the start.
+        let mut used = 1;
+        return keys
+            .iter()
+            .copied()
+            .take_while(|(k, l)| {
+                used += hint_width(k, l);
+                used <= width
+            })
+            .collect();
+    }
+    let mut out = Vec::new();
+    for (k, l) in keys.iter().copied().filter(|(k, _)| !pinned(k)) {
+        used += hint_width(k, l);
+        if used > width {
+            break;
+        }
+        out.push((k, l));
+    }
+    out.extend(tail);
+    out
+}
+
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let keys = footer_keys(app);
+    // A toast takes the right of the footer only while it shows.
+    let toast = app.toast.as_ref().map(|(msg, _)| {
+        Line::from(vec![
+            Span::styled("✦ ", t::fg(t::SPARK)),
+            Span::styled(msg.clone(), t::fg(t::PINK)),
+        ])
+    });
+    let toast_w = toast.as_ref().map_or(0, |l| {
+        u16::try_from(l.width() + 2)
+            .unwrap_or(u16::MAX)
+            .min(area.width / 2)
+    });
+    let [left, right] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(toast_w)]).areas(area);
     let mut spans = vec![Span::raw(" ")];
-    for (k, label) in keys {
+    for (k, label) in fit_hints(footer_keys(app), usize::from(left.width)) {
         spans.push(Span::styled(
             format!(" {k} "),
             Style::new()
@@ -387,16 +451,10 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
                 .bg(SELECT.into())
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!(" {label}  "), t::muted()));
+        spans.push(Span::styled(format!(" {label} "), t::muted()));
     }
-    let [left, right] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(48)]).areas(area);
     frame.render_widget(Paragraph::new(Line::from(spans)), left);
-    if let Some((msg, _)) = &app.toast {
-        let line = Line::from(vec![
-            Span::styled("✦ ", t::fg(t::SPARK)),
-            Span::styled(msg.clone(), t::fg(t::PINK)),
-        ]);
+    if let Some(line) = toast {
         frame.render_widget(
             Paragraph::new(line).alignment(Alignment::Right),
             right.inner(Margin::new(1, 0)),
@@ -590,8 +648,16 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
         ]))
         .padding(Padding::horizontal(1));
     if let Some(v) = info.and_then(|i| i.version.clone()) {
+        // "2.1.318 (Claude Code)" under a title that already says Claude Code.
+        let shown = v
+            .strip_suffix(&format!(" ({})", agent.display_name()))
+            .unwrap_or(&v);
         block = block.title(
-            Line::from(Span::styled(format!(" {} ", truncate(&v, 28)), t::muted())).right_aligned(),
+            Line::from(Span::styled(
+                format!(" {} ", truncate(shown, 28)),
+                t::muted(),
+            ))
+            .right_aligned(),
         );
         if crate::verified::newer_than_verified(agent, &v).is_some() {
             block = block.title_bottom(
@@ -599,10 +665,15 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
             );
         }
     }
+    let lat = app.latencies(agent, 60);
+    if !lat.is_empty() {
+        // Says what the bars below are.
+        block = block.title_bottom(Line::from(Span::styled(" run times ", t::muted())));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [state, counts, timing, _, spark] = Layout::vertical([
+    let [state, counts, timing, usage, spark] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -615,7 +686,7 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
         Line::from(vec![
             Span::styled("○ ", t::fg(t::ROSE)),
             Span::styled(
-                format!("not installed: put `{}` on PATH", agent.binary_name()),
+                format!("not installed (`{}` missing)", agent.binary_name()),
                 t::muted(),
             ),
         ])
@@ -669,22 +740,35 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
         ),
         Span::styled(" queued", t::muted()),
     ]);
-    let mut counts_line = counts_line;
+    frame.render_widget(Paragraph::new(counts_line), counts);
+    // Accounts and headroom on their own line, so neither is cut off.
+    let mut usage_line = Line::default();
     if let Some(n) = app.accounts.get(&agent).copied().filter(|n| *n > 0) {
-        counts_line.spans.extend([
-            Span::styled("   ", t::muted()),
+        usage_line.spans.extend([
             Span::styled((n + 1).to_string(), strong()),
             Span::styled(" accounts", t::muted()),
         ]);
     }
-    counts_line.spans.extend(super::usage::headroom_spans(
-        &app.usage_snapshot(),
-        agent,
-        app.rotate_at(),
-    ));
-    frame.render_widget(Paragraph::new(counts_line), counts);
+    let headroom = super::usage::headroom_spans(&app.usage_snapshot(), agent, app.rotate_at());
+    if !headroom.is_empty() {
+        // The figure is the account with the most room, so say so.
+        let gap = if usage_line.spans.is_empty() {
+            ""
+        } else {
+            "   "
+        };
+        usage_line
+            .spans
+            .push(Span::styled(format!("{gap}best "), t::muted()));
+        // headroom_spans leads with a gap meant to follow other text.
+        usage_line.spans.extend(
+            headroom
+                .into_iter()
+                .skip_while(|s| s.content.trim().is_empty()),
+        );
+    }
+    frame.render_widget(Paragraph::new(usage_line), usage);
 
-    let lat = app.latencies(agent, 60);
     let timing_line = match (lat.last(), lat.is_empty()) {
         (Some(last), false) => {
             let avg = lat.iter().sum::<u64>() / lat.len() as u64;
@@ -768,8 +852,31 @@ fn render_activity(app: &App, frame: &mut Frame, area: Rect) {
 
 fn quickstart(app: &App) -> Vec<Line<'static>> {
     let url = app.state.runtime.base_url();
+    // Nothing can answer yet: say so first, and what to do about it.
+    if !app.state.runtime.agents.iter().any(|a| a.available) {
+        return vec![
+            Line::from(vec![
+                Span::styled("✗ ", t::bold(t::ROSE)),
+                Span::styled("No coding agent found on PATH.", strong()),
+            ]),
+            Line::from(Span::styled(
+                "Install Claude Code (claude) or Codex (codex), then restart hashi.",
+                plain(),
+            )),
+            Line::from(vec![
+                Span::styled("Doctor", t::bold(t::PINK)),
+                Span::styled(", in ", t::muted()),
+                Span::styled("5 Commands", t::bold(t::PINK)),
+                Span::styled(", shows what is missing.", t::muted()),
+            ]),
+        ];
+    }
     vec![
-        Line::from(Span::styled("Waiting for the first prompt. Try:", plain())),
+        Line::from(vec![
+            Span::styled("Waiting for the first prompt. Press ", plain()),
+            Span::styled("a", t::bold(t::PINK)),
+            Span::styled(" to ask from here, or try:", plain()),
+        ]),
         Line::raw(""),
         Line::from(vec![
             Span::styled("$ ", t::fg(t::DUSK)),
@@ -884,11 +991,12 @@ fn render_requests(app: &mut App, frame: &mut Frame, area: Rect) {
         let hint = Paragraph::new(vec![
             Line::from(Span::styled("No requests yet", strong())).centered(),
             Line::from(Span::styled(
-                "Send one with POST /v1/ask. Press 1 for a curl example.",
+                "Press a to ask an agent, or 1 for a curl example.",
                 t::muted(),
             ))
             .centered(),
-        ]);
+        ])
+        .wrap(Wrap { trim: true });
         frame.render_widget(hint, list.inner(Margin::new(2, 3)));
     }
 
@@ -987,9 +1095,10 @@ fn render_detail(app: &mut App, frame: &mut Frame, area: Rect) {
     };
     let Some(r) = full else {
         let hint = Paragraph::new(Span::styled(
-            "Select a request to see its prompt and answer.",
+            "Select a request with ↑↓ to see its prompt and answer.",
             t::muted(),
-        ));
+        ))
+        .wrap(Wrap { trim: true });
         frame.render_widget(hint.block(panel("detail", t::PINK)), area);
         return;
     };
@@ -1140,7 +1249,8 @@ fn detail_body(r: &Request) -> Vec<Line<'static>> {
     let rule = |label: &str| {
         Line::from(vec![
             Span::styled(format!("── {label} "), t::fg(t::ORCHID)),
-            Span::styled("─".repeat(40), t::fg(t::DUSK)),
+            // Short, so it never wraps in a narrow detail panel.
+            Span::styled("─".repeat(16), t::fg(t::DUSK)),
         ])
     };
     let mut lines = vec![Line::raw(""), rule("prompt")];
@@ -1302,21 +1412,33 @@ fn render_invites(app: &mut App, frame: &mut Frame, area: Rect) {
 fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
     let now = crate::util::now_ms();
     let focused = app.tokens_focus == TokensFocus::Tokens;
-    let header = Row::new(
-        [
-            "name",
-            "status",
-            "today",
-            "prefix",
-            "role",
-            "session",
-            "agents",
-            "created",
-            "last used",
-            "expires",
-        ]
-        .map(|h| Cell::from(h).style(t::bold(t::MIST))),
+    const WIDTHS: [u16; 10] = [0, 9, 9, 16, 7, 9, 6, 9, 10, 9];
+    // On a narrow terminal the least needed columns go, so the name stays:
+    // prefix, created, session, expires, last used, then role.
+    let keep = fit_columns(
+        &WIDTHS,
+        12,
+        2,
+        &[3, 7, 5, 9, 8, 4],
+        area.width.saturating_sub(5),
     );
+    let header = Row::new(keep.iter().map(|&i| {
+        Cell::from(
+            [
+                "name",
+                "status",
+                "req today",
+                "prefix",
+                "role",
+                "session",
+                "agents",
+                "created",
+                "last used",
+                "expires",
+            ][i],
+        )
+        .style(t::bold(t::MIST))
+    }));
     // Build only the rows that fit, and read only their use.
     let visible = usize::from(area.height.saturating_sub(4)).max(1);
     let selected = app.tokens_table.selected();
@@ -1365,7 +1487,7 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
                     }
                 },
             );
-            Row::new(vec![
+            let cells = [
                 Cell::from(Span::styled(one_line(&tk.name), strong())),
                 Cell::from(token_status_span(tk, now)),
                 Cell::from(today_span(app, tk)),
@@ -1386,23 +1508,22 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
                     t::muted(),
                 )),
                 Cell::from(Span::styled(expires, t::muted())),
-            ])
+            ];
+            Row::new(
+                cells
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| keep.contains(i))
+                    .map(|(_, c)| c),
+            )
         })
         .collect();
     let table = Table::new(
         rows,
-        [
-            Constraint::Fill(1),
-            Constraint::Length(9),
-            Constraint::Length(7),
-            Constraint::Length(16),
-            Constraint::Length(7),
-            Constraint::Length(9),
-            Constraint::Length(6),
-            Constraint::Length(9),
-            Constraint::Length(10),
-            Constraint::Length(9),
-        ],
+        keep.iter().map(|&i| match WIDTHS[i] {
+            0 => Constraint::Fill(1),
+            w => Constraint::Length(w),
+        }),
     )
     .header(header.bottom_margin(1))
     .column_spacing(2)
@@ -1415,17 +1536,21 @@ fn render_token_table(app: &mut App, frame: &mut Frame, area: Rect) {
         if focused { "▌" } else { " " },
         t::fg(t::PINK),
     ))
-    .block(
-        focus_panel("tokens", focused && !app.invites.is_empty())
-            .title_bottom(
+    .block({
+        let mut block = focus_panel("tokens", focused && !app.invites.is_empty())
+            .title_bottom(selected_accounts_line(app));
+        // The note only where it cannot crowd the selection's line.
+        if area.width >= 110 {
+            block = block.title_bottom(
                 Line::from(Span::styled(
                     " secrets are stored as SHA-256 hashes only ",
                     t::muted(),
                 ))
                 .right_aligned(),
-            )
-            .title_bottom(selected_accounts_line(app)),
-    );
+            );
+        }
+        block
+    });
     frame.render_stateful_widget(table, area, &mut window);
 }
 
@@ -1459,7 +1584,7 @@ fn render_logs(app: &App, frame: &mut Frame, area: Rect) {
     let [inner, hint] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "Something wrong? Commands, Diagnostic report (or `hashi report`) writes a file for an issue.",
+            "Something wrong? Run Diagnostic report in 5 Commands, or hashi report.",
             t::muted(),
         )),
         hint,
@@ -1650,8 +1775,18 @@ fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
     let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(5)]).areas(area);
     let block = panel("commands", t::VIOLET);
     let inner_w = usize::from(block.inner(list).width);
-    let state_w = (inner_w / 4).clamp(14, 40);
-    let cli_w = (inner_w / 4).clamp(14, 40);
+    // Below 100 columns the terminal command shows only in the panel under
+    // the list, so the titles and states stay whole.
+    let show_cli = inner_w >= 100;
+    let state_w = (inner_w / if show_cli { 4 } else { 3 }).clamp(14, 40);
+    let cli_w = if show_cli {
+        (inner_w / 4).clamp(14, 40)
+    } else {
+        0
+    };
+    // Columns left for the title and its description: the group, key,
+    // state and cli columns, their spacing and the selection mark.
+    let what_w = inner_w.saturating_sub(11 + 7 + state_w + cli_w + 4 + 2);
     let mut rows = Vec::new();
     let mut group = "";
     for action in Action::ALL {
@@ -1663,34 +1798,45 @@ fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
             group
         };
         let (state, color) = action_state(app, action);
-        rows.push(Row::new(vec![
+        // A row's own key stands out; enter, shared by most, stays quiet.
+        let key_style = if action.key() == "enter" {
+            t::muted()
+        } else {
+            t::bold(t::PINK)
+        };
+        let mut what = vec![Span::styled(action.title(), plain())];
+        // The description only when it fits whole; the panel below has it.
+        let desc = action.description();
+        if action.title().chars().count() + 2 + desc.chars().count() <= what_w {
+            what.push(Span::styled(format!("  {desc}"), t::muted()));
+        }
+        let mut cells = vec![
             Cell::from(Span::styled(heading, t::bold(t::ORCHID))),
-            Cell::from(Span::styled(
-                format!(" {} ", action.key()),
-                t::bold(t::PINK),
-            )),
-            Cell::from(Line::from(vec![
-                Span::styled(action.title(), plain()),
-                Span::styled(format!("  {}", action.description()), t::muted()),
-            ])),
+            Cell::from(Span::styled(format!(" {} ", action.key()), key_style)),
+            Cell::from(Line::from(what)),
             Cell::from(Span::styled(truncate(&state, state_w), t::fg(color))),
-            Cell::from(Span::styled(
+        ];
+        if show_cli {
+            cells.push(Cell::from(Span::styled(
                 truncate(&action_cli(app, action), cli_w),
                 t::fg(t::ORCHID),
-            )),
-        ]));
+            )));
+        }
+        rows.push(Row::new(cells));
     }
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(11),
         Constraint::Length(7),
         Constraint::Fill(1),
         Constraint::Length(u16::try_from(state_w).unwrap_or(30)),
-        Constraint::Length(u16::try_from(cli_w).unwrap_or(30)),
     ];
+    let mut header = vec!["", "key", "what", "state"];
+    if show_cli {
+        widths.push(Constraint::Length(u16::try_from(cli_w).unwrap_or(30)));
+        header.push("same from a terminal");
+    }
     let table = Table::new(rows, widths)
-        .header(
-            Row::new(vec!["", "key", "what", "state", "same from a terminal"]).style(t::muted()),
-        )
+        .header(Row::new(header).style(t::muted()))
         .row_highlight_style(Style::new().bg(SELECT.into()).add_modifier(Modifier::BOLD))
         .highlight_symbol("› ")
         .highlight_spacing(HighlightSpacing::Always)
@@ -1779,34 +1925,88 @@ pub(super) fn key_hint(keys: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// [`key_hint`] broken over as many lines as `width` columns need, between
+/// hints and never inside one.
+pub(super) fn key_hints(keys: &[(&str, &str)], width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut row: Vec<(&str, &str)> = Vec::new();
+    let mut used = 0;
+    for &(k, label) in keys {
+        // As key_hint draws it: " k " then " label   ".
+        let w = Span::raw(k).width() + Span::raw(label).width() + 6;
+        if !row.is_empty() && used + w - 2 > width {
+            out.push(key_hint(&row));
+            row.clear();
+            used = 0;
+        }
+        row.push((k, label));
+        used += w;
+    }
+    if !row.is_empty() {
+        out.push(key_hint(&row));
+    }
+    out
+}
+
+/// Columns of text inside a [`modal`] asked to be `width` wide on `area`.
+pub(super) fn modal_text_width(area: Rect, width: u16) -> usize {
+    usize::from(width.min(area.width.saturating_sub(4)).saturating_sub(6))
+}
+
+/// The columns of a table that fit in `width`, as indices in order.
+/// `widths` are the columns' widths, 0 for the one that fills (it needs
+/// `fill_min`); `drop` lists the columns that may go, first to go first.
+pub(super) fn fit_columns(
+    widths: &[u16],
+    fill_min: u16,
+    spacing: u16,
+    drop: &[usize],
+    width: u16,
+) -> Vec<usize> {
+    let mut keep: Vec<bool> = vec![true; widths.len()];
+    let need = |keep: &[bool]| -> u32 {
+        let n = keep.iter().filter(|k| **k).count();
+        let cols: u32 = widths
+            .iter()
+            .zip(keep)
+            .filter(|(_, k)| **k)
+            .map(|(w, _)| u32::from(if *w == 0 { fill_min } else { *w }))
+            .sum();
+        cols + u32::from(spacing) * u32::try_from(n.saturating_sub(1)).unwrap_or(0)
+    };
+    for &i in drop {
+        if need(&keep) <= u32::from(width) {
+            break;
+        }
+        if let Some(k) = keep.get_mut(i) {
+            *k = false;
+        }
+    }
+    (0..widths.len()).filter(|i| keep[*i]).collect()
+}
+
 fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
     let area = frame.area();
     match popup {
         Popup::Help => {
-            let rows: [(&str, &str); 23] = [
-                ("1 2 3 4 5", "jump to a view (5: Commands)"),
-                ("tab / ←→", "next / previous view"),
+            // Sixteen rows, so the whole list fits a 24-row terminal.
+            let rows: [(&str, &str); 16] = [
+                ("1-5 tab ←→", "switch view; 5 is Commands"),
                 ("↑↓ / j k", "move selection"),
                 ("PgUp PgDn", "scroll request detail"),
+                ("enter", "run the selected command (Commands)"),
+                ("", "more there: accounts, projects, doctor"),
                 ("c", "copy the API base URL"),
-                ("t", "go public: start a Cloudflare quick tunnel"),
+                ("t", "go public with a Cloudflare quick tunnel"),
                 ("a", "ask an agent here or on a bridge you use"),
-                ("enter", "run the selected command (Commands view)"),
-                ("", "Commands also has access requests, accounts,"),
-                ("", "projects, bridges, the port, doctor and more"),
-                ("n", "new token (Tokens and Commands views)"),
-                ("e", "edit token: name, note, expiry, limits (Tokens)"),
-                ("d", "revoke token (Tokens view)"),
-                ("p", "pause or resume token (Tokens view)"),
-                ("s", "share: create an invite link (Tokens, Commands)"),
-                ("i", "switch between tokens and invites"),
+                ("n / s", "new token / share an invite link"),
+                ("e", "edit token: name, note, expiry, limits"),
+                ("p / d", "pause or resume / revoke the token"),
                 ("x", "cancel invite (Tokens) or request (Requests)"),
-                ("r", "refresh now"),
-                ("?", "this help"),
-                ("q", "quit (asks first if work is running)"),
-                ("esc", "close a popup"),
+                ("i", "switch between tokens and invites"),
+                ("r / esc", "refresh now / close a popup"),
                 ("ctrl-s", "send, in the ask popup"),
-                ("ctrl-c", "quit immediately"),
+                ("q / ctrl-c", "quit (q asks first if work is running)"),
             ];
             let mut lines: Vec<Line> = rows
                 .iter()
@@ -1817,7 +2017,9 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                     ])
                 })
                 .collect();
-            let height = u16::try_from(rows.len()).unwrap_or(16) + 7;
+            // The rows, a blank line and the close hint, inside the border
+            // and the top padding.
+            let height = u16::try_from(rows.len()).unwrap_or(16) + 5;
             let rect = centered(area, 62, height);
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
@@ -2336,7 +2538,7 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
 
 fn render_token_form(frame: &mut Frame, area: Rect, form: &TokenForm, tick: u64) {
     const W: usize = 10;
-    let rect = centered(area, 60, 17);
+    let rect = centered(area, 66, 17);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(f(0), "name", W, form_text(&form.name, f(0), "my-app", tick)),

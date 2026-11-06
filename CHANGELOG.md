@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard was reviewed frame by frame at 80x24, 120x40 and 200x60 on a realistic store, and reworked where it broke:
+  - footers drop whole hints from the end instead of cutting the line, always keep `?` help and `q` quit, and give room to a toast only while it shows;
+  - the Tokens table and the Accounts popup drop their least needed columns on a narrow terminal, so the name stays (it used to vanish at 80 columns); the count column reads "req today";
+  - the header leaves out the logo below 126 columns, so the tagline no longer runs into the server status, and says when no agent is found;
+  - the Commands view shows whole titles at 80 columns, with the terminal command in the panel below, and keeps the key of a row that has one visible against the many `enter` rows;
+  - the key list fits a 24-row terminal, and long key hints in popups wrap between hints;
+  - on a first run with no coding agent, Overview says to install Claude Code or Codex and points at Doctor; with an agent, it points at `a` to ask;
+  - empty lists say what to press next, and the Accounts popup no longer asks to read usage when there are no accounts;
+  - agent cards drop the duplicated name from the version, put accounts and the best headroom on their own line and label the run-time bars;
+  - Doctor wraps details under themselves and, on a short terminal, keeps its keys on screen with a note of what was cut;
+  - the accept and decline popups use the same frame and key chips as every other popup.
+- The dashboard benchmark (`tests/tui_bench.rs`) fills the store with 100 tokens, the most it allows; it failed at 200.
+
 ## [0.3.1] - 2026-11-06
 
 ### Changed

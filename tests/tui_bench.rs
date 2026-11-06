@@ -7,10 +7,11 @@
 //! cargo test --release --test tui_bench -- --ignored --nocapture
 //! ```
 //!
-//! The store holds 200 tokens, 20,000 requests with large prompts and
-//! responses, 30 accounts with usage figures and 10 projects. It prints the
-//! frame time for each view and popup, the cost of `refresh()`, of applying
-//! a burst of 10,000 bus events, and of an idle tick.
+//! The store holds 100 tokens (the most it allows), 20,000 requests with
+//! large prompts and responses, 30 accounts with usage figures and 10
+//! projects. It prints the frame time for each view and popup, the cost of
+//! `refresh()`, of applying a burst of 10,000 bus events, and of an idle
+//! tick.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -33,7 +34,7 @@ use hashi::usage::{Source, Window};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-const TOKENS: usize = 200;
+const TOKENS: usize = hashi::store::MAX_TOKENS;
 const REQUESTS: usize = 20_000;
 const ACCOUNTS: usize = 30;
 const PROJECTS: usize = 10;
