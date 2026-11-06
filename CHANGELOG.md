@@ -4,31 +4,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-06
+
 ### Added
 
 - A `429` whose wait is known sends `Retry-After` and the same seconds as `retryAfter` in the error body: `limit_reached` (until the cap resets), the per-token rate limit, failed sign-in, invite and ask-access attempts from one address, and an account refresh within a minute of the last.
 - `GET /v1/models/{model}`, so OpenAI clients that retrieve a model before using it work.
 - MCP tools have a `title`, `annotations` and an input schema that describes and bounds every argument (`prompt` up to 32 KB, `model` up to 128 safe characters, request ids, the agent names `request_more` takes).
-
-### Changed
-
-- OpenAI-compatible responses carry every field the chat completions spec requires: `system_fingerprint`, `logprobs` and `message.refusal` (all `null`). With `stream_options.include_usage`, every chunk but the last has `usage: null`. Errors set `param` to `model` or `messages` where it applies.
-- `GET /v1/models` and the MCP `ask_<agent>` tools list only the agents this bridge can run for the token: installed here, or served by a remote account. Before, MCP also listed agents that were not installed and could only answer `503`.
-- The MCP `instructions` and tool descriptions say how long a call waits, when to call `get_result` and `cancel`, and not to send a prompt again. A refused tool call says what to do next and ends with its error code, and a failed run names its request.
-- Error messages say what to do next: the agents a token may use when it names another, the size of an oversized prompt, which characters a model name may use, when a cap resets, and how long to wait after a rate limit. `GET /` links to the API reference. No error code changed.
-- `hashi llm` (also `hashi guide`) prints a Markdown guide that an LLM agent such as Claude Code, Codex or Cursor can follow to run Hashi for you: rules (secrets stay secret, ask before destructive commands, read first), the commands for common tasks, a command reference generated from the binary's own flags, and HTTP API pointers. `--output <file>` writes it readable only by you. The dashboard's Commands view copies it with "Copy guide for an LLM".
-- `--json` on `token list`, `invite list`, `account list`, `project list`, `requests list` and `audit`, with the same camelCase fields as the matching API listing. None prints a secret.
-- Examples at the end of `--help` for `share`, `token`, `account`, `project`, `requests`, `connect` and `llm`.
-
-### Changed
-
-- `hashi token update` and `hashi token revoke` also take a token's name, when no other token has it.
-- The `token list`, `invite list`, `account list`, `project list` and `audit` tables size each column to its widest cell, so a long name no longer pushes the columns after it out of line. A token or invite that may use every agent shows `all`. `invite list` also shows the agents, project and expiry.
-- Empty lists say how to add the first one, errors for an unknown token, invite, project or request name the command that lists them, and refusing to revoke the last admin token says how to make another.
-- `hashi requests open` builds a local-only link with the port saved from the dashboard, as `hashi share` does, instead of always 7878.
-- User-given names, labels and audit text in the CLI tables pass through the same terminal-safe filter as the dashboard.
-
-## [0.3.1] - 2026-11-06
 
 ### Changed
 
@@ -42,6 +24,30 @@ All notable changes to this project are documented here. The format follows [Kee
   - a broken link says "This link doesn't work";
   - commands scroll on one line instead of breaking mid-word, and the page never gets wider than a phone screen;
   - every control is at least 44px tall on touch screens.
+- OpenAI-compatible responses carry every field the chat completions spec requires: `system_fingerprint`, `logprobs` and `message.refusal` (all `null`). With `stream_options.include_usage`, every chunk but the last has `usage: null`. Errors set `param` to `model` or `messages` where it applies.
+- `GET /v1/models` and the MCP `ask_<agent>` tools list only the agents this bridge can run for the token: installed here, or served by a remote account. Before, MCP also listed agents that were not installed and could only answer `503`.
+- The MCP `instructions` and tool descriptions say how long a call waits, when to call `get_result` and `cancel`, and not to send a prompt again. A refused tool call says what to do next and ends with its error code, and a failed run names its request.
+- Error messages say what to do next: the agents a token may use when it names another, the size of an oversized prompt, which characters a model name may use, when a cap resets, and how long to wait after a rate limit. `GET /` links to the API reference. No error code changed.
+- `hashi llm` (also `hashi guide`) prints a Markdown guide that an LLM agent such as Claude Code, Codex or Cursor can follow to run Hashi for you: rules (secrets stay secret, ask before destructive commands, read first), the commands for common tasks, a command reference generated from the binary's own flags, and HTTP API pointers. `--output <file>` writes it readable only by you. The dashboard's Commands view copies it with "Copy guide for an LLM".
+- `--json` on `token list`, `invite list`, `account list`, `project list`, `requests list` and `audit`, with the same camelCase fields as the matching API listing. None prints a secret.
+- Examples at the end of `--help` for `share`, `token`, `account`, `project`, `requests`, `connect` and `llm`.
+- `hashi token update` and `hashi token revoke` also take a token's name, when no other token has it.
+- The `token list`, `invite list`, `account list`, `project list` and `audit` tables size each column to its widest cell, so a long name no longer pushes the columns after it out of line. A token or invite that may use every agent shows `all`. `invite list` also shows the agents, project and expiry.
+- Empty lists say how to add the first one, errors for an unknown token, invite, project or request name the command that lists them, and refusing to revoke the last admin token says how to make another.
+- `hashi requests open` builds a local-only link with the port saved from the dashboard, as `hashi share` does, instead of always 7878.
+- User-given names, labels and audit text in the CLI tables pass through the same terminal-safe filter as the dashboard.
+- The dashboard was reviewed frame by frame at 80x24, 120x40 and 200x60 on a realistic store, and reworked where it broke:
+  - footers drop whole hints from the end instead of cutting the line, always keep `?` help and `q` quit, and give room to a toast only while it shows;
+  - the Tokens table and the Accounts popup drop their least needed columns on a narrow terminal, so the name stays (it used to vanish at 80 columns); the count column reads "req today";
+  - the header leaves out the logo below 126 columns, so the tagline no longer runs into the server status, and says when no agent is found;
+  - the Commands view shows whole titles at 80 columns, with the terminal command in the panel below, and keeps the key of a row that has one visible against the many `enter` rows;
+  - the key list fits a 24-row terminal, and long key hints in popups wrap between hints;
+  - on a first run with no coding agent, Overview says to install Claude Code or Codex and points at Doctor; with an agent, it points at `a` to ask;
+  - empty lists say what to press next, and the Accounts popup no longer asks to read usage when there are no accounts;
+  - agent cards drop the duplicated name from the version, put accounts and the best headroom on their own line and label the run-time bars;
+  - Doctor wraps details under themselves and, on a short terminal, keeps its keys on screen with a note of what was cut;
+  - the accept and decline popups use the same frame and key chips as every other popup.
+- The dashboard benchmark (`tests/tui_bench.rs`) fills the store with 100 tokens, the most it allows; it failed at 200.
 
 ## [0.3.0] - 2026-11-06
 

@@ -13,7 +13,8 @@ use super::app::{App, Popup};
 use super::forms::{self, AccountForm, AskForm, EditTokenForm, ListenForm, ProjectForm};
 use super::theme as t;
 use super::ui::{
-    SELECT, centered, form_field, form_text, form_toggle, key_hint, modal, plain, strong,
+    SELECT, centered, fit_columns, form_field, form_text, form_toggle, key_hint, key_hints, modal,
+    modal_text_width, plain, strong,
 };
 use crate::doctor::{self, Mark};
 use crate::util::{human_age, rfc3339, truncate};
@@ -266,16 +267,20 @@ fn access_requests(app: &App, frame: &mut Frame, selected: usize, all: bool) {
             "Showing pending requests."
         }),
         Line::raw(""),
-        key_hint(&[
+    ];
+    let area = frame.area();
+    let mut foot = foot;
+    foot.extend(key_hints(
+        &[
             ("a", "accept"),
             ("d", "decline"),
             ("o", "open link"),
             ("x", "close link"),
             ("s", if all { "pending only" } else { "show all" }),
             ("esc", "close"),
-        ]),
-    ];
-    let area = frame.area();
+        ],
+        modal_text_width(area, 120),
+    ));
     let foot_h = u16::try_from(foot.len()).unwrap_or(0);
     let wanted = u16::try_from(rows.len()).unwrap_or(20) + 8 + foot_h;
     let rect = centered(area, 120, wanted.max(14));
@@ -482,13 +487,16 @@ fn ask(frame: &mut Frame, form: &AskForm, tick: u64) {
         "  It goes to the bridge with the token saved by hashi connect."
     }));
     lines.push(Line::raw(""));
-    lines.push(key_hint(&[
-        ("tab", "field"),
-        ("←→", "change"),
-        ("enter", "new line"),
-        ("ctrl-s", "send"),
-        ("esc", "cancel"),
-    ]));
+    lines.extend(key_hints(
+        &[
+            ("tab", "field"),
+            ("←→", "change"),
+            ("enter", "new line"),
+            ("ctrl-s", "send"),
+            ("esc", "cancel"),
+        ],
+        modal_text_width(frame.area(), 84),
+    ));
     fitted(frame, 84, "ask", lines);
 }
 
@@ -533,27 +541,49 @@ fn remote_answer(
 }
 
 /// A list popup: a table of `rows` with a selection, a note and keys.
+/// `columns` are each column's heading and width, 0 for the one that
+/// fills; on a narrow terminal the columns in `drop` go, first ones first.
+#[allow(clippy::too_many_arguments)]
 fn list_popup(
     frame: &mut Frame,
     title: &str,
-    header: Vec<&'static str>,
-    widths: Vec<Constraint>,
-    rows: Vec<Row<'static>>,
+    columns: &[(&'static str, u16)],
+    drop: &[usize],
+    rows: Vec<Vec<Cell<'static>>>,
     selected: usize,
-    foot: Vec<Line<'static>>,
+    mut foot: Vec<Line<'static>>,
+    keys: &[(&str, &str)],
 ) {
+    const WIDTH: u16 = 110;
     let area = frame.area();
+    foot.extend(key_hints(keys, modal_text_width(area, WIDTH)));
     let wanted =
         u16::try_from(rows.len()).unwrap_or(20) + 6 + u16::try_from(foot.len()).unwrap_or(0);
-    let rect = centered(area, 110, wanted.max(12));
+    let rect = centered(area, WIDTH, wanted.max(12));
     let inner = modal("").inner(rect);
     let foot_h = u16::try_from(foot.len()).unwrap_or(0);
     let [table_area, foot_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(foot_h)]).areas(inner);
     frame.render_widget(Clear, rect);
     frame.render_widget(modal(title), rect);
+    let widths: Vec<u16> = columns.iter().map(|(_, w)| *w).collect();
+    let keep = fit_columns(&widths, 12, 2, drop, table_area.width.saturating_sub(1));
+    let header: Vec<&str> = keep.iter().map(|&i| columns[i].0).collect();
+    let constraints = keep.iter().map(|&i| match widths[i] {
+        0 => Constraint::Fill(1),
+        w => Constraint::Length(w),
+    });
     let empty = rows.is_empty();
-    let table = Table::new(rows, widths)
+    let rows = rows.into_iter().map(|cells| {
+        Row::new(
+            cells
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| keep.contains(i))
+                .map(|(_, c)| c),
+        )
+    });
+    let table = Table::new(rows, constraints)
         .header(Row::new(header).style(t::bold(t::MIST)))
         .column_spacing(2)
         .row_highlight_style(Style::new().bg(SELECT.into()).add_modifier(Modifier::BOLD))
@@ -567,7 +597,7 @@ fn list_popup(
 fn accounts(app: &App, frame: &mut Frame, selected: usize) {
     let now = crate::util::now_ms();
     let list = app.account_table();
-    let rows: Vec<Row<'static>> = list
+    let rows: Vec<Vec<Cell<'static>>> = list
         .iter()
         .map(|row| {
             let a = &row.state;
@@ -577,7 +607,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
                 }
                 s => s.as_str().to_owned(),
             };
-            Row::new(vec![
+            vec![
                 Cell::from(Span::styled(
                     format!("{} {}", t::agent_glyph(a.agent), a.agent),
                     t::fg(t::agent_color(a.agent)),
@@ -592,7 +622,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
                     t::muted(),
                 )),
                 Cell::from(Span::styled(row.tokens.to_string(), plain())),
-            ])
+            ]
         })
         .collect();
     let mut foot = Vec::new();
@@ -611,6 +641,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
     });
     match usage {
         Some(u) => foot.extend(super::usage::lines(&[u], rotate_at, 24)),
+        None if list.is_empty() => {}
         None => foot.push(Line::from(vec![
             Span::styled("usage  ", t::muted()),
             Span::styled(
@@ -620,40 +651,32 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
         ])),
     }
     foot.push(Line::raw(""));
-    foot.push(key_hint(&[
-        ("a", "add"),
-        ("l", "sign in"),
-        ("d", "disable"),
-        ("e", "enable"),
-        ("c", "clear limit"),
-        ("u", "read usage"),
-        ("x", "remove"),
-        ("esc", "close"),
-    ]));
     list_popup(
         frame,
         "accounts",
-        vec![
-            "agent",
-            "name",
-            "kind",
-            "signed in",
-            "state",
-            "last used",
-            "tokens",
+        &[
+            ("agent", 10),
+            ("name", 0),
+            ("kind", 11),
+            ("signed in", 13),
+            ("state", 20),
+            ("last used", 10),
+            ("tokens", 6),
         ],
-        vec![
-            Constraint::Length(10),
-            Constraint::Fill(1),
-            Constraint::Length(11),
-            Constraint::Length(13),
-            Constraint::Length(20),
-            Constraint::Length(10),
-            Constraint::Length(6),
-        ],
+        &[5, 2, 6, 3],
         rows,
         selected,
         foot,
+        &[
+            ("a", "add"),
+            ("l", "sign in"),
+            ("d", "disable"),
+            ("e", "enable"),
+            ("c", "clear limit"),
+            ("u", "read usage"),
+            ("x", "remove"),
+            ("esc", "close"),
+        ],
     );
 }
 
@@ -729,7 +752,7 @@ fn add_account(frame: &mut Frame, form: &AccountForm, tick: u64) {
 
 fn projects(app: &App, frame: &mut Frame, selected: usize) {
     let list = app.cached_projects();
-    let rows: Vec<Row<'static>> = list
+    let rows: Vec<Vec<Cell<'static>>> = list
         .iter()
         .map(|p| {
             let tokens = app.project_token_count(&p.name);
@@ -737,7 +760,7 @@ fn projects(app: &App, frame: &mut Frame, selected: usize) {
                 Some(d) => format!("{} ({d})", crate::token::encode_agents(&p.agents)),
                 None => crate::token::encode_agents(&p.agents),
             };
-            Row::new(vec![
+            vec![
                 Cell::from(Span::styled(p.name.clone(), strong())),
                 Cell::from(Span::styled(tokens.to_string(), plain())),
                 Cell::from(Span::styled(agents, plain())),
@@ -746,7 +769,7 @@ fn projects(app: &App, frame: &mut Frame, selected: usize) {
                     plain(),
                 )),
                 Cell::from(Span::styled(p.path.clone(), t::muted())),
-            ])
+            ]
         })
         .collect();
     let mut foot = Vec::new();
@@ -756,26 +779,26 @@ fn projects(app: &App, frame: &mut Frame, selected: usize) {
         ));
     }
     foot.push(Line::raw(""));
-    foot.push(key_hint(&[
-        ("a", "add"),
-        ("e", "edit"),
-        ("x", "remove"),
-        ("esc", "close"),
-    ]));
     list_popup(
         frame,
         "projects",
-        vec!["name", "tokens", "agents", "accounts", "folder"],
-        vec![
-            Constraint::Length(16),
-            Constraint::Length(6),
-            Constraint::Length(24),
-            Constraint::Length(20),
-            Constraint::Fill(1),
+        &[
+            ("name", 16),
+            ("tokens", 6),
+            ("agents", 24),
+            ("accounts", 20),
+            ("folder", 0),
         ],
+        &[3, 1],
         rows,
         selected,
         foot,
+        &[
+            ("a", "add"),
+            ("e", "edit"),
+            ("x", "remove"),
+            ("esc", "close"),
+        ],
     );
 }
 
@@ -859,10 +882,10 @@ fn remotes(app: &App, frame: &mut Frame, selected: usize) {
         .home()
         .and_then(|h| crate::remote::load(&h).ok())
         .unwrap_or_default();
-    let rows: Vec<Row<'static>> = list
+    let rows: Vec<Vec<Cell<'static>>> = list
         .iter()
         .map(|r| {
-            Row::new(vec![
+            vec![
                 Cell::from(Span::styled(
                     crate::diagnostics::terminal_safe(&r.name),
                     strong(),
@@ -872,7 +895,7 @@ fn remotes(app: &App, frame: &mut Frame, selected: usize) {
                     crate::diagnostics::terminal_safe(&r.base_url),
                     plain(),
                 )),
-            ])
+            ]
         })
         .collect();
     let mut foot = Vec::new();
@@ -885,21 +908,21 @@ fn remotes(app: &App, frame: &mut Frame, selected: usize) {
     }
     foot.extend(request_status_lines(app));
     foot.push(Line::raw(""));
-    foot.push(key_hint(&[
-        ("c", "connect"),
-        ("a", "ask it"),
-        ("x", "forget"),
-        ("r", "request status"),
-        ("esc", "close"),
-    ]));
     list_popup(
         frame,
         "bridges I use",
-        vec!["name", "url"],
-        vec![Constraint::Length(24), Constraint::Fill(1)],
+        &[("name", 24), ("url", 0)],
+        &[],
         rows,
         selected,
         foot,
+        &[
+            ("c", "connect"),
+            ("a", "ask it"),
+            ("x", "forget"),
+            ("r", "request status"),
+            ("esc", "close"),
+        ],
     );
 }
 
@@ -1118,41 +1141,67 @@ pub fn doctor_checks(app: &App) -> Vec<doctor::Check> {
 }
 
 fn doctor_popup(app: &App, frame: &mut Frame) {
-    let mut lines: Vec<Line<'static>> = doctor_checks(app)
-        .into_iter()
-        .map(|c| {
-            let color = match c.mark {
-                Mark::Ok => t::MINT,
-                Mark::Info => t::MIST,
-                Mark::Warn => t::AMBER,
-            };
-            Line::from(vec![
-                Span::styled(format!("{} ", c.mark.glyph()), t::bold(color)),
-                Span::styled(format!("{:<13}", c.name), strong()),
-                Span::styled(c.detail, plain()),
-            ])
-        })
-        .collect();
+    const WIDTH: u16 = 110;
+    let area = frame.area();
+    // Details wrap under themselves, not under the mark and the name.
+    let detail_w = modal_text_width(area, WIDTH).saturating_sub(15).max(20);
+    let row = |mark: Span<'static>, name: &str, detail: &str| -> Vec<Line<'static>> {
+        let mut out = Vec::new();
+        // A word longer than the column, such as a path, is split too.
+        let parts = wrap_words(detail, detail_w).into_iter().flat_map(|p| {
+            let chars: Vec<char> = p.chars().collect();
+            chars
+                .chunks(detail_w)
+                .map(|c| c.iter().collect::<String>())
+                .collect::<Vec<_>>()
+        });
+        for (i, part) in parts.enumerate() {
+            out.push(if i == 0 {
+                Line::from(vec![
+                    mark.clone(),
+                    Span::styled(format!("{name:<13}"), strong()),
+                    Span::styled(part, plain()),
+                ])
+            } else {
+                Line::from(vec![Span::raw(" ".repeat(15)), Span::styled(part, plain())])
+            });
+        }
+        out
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for c in doctor_checks(app) {
+        let color = match c.mark {
+            Mark::Ok => t::MINT,
+            Mark::Info => t::MIST,
+            Mark::Warn => t::AMBER,
+        };
+        let mark = Span::styled(format!("{} ", c.mark.glyph()), t::bold(color));
+        lines.extend(row(mark, &c.name, &c.detail));
+    }
     lines.push(Line::raw(""));
     let home = app.home().map_or_else(
         || "none (in memory)".to_owned(),
         |h| h.display().to_string(),
     );
-    lines.push(Line::from(vec![
-        Span::styled(format!("  {:<13}", "home"), strong()),
-        Span::styled(home, plain()),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(format!("  {:<13}", "guard"), strong()),
-        Span::styled(app.state.guard.describe(), plain()),
-    ]));
+    lines.extend(row(Span::raw("  "), "home", &home));
+    lines.extend(row(Span::raw("  "), "guard", &app.state.guard.describe()));
+    // On a short terminal the keys stay on screen and the rest is cut,
+    // with a pointer to the full list.
+    let room = usize::from(area.height.saturating_sub(5)).saturating_sub(2);
+    if lines.len() > room {
+        let cut = lines.len() - room + 1;
+        lines.truncate(room.saturating_sub(1));
+        lines.push(muted_line(format!(
+            "  … {cut} more lines: make the terminal taller, or run hashi doctor"
+        )));
+    }
     lines.push(Line::raw(""));
     lines.push(key_hint(&[
         ("u", "check for updates"),
         ("r", "recheck"),
         ("enter", "done"),
     ]));
-    fitted(frame, 110, "doctor", lines);
+    fitted(frame, WIDTH, "doctor", lines);
 }
 
 fn report(app: &App, frame: &mut Frame, form: &forms::ReportForm) {

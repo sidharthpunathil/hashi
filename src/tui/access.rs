@@ -43,14 +43,9 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn modal(title: &str) -> Block<'_> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(t::fg(t::PURPLE))
-        .title(Span::styled(
-            format!(" {} ", super::one_line(title)),
-            t::bold(t::PINK),
-        ))
+/// The dashboard's own popup frame, so these look like every other popup.
+fn modal(title: &str) -> Block<'static> {
+    super::ui::modal(title)
 }
 
 fn state_style(state: &str) -> Style {
@@ -141,7 +136,7 @@ pub fn render_list(
             ))
             .centered(),
             Line::from(Span::styled(
-                "Open the ask-access link with `hashi requests open`",
+                "People who open the ask-access link show up here.",
                 t::muted(),
             ))
             .centered(),
@@ -357,7 +352,7 @@ fn field_line(on: bool, label: &str, value: &str, hint: &str) -> Line<'static> {
     let value_style = if on { t::bold(t::PINK) } else { Style::new() };
     let mut spans = vec![
         Span::styled(marker.to_owned(), t::fg(t::PINK)),
-        Span::styled(format!("{label:<16}"), t::muted()),
+        Span::styled(format!("{label:<17}"), t::muted()),
         Span::styled(
             if value.is_empty() {
                 "-".to_owned()
@@ -458,7 +453,7 @@ pub fn render_accept(frame: &mut Frame, area: Rect, form: &AcceptForm) {
         lines.push(field_line(
             f(7),
             "invite valid for",
-            &format!("\u{2190} {hours}h \u{2192}"),
+            &format!("\u{2039} {hours}h \u{203a}"),
             "",
         ));
     }
@@ -474,11 +469,15 @@ pub fn render_accept(frame: &mut Frame, area: Rect, form: &AcceptForm) {
         },
         t::muted(),
     )));
-    lines.push(Line::from(Span::styled(
-        "\u{2191}\u{2193} field  type to edit  enter accept  esc cancel",
-        t::muted(),
-    )));
-    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    lines.push(Line::raw(""));
+    let mut keys = vec![("\u{2191}\u{2193}", "field")];
+    if new {
+        keys.push(("\u{2190}\u{2192}", "invite hours"));
+    }
+    keys.extend([("enter", "accept"), ("esc", "cancel")]);
+    lines.push(super::ui::key_hint(&keys));
+    // The border and the modal's top padding.
+    let height = u16::try_from(lines.len() + 3).unwrap_or(u16::MAX);
     let rect = centered(area, 76, height);
     frame.render_widget(Clear, rect);
     frame.render_widget(
@@ -559,11 +558,11 @@ pub fn render_decline(frame: &mut Frame, area: Rect, form: &DeclineForm) {
     if let Some(e) = &form.error {
         lines.push(Line::from(Span::styled(safe(e), t::fg(t::ROSE))));
     }
-    lines.push(Line::from(Span::styled(
-        "enter decline  esc cancel",
-        t::muted(),
-    )));
-    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    lines.push(super::ui::key_hint(&[
+        ("enter", "decline"),
+        ("esc", "cancel"),
+    ]));
+    let height = u16::try_from(lines.len() + 3).unwrap_or(u16::MAX);
     let rect = centered(area, 72, height);
     frame.render_widget(Clear, rect);
     frame.render_widget(
