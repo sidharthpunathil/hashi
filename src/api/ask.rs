@@ -187,13 +187,80 @@ pub fn request_json(store: &Store, r: Request, admin: bool) -> ApiResult<(Status
     Ok((code, serde_json::to_value(view).unwrap_or(Value::Null)))
 }
 
-fn limit_error(limit: &'static str, message: String, reset_at: i64) -> ApiError {
+/// "1 prompt" or "N prompts".
+fn prompts(n: impl Into<u64>) -> String {
+    match n.into() {
+        1 => "1 prompt".to_owned(),
+        n => format!("{n} prompts"),
+    }
+}
+
+/// `429 limit_reached` for a cap that resets at `reset_at`: the body names
+/// the `limit`, its `resetAt` and the seconds until then as `retryAfter`,
+/// which the response also sends as `Retry-After`.
+fn limit_error(limit: &'static str, message: String, reset_at: i64, now: i64) -> ApiError {
+    let wait = u64::try_from(reset_at.saturating_sub(now)).unwrap_or(0);
+    let retry_after = super::retry_secs(Duration::from_millis(wait));
+    let reset = rfc3339(reset_at);
+    let message = match &reset {
+        Some(at) => format!("{message}; it resets at {at}"),
+        None => message,
+    };
     ApiError::Coded {
         status: StatusCode::TOO_MANY_REQUESTS,
         code: "limit_reached",
         message,
-        extra: Some(json!({ "limit": limit, "resetAt": rfc3339(reset_at) })),
+        extra: Some(json!({ "limit": limit, "resetAt": reset, "retryAfter": retry_after })),
     }
+}
+
+/// Whether a run on `agent` for this token could go to an enabled remote
+/// account, which runs on a friend's bridge, so the agent need not be
+/// installed here.
+fn has_remote_account(
+    state: &AppState,
+    accounts: &crate::accounts::AccountMap,
+    agent: AgentKind,
+) -> bool {
+    accounts.get(&agent).is_some_and(|list| {
+        list.iter().any(|n| {
+            state
+                .store
+                .get_account(agent, n)
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.kind == crate::accounts::AccountKind::Remote && !a.disabled)
+        })
+    })
+}
+
+/// The agents `token` may use that this server can run for it now:
+/// installed here (and, for Crush, enabled), or served by a remote
+/// account. `GET /v1/models` and the MCP `ask_<agent>` tools offer these,
+/// so a client is never shown an agent that can only answer `503`.
+///
+/// # Errors
+///
+/// Fails on database errors.
+pub fn offered_agents(state: &AppState, token: &Token) -> ApiResult<Vec<AgentKind>> {
+    let project = match &token.project {
+        Some(name) => state.store.get_project(name)?,
+        None => None,
+    };
+    let eff = crate::projects::effective(token, project.as_ref());
+    let usable = super::usable_agents(&state.store, token);
+    Ok(AgentKind::ALL
+        .into_iter()
+        .filter(|a| usable.contains(a))
+        .filter(|a| {
+            state
+                .runtime
+                .agents
+                .iter()
+                .any(|i| i.agent == *a && i.available)
+                || has_remote_account(state, &eff.accounts, *a)
+        })
+        .collect())
 }
 
 /// Validates a prompt against the token's policy and queues it.
@@ -215,10 +282,10 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             return Err(ApiError::coded(
                 StatusCode::FORBIDDEN,
                 "token_paused",
-                "this token is paused by the owner",
+                super::TOKEN_PAUSED,
             ));
         }
-        TokenStatus::Expired => return Err(ApiError::Unauthorized("invalid or expired token")),
+        TokenStatus::Expired => return Err(ApiError::Unauthorized(super::INVALID_TOKEN)),
     }
 
     let message = input.message;
@@ -227,7 +294,8 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
     }
     if message.len() > MAX_MESSAGE_BYTES {
         return Err(ApiError::BadRequest(format!(
-            "message exceeds {MAX_MESSAGE_BYTES} bytes"
+            "message is {} bytes, over the limit of {MAX_MESSAGE_BYTES} (32 KB); shorten it",
+            message.len()
         )));
     }
     if message.contains('\0') {
@@ -250,36 +318,36 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             .map_err(|e| ApiError::BadRequest(e.to_string()))?,
         None => eff.default_agent.unwrap_or(state.default_agent),
     };
-    if !token.allows(agent) {
-        return Err(ApiError::Forbidden(format!(
-            "this token may not use {agent}"
-        )));
-    }
-    if !eff.allows(agent) {
-        return Err(ApiError::Forbidden(format!(
-            "this token's project does not allow {agent}"
-        )));
+    if !token.allows(agent) || !eff.allows(agent) {
+        let allowed: Vec<&str> = AgentKind::ALL
+            .into_iter()
+            .filter(|a| token.allows(*a) && eff.allows(*a))
+            .map(AgentKind::as_str)
+            .collect();
+        let who = if token.allows(agent) {
+            "this token's project does not allow"
+        } else {
+            "this token may not use"
+        };
+        return Err(ApiError::Forbidden(if allowed.is_empty() {
+            format!("{who} {agent}")
+        } else {
+            format!("{who} {agent}; it may use {}", allowed.join(", "))
+        }));
     }
     if let Some(model) = &input.model
         && !agent::is_safe_arg(model)
     {
         return Err(ApiError::BadRequest(
-            "model contains unsupported characters".to_owned(),
+            "model must be up to 128 characters, start with a letter or digit and use only \
+             letters, digits and - _ . : / @ [ ]"
+                .to_owned(),
         ));
     }
     let model = eff.model(agent, input.model.as_deref());
     // A remote account runs on a friend's bridge, so the agent need not be
     // installed here.
-    let remote = eff.accounts.get(&agent).is_some_and(|list| {
-        list.iter().any(|n| {
-            state
-                .store
-                .get_account(agent, n)
-                .ok()
-                .flatten()
-                .is_some_and(|a| a.kind == crate::accounts::AccountKind::Remote && !a.disabled)
-        })
-    });
+    let remote = has_remote_account(state, &eff.accounts, agent);
     // Refused here, as any body over the cap is, rather than failing on
     // the friend's bridge with an error that would reveal it.
     if remote && !crate::forward::fits_remote(&message, model.as_deref()) {
@@ -287,7 +355,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             StatusCode::PAYLOAD_TOO_LARGE,
             "too_large",
             format!(
-                "the request is larger than {} KB",
+                "the prompt is too large for this token; shorten it to under {} KB",
                 super::MAX_BODY_BYTES / 1024
             ),
         ));
@@ -335,18 +403,20 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
                 Cap::DailyRequests => limit_error(
                     "dailyRequests",
                     format!(
-                        "daily limit of {} prompts reached",
-                        l.daily_requests.unwrap_or(0)
+                        "daily limit of {} reached",
+                        prompts(l.daily_requests.unwrap_or(0))
                     ),
                     next_day_utc(now),
+                    now,
                 ),
                 Cap::MonthlyRequests => limit_error(
                     "monthlyRequests",
                     format!(
-                        "monthly limit of {} prompts reached",
-                        l.monthly_requests.unwrap_or(0)
+                        "monthly limit of {} reached",
+                        prompts(l.monthly_requests.unwrap_or(0))
                     ),
                     next_month_utc(now),
+                    now,
                 ),
                 Cap::DailyBudgetUsd => limit_error(
                     "dailyBudgetUsd",
@@ -355,6 +425,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
                         l.daily_budget_usd.unwrap_or(0.0)
                     ),
                     next_day_utc(now),
+                    now,
                 ),
                 Cap::MonthlyBudgetUsd => limit_error(
                     "monthlyBudgetUsd",
@@ -363,6 +434,7 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
                         l.monthly_budget_usd.unwrap_or(0.0)
                     ),
                     next_month_utc(now),
+                    now,
                 ),
             });
         }
@@ -370,12 +442,16 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
             return Err(ApiError::coded(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_pending",
-                format!("this token already has {pending} prompt(s) in flight (max {max})"),
+                format!(
+                    "this token already has {} queued or running, its limit of {max}; \
+                     wait for one to finish or cancel one",
+                    prompts(pending)
+                ),
             ));
         }
         Admission::QueueFull => {
             return Err(ApiError::TooManyRequests(
-                "queue is full, try again shortly",
+                "the queue on this Hashi is full; try again in a minute",
             ));
         }
     }

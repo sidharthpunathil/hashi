@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- A `429` whose wait is known sends `Retry-After` and the same seconds as `retryAfter` in the error body: `limit_reached` (until the cap resets), the per-token rate limit, failed sign-in, invite and ask-access attempts from one address, and an account refresh within a minute of the last.
+- `GET /v1/models/{model}`, so OpenAI clients that retrieve a model before using it work.
+- MCP tools have a `title`, `annotations` and an input schema that describes and bounds every argument (`prompt` up to 32 KB, `model` up to 128 safe characters, request ids, the agent names `request_more` takes).
+
+### Changed
+
+- OpenAI-compatible responses carry every field the chat completions spec requires: `system_fingerprint`, `logprobs` and `message.refusal` (all `null`). With `stream_options.include_usage`, every chunk but the last has `usage: null`. Errors set `param` to `model` or `messages` where it applies.
+- `GET /v1/models` and the MCP `ask_<agent>` tools list only the agents this bridge can run for the token: installed here, or served by a remote account. Before, MCP also listed agents that were not installed and could only answer `503`.
+- The MCP `instructions` and tool descriptions say how long a call waits, when to call `get_result` and `cancel`, and not to send a prompt again. A refused tool call says what to do next and ends with its error code, and a failed run names its request.
+- Error messages say what to do next: the agents a token may use when it names another, the size of an oversized prompt, which characters a model name may use, when a cap resets, and how long to wait after a rate limit. `GET /` links to the API reference. No error code changed.
+
 ## [0.3.1] - 2026-11-06
 
 ### Changed

@@ -287,9 +287,11 @@ pub(super) async fn submit(
     raw: Bytes,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     // Every submission counts, accepted or not.
-    if !state.limiter.check(&format!("askaccess:{}", client.0)) {
-        return Err(ApiError::TooManyRequests(
-            "too many requests from this address, slow down",
+    let key = format!("askaccess:{}", client.0);
+    if !state.limiter.check(&key) {
+        return Err(ApiError::rate_limited(
+            "too many requests from this address",
+            state.limiter.retry_after(&key),
         ));
     }
     let result = submit_request(&state, &raw);

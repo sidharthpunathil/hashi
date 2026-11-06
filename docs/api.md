@@ -10,7 +10,7 @@ A request with an `Authorization` header and no `Content-Type`, or `curl -d`'s d
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/` | | Name, version and a pointer to the docs |
+| `GET` | `/` | | Name, version, `baseUrl`, a `docs` link to this page and a one-line `usage` |
 | `GET` | `/healthz` | | Liveness probe |
 | `GET` | `/v1/status` | | Version, uptime, which agents are installed, this bridge's `instance` id |
 | `POST` | `/v1/ask` | token | Queue a prompt |
@@ -18,6 +18,7 @@ A request with an `Authorization` header and no `Content-Type`, or `curl -d`'s d
 | `DELETE` | `/v1/ask/{id}` | token | Cancel a queued or running request (admins: any request) |
 | `POST` | `/v1/chat/completions` | token | OpenAI-compatible chat, with `stream: true` support |
 | `GET` | `/v1/models` | token | OpenAI-compatible list of the agents this token may use |
+| `GET` | `/v1/models/{model}` | token | One of them, as OpenAI's model retrieve returns it |
 | `DELETE` | `/v1/session/{agent}` | token | Forget this token's conversation with an agent |
 | `GET` | `/v1/me` | any token | The token's own status, limits and usage (works when paused or expired) |
 | `GET` | `/v1/stats` | admin | Request counters, plus memory, disk and run slots under `resources` |
@@ -83,12 +84,12 @@ A token can cancel its own requests; an admin token can cancel any. Another toke
 
 - **`model`** picks the agent: `claude`, `codex`, `gemini`, `opencode`, `qwen`, `cursor` or (when enabled) `crush`. Add the agent's own model after a slash, for example `claude/opus` or `gemini/gemini-2.5-pro`. Without `model` the server's default agent answers.
 - **`messages`.** System and developer messages go first as an instruction block, earlier user and assistant turns follow as a plain transcript, and the last message, which must be from the user, ends the prompt. Only text is accepted: a string, or parts with `type: "text"`. Images, audio and `tool` messages answer `400`.
-- **Response.** A standard `chat.completion` with `finish_reason: "stop"`. `usage` maps the tokens the agent reports (`prompt_tokens`, `completion_tokens`, `total_tokens`) and is left out when the agent reports none. The `X-Hashi-Request-Id` header carries the Hashi request id.
-- **`stream: true`** answers with server-sent events: a role chunk, then `: queued` or `: running` comment lines every second while the request waits or runs, then one chunk with the whole answer, a final chunk with `finish_reason`, and `data: [DONE]`. Agents do not stream token by token. With `stream_options.include_usage` a usage chunk comes before `[DONE]`. A failed run sends `data: {"error": {...}}` and closes the stream. A stream also ends, with an error chunk and `data: [DONE]`, when its token is paused (`token_paused`), revoked or expires (`unauthorized`), or when it has been open for twice the run timeout plus 10 seconds (`504 stream_timeout`). The request keeps its place in the queue: read it later with `GET /v1/ask/{id}`. A stream counts as one of the token's 4 open long polls; a fifth answers `429 too_many_waits`.
+- **Response.** A standard `chat.completion`: `id` (`chatcmpl-` and the Hashi request id), `object`, `created` (Unix seconds), `model` (as sent, or the default agent's name), `system_fingerprint: null`, and one choice with `index: 0`, `message` (`role: "assistant"`, `content`, `refusal: null`), `logprobs: null` and `finish_reason: "stop"`. `usage` maps the tokens the agent reports (`prompt_tokens`, `completion_tokens`, `total_tokens`) and is left out when the agent reports none. The `X-Hashi-Request-Id` header carries the Hashi request id.
+- **`stream: true`** answers with server-sent events: a role chunk, then `: queued` or `: running` comment lines every second while the request waits or runs, then one chunk with the whole answer, a final chunk with `finish_reason`, and `data: [DONE]`. Every chunk is a `chat.completion.chunk` with the same `id`, `created` and `model`, and its choice has `index`, `delta`, `logprobs: null` and `finish_reason`. Agents do not stream token by token. With `stream_options.include_usage` every chunk has `usage: null` except a last one before `[DONE]`, which has empty `choices` and the `usage` (still `null` when the agent reports none). A failed run sends `data: {"error": {...}}` and closes the stream. A stream also ends, with an error chunk and `data: [DONE]`, when its token is paused (`token_paused`), revoked or expires (`unauthorized`), or when it has been open for twice the run timeout plus 10 seconds (`504 stream_timeout`). The request keeps its place in the queue: read it later with `GET /v1/ask/{id}`. A stream counts as one of the token's 4 open long polls; a fifth answers `429 too_many_waits`.
 - **Time limit.** Without streaming the request is held for up to 120 seconds (set a shorter `wait`, in seconds, if you like). If the answer is not ready by then you get `202` with the Hashi request `id` and a `poll` path: read it with `GET /v1/ask/{id}`, or send `stream: true` next time. A token that already holds 4 long polls gets the `202` at once.
 - **Ignored.** `temperature`, `max_tokens`, `tools` and other unknown fields are accepted and ignored. Tool calling is not supported.
-- **`GET /v1/models`** lists the agents this token may use that are installed on this machine.
-- **Errors** use OpenAI's shape, with the status codes and `code` values listed under [Errors](#errors): `{"error": {"message": "...", "type": "invalid_request_error", "param": null, "code": "model_not_found"}}`. `type` is `invalid_request_error`, `authentication_error`, `permission_error`, `not_found_error`, `rate_limit_error` or `server_error`. A failed run answers `502` with code `agent_failed`.
+- **`GET /v1/models`** lists the agents this token may use that this bridge can run: installed here, or served by one of the token's remote accounts. Each is `{"id": "claude", "object": "model", "created": 0, "owned_by": "hashi"}`. `GET /v1/models/{model}` returns one of them (`claude/opus` answers with `claude`), and `404 model_not_found` for any other.
+- **Errors** use OpenAI's shape, with the status codes and `code` values listed under [Errors](#errors): `{"error": {"message": "...", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}`. `type` is `invalid_request_error`, `authentication_error`, `permission_error`, `not_found_error`, `rate_limit_error` or `server_error`. `param` is `model` for `model_not_found`, `messages` for `unsupported_content` and `unsupported_role`, and `null` otherwise. Extra fields such as `limit`, `resetAt` and `retryAfter` sit next to them, and a `429` that knows its wait also sends `Retry-After`. A failed run answers `502` with code `agent_failed`.
 
 With `curl`:
 
@@ -273,17 +274,25 @@ Admin only. Lists every account with its state, use and quota; keys, access toke
 
 `usage` has one entry per quota window, with `source` `poll` (a read of the live quota), `run` (a Claude Code run's `rate_limit_event`), `error` (a run that failed at the limit, counted as fully used until `resetsAt`) or `remote` (a remote account's `/v1/me`: the shared headroom as window `remote`, and the remote token's caps as `daily_requests`, `monthly_requests`, `daily_budget` and `monthly_budget`). In `summary`, `headroom` is 100 minus the highest `usedPercent` (whole percent, `null` when nothing is known), `binding` names that window, and `state` is `ok`, `warning` (at or above the server's `rotateAt`), `limited` (until `limitedUntil`) or `unknown`. `note` says why there are no figures, such as "unknown, refreshes on its next run". `costToday` and `tokensToday` are what this account's runs reported today (UTC).
 
-None of this is shown to token holders: the OpenAI-compatible responses have no usage fields, and `/v1/me` and the MCP `my_usage` tool have only the per-agent `agentUsage` summary, and only for a token with `shareUsage`.
+None of this is shown to token holders: the OpenAI-compatible responses carry only the run's own token counts, and `/v1/me` and the MCP `my_usage` tool have only the per-agent `agentUsage` summary, and only for a token with `shareUsage`.
 
 ## `POST /v1/accounts/{agent}/{name}/refresh`
 
-Admin only. Reads a Claude Code or Codex sign-in's quota now (the default account or a login account), or a remote account's `/v1/me` on its bridge, records it and answers `{"ok": true, "account": {...}}` with the account as `GET /v1/accounts` shows it. A read that gives no figures still answers `200`, with `"ok": false`, an `error` on the account and its `summary.note`. Each account is read at most once a minute: sooner answers `429 rate_limited`. A run on the account in progress answers `409 account_busy`; an unknown agent, an API-key account or an agent without live quota answers `400`. The token used for the read is never refreshed, logged or returned. Refreshes are audited as `account.refresh`.
+Admin only. Reads a Claude Code or Codex sign-in's quota now (the default account or a login account), or a remote account's `/v1/me` on its bridge, records it and answers `{"ok": true, "account": {...}}` with the account as `GET /v1/accounts` shows it. A read that gives no figures still answers `200`, with `"ok": false`, an `error` on the account and its `summary.note`. Each account is read at most once a minute: sooner answers `429 rate_limited` with `retryAfter` and `Retry-After`. A run on the account in progress answers `409 account_busy`; an unknown agent, an API-key account or an agent without live quota answers `400`. The token used for the read is never refreshed, logged or returned. Refreshes are audited as `account.refresh`.
 
 `GET /v1/tokens` lists each token's `conversations`: `[{"agent", "account", "project", "updatedAt"}]`, most recent first, so admins see which account each stateful conversation is on.
 
 ## MCP
 
-`POST /mcp` is an MCP server. It offers one `ask_<agent>` tool for every agent the token may use (for example `ask_claude`, `ask_gemini`), `get_result` for long runs, `cancel` to stop a queued or running request by id (the token's own, or any for an admin), `my_usage` (the `/v1/me` document, so with `agentUsage` only when the owner turned on `shareUsage` for the token), and `request_more`, which asks the owner for more with the fields of `POST /v1/me/requests`. Limits and pause apply exactly as they do over HTTP. To add it to Claude Code:
+`POST /mcp` is an MCP server. Its tools:
+
+- **`ask_<agent>`**, one for every agent the token may use that this bridge can run, the same list as `GET /v1/models` (for example `ask_claude`, `ask_codex`). Arguments: `prompt` (1 byte to 32 KB) and an optional `model`. The call waits for the run to finish, up to the server's run timeout (`--timeout`, 300 seconds by default). When the answer is not ready by then, or the token already holds 4 waits, it returns at once with `Still queued` or `Still running` and the request id.
+- **`get_result`** takes that `id` and waits up to 30 seconds while the request is queued or running; call it again until it returns the answer.
+- **`cancel`** stops a queued or running request by `id` (the token's own, or any for an admin).
+- **`my_usage`** returns the `/v1/me` document, so with `agentUsage` only when the owner turned on `shareUsage` for the token.
+- **`request_more`** asks the owner for more with the fields of `POST /v1/me/requests`.
+
+Every tool has a `title`, `annotations` (`get_result` and `my_usage` are read-only, `cancel` is destructive) and an input schema with a description and bounds for every argument. The `initialize` result's `instructions` explain the waiting, `get_result` and `cancel` to the model. Limits and pause apply exactly as they do over HTTP. A refused call is a tool result with `isError: true` whose text is the error message, what to do next where that is clear, and `(error code: <code>)` with a code from [Errors](#errors). A failed run reads `Request <id> failed: <reason>`. Protocol mistakes, such as an unknown tool or missing arguments, are JSON-RPC errors. To add it to Claude Code:
 
 ```bash
 claude mcp add --transport http hashi https://your-host/mcp --header "Authorization: Bearer hashi_…"
@@ -291,7 +300,7 @@ claude mcp add --transport http hashi https://your-host/mcp --header "Authorizat
 
 ## Errors
 
-Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
+Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`. Some add fields: `limit_reached` has `limit`, `resetAt` and `retryAfter`, and a `rate_limited` whose window is known has `retryAfter`. `retryAfter` is whole seconds until a retry can succeed, and the response sends the same number as a `Retry-After` header. A `429` without it (`too_many_pending`, `too_many_waits`, `request_too_soon`, a full queue) has no fixed wait: retry after a request finishes, or later. A `401` sends `WWW-Authenticate: Bearer`.
 
 | Status | Code | When |
 |---|---|---|
@@ -300,7 +309,8 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 401 | `unauthorized` | Missing, unknown or expired token |
 | 403 | `forbidden` | Admin required, or the token may not use that agent |
 | 403 | `token_paused` | The token is paused by the owner |
-| 404 | `not_found` | Unknown request, or a request owned by another token |
+| 404 | `not_found` | Unknown request, or a request owned by another token, or no such route |
+| 404 | `model_not_found` | `GET /v1/models/{model}`: the token may not use that model, or this bridge cannot run it |
 | 404 | `invite_not_found` | Unknown or cancelled invite link |
 | 404 | `link_not_found` | Unknown ask-access link code |
 | 404 | `request_not_found` | Unknown pickup secret |
@@ -317,11 +327,11 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 413 | | Body larger than 64 KB |
 | 413 | `too_large` | A token that may run on a remote account sent a prompt that would pass 64 KB once forwarded |
 | 421 | `unknown_host` | Plain HTTP request with a `Host` Hashi does not serve (see `--allowed-host`) |
-| 429 | `limit_reached` | A daily or monthly cap was hit; `limit` and `resetAt` say which and until when |
+| 429 | `limit_reached` | A daily or monthly cap was hit; `limit`, `resetAt` and `retryAfter` (also `Retry-After`) say which and until when |
 | 429 | `too_many_pending` | The token already has `maxPending` prompts in flight |
 | 429 | `too_many_waits` | OpenAI endpoint: the token already holds 4 open long polls or streams |
 | 429 | `request_too_soon` | A token asked for more less than an hour after its last request |
-| 429 | `rate_limited` | Per-token rate limit, full queue, too many failed token, invite, link or pickup attempts from one address, or an account refresh within a minute of the last |
+| 429 | `rate_limited` | Per-token rate limit, full queue, too many failed token, invite, link or pickup attempts from one address, or an account refresh within a minute of the last. All but the full queue carry `retryAfter` and `Retry-After` |
 | 500 | `internal` | A bug in Hashi. The error also carries an `errorId` to quote in a bug report |
 | 502 | `agent_failed` | OpenAI endpoint: the agent run failed or was cancelled; `message` says why |
 | 503 | `unavailable` | That agent is not installed on this machine |

@@ -32,11 +32,27 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
 
-const INSTRUCTIONS: &str = "Hashi relays prompts to coding agents (such as Claude Code and \
-Codex) running on its owner's machine. Use an ask_<agent> tool to send a prompt and get the \
-answer. Long runs return a request id: pass it to get_result, or to cancel to stop it. \
-my_usage shows this token's limits and usage, and request_more asks the owner for more.";
+/// What `initialize` tells the client about this server, with the
+/// longest an `ask_<agent>` call waits.
+fn instructions(wait_secs: u64) -> String {
+    format!(
+        "Hashi relays prompts to coding agents (such as Claude Code and Codex) that run on \
+its owner's machine, in a folder the owner chose. The agent cannot see your files or this \
+conversation, so put everything it needs in the prompt (up to 32 KB). \
+Each agent this token may use has an ask_<agent> tool. A call waits for the agent to finish, \
+up to {wait_secs} seconds; runs often take minutes. If the answer is not ready by then, the \
+result says the request is still queued or running and gives its request id. Then call \
+get_result with that id, which waits up to {GET_RESULT_WAIT_SECS} seconds per call, until it \
+returns the answer. Do not send the prompt again: that starts a second run. Call cancel with \
+the id to stop a run you no longer need. \
+The owner sets this token's limits: prompts and spend per day and month, and prompts in \
+flight at once. A refused call says which limit applies and when to try again. my_usage \
+shows the limits and what is used; request_more asks the owner for more, and nothing \
+changes until they accept."
+    )
+}
 
 /// A JSON-RPC error: code and message.
 struct RpcError(i64, String);
@@ -120,11 +136,13 @@ async fn dispatch(
     params: Value,
 ) -> Result<Value, RpcError> {
     match method {
-        "initialize" => Ok(initialize(&params)),
+        "initialize" => Ok(initialize(state, &params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({
-            "tools": tools(state, &crate::api::usable_agents(&state.store, token))
-        })),
+        "tools/list" => {
+            let agents = api::offered_agents(state, token)
+                .map_err(|e| RpcError(INTERNAL_ERROR, e.to_string()))?;
+            Ok(json!({ "tools": tools(state.run_timeout_secs, &agents) }))
+        }
         "tools/call" => {
             let call: CallParams =
                 serde_json::from_value(params).map_err(RpcError::invalid_params)?;
@@ -137,7 +155,7 @@ async fn dispatch(
     }
 }
 
-fn initialize(params: &Value) -> Value {
+fn initialize(state: &AppState, params: &Value) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .filter(|v| PROTOCOL_VERSIONS.contains(v))
@@ -146,7 +164,7 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "hashi", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": INSTRUCTIONS,
+        "instructions": instructions(state.run_timeout_secs),
     })
 }
 
@@ -163,70 +181,127 @@ fn ask_tool_agent(name: &str) -> Option<AgentKind> {
     (ask_tool_name(agent) == name).then_some(agent)
 }
 
-fn tools(state: &AppState, agents: &[AgentKind]) -> Vec<Value> {
-    let mut list: Vec<Value> = AgentKind::ALL
-        .into_iter()
-        .filter(|a| agents.contains(a))
-        // Crush is opt-in: not listed unless the owner enabled it.
-        .filter(|a| *a != AgentKind::Crush || state.runtime.agents.iter().any(|i| i.agent == *a))
-        .map(|agent| {
+/// The schema of a request id argument.
+fn id_schema() -> Value {
+    json!({
+        "type": "string",
+        "format": "uuid",
+        "minLength": 1,
+        "maxLength": 64,
+        "description": "The request id from an earlier ask_* result that said the request \
+                        was still queued or running.",
+    })
+}
+
+/// The tools for a token that may use `agents`, where an `ask_<agent>`
+/// call waits up to `wait_secs` for its answer.
+fn tools(wait_secs: u64, agents: &[AgentKind]) -> Vec<Value> {
+    let mut list: Vec<Value> = agents
+        .iter()
+        .map(|&agent| {
             json!({
                 "name": ask_tool_name(agent),
+                "title": format!("Ask {}", agent.display_name()),
                 "description": format!(
-                    "Send a prompt to {} on the Hashi host and return its answer. \
-                     Waits for the run to finish; if it takes too long, returns a \
-                     request id to pass to get_result.",
-                    agent.display_name()
+                    "Send one prompt to {name} on the Hashi owner's machine and return its \
+                     answer as text. Waits for the run to finish, up to {wait_secs} seconds. \
+                     If it is still queued or running after that, or this token already has \
+                     {waits} calls waiting, it returns at once with the request id instead: \
+                     pass that id to get_result, and do not send the prompt again. Returns \
+                     isError when the token is paused or at a limit, or the run fails.",
+                    name = agent.display_name(),
+                    waits = api::MAX_WAITS_PER_TOKEN,
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "prompt": { "type": "string", "description": "The prompt to send." },
-                        "model": { "type": "string", "description": "Optional model override." },
+                        "prompt": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": api::MAX_MESSAGE_BYTES,
+                            "description": "The whole prompt, up to 32 KB of UTF-8. The agent \
+                                            cannot see your files or this conversation, so \
+                                            include everything it needs.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*$",
+                            "description": "The agent's own model name, such as sonnet or opus \
+                                            for Claude Code. Leave it out to use the default \
+                                            the owner set.",
+                        },
                     },
                     "required": ["prompt"],
+                    "additionalProperties": false,
+                },
+                "annotations": {
+                    "readOnlyHint": false,
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": true,
                 },
             })
         })
         .collect();
     list.push(json!({
         "name": "get_result",
-        "description": "Fetch the result of an earlier ask_* call by request id. \
-                        Waits up to 30 seconds if it is still running.",
+        "title": "Get a result",
+        "description": format!(
+            "Read the answer to an earlier ask_* request by its id. While the request is \
+             queued or running this waits up to {GET_RESULT_WAIT_SECS} seconds; if it is still \
+             not done, the result says so and you call get_result again. Returns isError when \
+             the run failed or was cancelled, or for an id this token did not send."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Request id returned by ask_*." },
-            },
+            "properties": { "id": id_schema() },
             "required": ["id"],
+            "additionalProperties": false,
         },
+        "annotations": { "readOnlyHint": true, "openWorldHint": false },
     }));
     list.push(json!({
         "name": "cancel",
-        "description": "Cancel an earlier ask_* request by id while it is queued or \
-                        running. A running agent is stopped.",
+        "title": "Cancel a request",
+        "description": "Stop an earlier ask_* request by its id while it is queued or running. \
+                        A running agent is killed and its answer is lost. Returns isError for \
+                        a request that already finished (read it with get_result) or an id \
+                        this token did not send.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Request id returned by ask_*." },
-            },
+            "properties": { "id": id_schema() },
             "required": ["id"],
+            "additionalProperties": false,
+        },
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false,
         },
     }));
     list.push(json!({
         "name": "my_usage",
-        "description": "Show this token's access: status, allowed agents, limits, \
-                        usage today and this month, and when limits reset. When the \
-                        owner shares usage with this token, also the headroom left \
-                        per agent.",
-        "inputSchema": { "type": "object", "properties": {}, "required": [] },
+        "title": "My access and usage",
+        "description": "Show this token's access as JSON: status, allowed agents, limits, \
+                        usage today and this month, and when the limits reset (UTC). When the \
+                        owner shares usage with this token, also agentUsage: the headroom left \
+                        per agent. Call it after a call fails at a limit.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "annotations": { "readOnlyHint": true, "openWorldHint": false },
     }));
+    let agent_names: Vec<&str> = AgentKind::ALL.iter().map(|a| a.as_str()).collect();
     list.push(json!({
         "name": "request_more",
-        "description": "Ask the owner of this Hashi for more: higher daily or monthly \
-                        prompts or budget, more agents, a later expiry, or anything in \
-                        a message. The owner decides; nothing changes until they accept. \
-                        At most 3 open requests, and one new one an hour.",
+        "title": "Ask the owner for more",
+        "description": "Ask the owner of this Hashi for more: higher daily or monthly prompt \
+                        or budget limits, more agents, a later expiry, or anything in a \
+                        message. Give at least one field. The owner decides; nothing changes \
+                        until they accept, and my_usage shows the new limits once they do. \
+                        A token may have 3 open requests and send one an hour. Admin tokens \
+                        cannot use it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -234,12 +309,18 @@ fn tools(state: &AppState, agents: &[AgentKind]) -> Vec<Value> {
                 "monthlyRequests": { "type": "integer", "minimum": 0, "description": "Prompts per UTC month wanted." },
                 "dailyBudgetUsd": { "type": "number", "minimum": 0, "description": "Spend per UTC day wanted, in USD." },
                 "monthlyBudgetUsd": { "type": "number", "minimum": 0, "description": "Spend per UTC month wanted, in USD." },
-                "agents": { "type": "array", "items": { "type": "string" }, "description": "Agents wanted on top of the current ones." },
-                "expiresInDays": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "A new lifetime in days, from when it is accepted." },
-                "message": { "type": "string", "maxLength": 500, "description": "Anything else, for the owner to read." },
+                "agents": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": agent_names },
+                    "uniqueItems": true,
+                    "description": "Agents wanted on top of the current ones.",
+                },
+                "expiresInDays": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "A new lifetime in days, counted from when the owner accepts." },
+                "message": { "type": "string", "maxLength": 500, "description": "Anything else, for the owner to read. Up to 500 characters." },
             },
-            "required": [],
+            "additionalProperties": false,
         },
+        "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false },
     }));
     list
 }
@@ -279,9 +360,18 @@ async fn call_tool(state: &AppState, token: &Token, call: CallParams) -> Result<
         "cancel" => {
             let a: GetResultArgs = args(call.arguments)?;
             // Ownership is checked as `get_result` checks it.
-            api::cancel_request(state, token, &a.id)
-                .await
-                .map(|r| (format!("Cancelled request {}.", r.id), false))
+            match api::cancel_request(state, token, &a.id).await {
+                Ok(r) => Ok((format!("Cancelled request {}.", r.id), false)),
+                Err(e) if e.code() == "conflict" => Ok((
+                    format!(
+                        "Request {} already finished, so there is nothing to cancel; call \
+                         get_result to read it. (error code: conflict)",
+                        a.id
+                    ),
+                    true,
+                )),
+                Err(e) => Err(e),
+            }
         }
         "my_usage" => api::me_json(state, token).await.map(|v| {
             (
@@ -307,7 +397,7 @@ async fn call_tool(state: &AppState, token: &Token, call: CallParams) -> Result<
             return Err(RpcError(INVALID_PARAMS, format!("unknown tool: {other}")));
         }
     };
-    let (text, is_error) = outcome.unwrap_or_else(|e: ApiError| (e.to_string(), true));
+    let (text, is_error) = outcome.unwrap_or_else(|e: ApiError| (error_text(&e), true));
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
         "isError": is_error,
@@ -365,14 +455,49 @@ async fn get_result(
     Ok(outcome(req))
 }
 
+/// A refused tool call as text for the model: the message, what to do
+/// next where that is clear, and the error code from the API reference.
+fn error_text(e: &ApiError) -> String {
+    let code = e.code();
+    let next = match code {
+        "limit_reached" => {
+            " my_usage shows this token's limits; request_more asks the owner for more."
+        }
+        "too_many_pending" => {
+            " Wait for an earlier request with get_result, or stop one with cancel."
+        }
+        "not_found" => " Use a request id from an ask_* result sent with this token.",
+        _ => "",
+    };
+    format!("{e}.{next} (error code: {code})")
+}
+
 /// Text and `isError` flag for a request's current state.
 fn outcome(r: Request) -> (String, bool) {
     match r.status {
-        RequestStatus::Completed => (r.response.unwrap_or_default(), false),
-        RequestStatus::Failed => (r.error.unwrap_or_else(|| "the run failed".to_owned()), true),
+        RequestStatus::Completed => {
+            let text = r.response.unwrap_or_default();
+            if text.trim().is_empty() {
+                (
+                    "(The agent finished with an empty answer.)".to_owned(),
+                    false,
+                )
+            } else {
+                (text, false)
+            }
+        }
+        RequestStatus::Failed => (
+            format!(
+                "Request {} failed: {}",
+                r.id,
+                r.error.unwrap_or_else(|| "the run failed".to_owned())
+            ),
+            true,
+        ),
         RequestStatus::Queued | RequestStatus::Running => (
             format!(
-                "Still {} (request id {}). Call get_result with this id to fetch the answer.",
+                "Still {} (request id {}). Call get_result with this id to fetch the answer; \
+                 do not send the prompt again.",
                 r.status.as_str(),
                 r.id
             ),

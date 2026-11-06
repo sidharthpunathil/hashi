@@ -9,6 +9,7 @@
 //! | `DELETE` | `/v1/ask/{id}`        | token | Cancel a queued or running request |
 //! | `POST`   | `/v1/chat/completions`| token | OpenAI-compatible chat             |
 //! | `GET`    | `/v1/models`          | token | OpenAI-compatible model list       |
+//! | `GET`    | `/v1/models/{model}`  | token | One model from that list           |
 //! | `DELETE` | `/v1/session/{agent}` | token | Reset a stateful conversation      |
 //! | `GET`    | `/v1/me`              | any   | The token's own access and usage   |
 //! | `GET`    | `/v1/stats`           | admin | Counters and machine resources     |
@@ -56,8 +57,8 @@ pub use access::ask_more_for;
 pub use cancel::cancel_request;
 
 pub use ask::{
-    AskBody, SubmitInput, forwarded_hops, me_json, reads_any_request, request_json, shared_usage,
-    submit, wait_until_done,
+    AskBody, MAX_WAITS_PER_TOKEN, SubmitInput, forwarded_hops, me_json, offered_agents,
+    reads_any_request, request_json, shared_usage, submit, wait_until_done,
 };
 pub use invites::{CreateInviteBody, MAX_PENDING_INVITES, snippets, validate_new_invite};
 pub use projects::{
@@ -97,6 +98,8 @@ pub const MAX_MESSAGE_BYTES: usize = 32 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Upper bound for `wait` long-polls, in seconds.
 pub const MAX_WAIT_SECS: u64 = 120;
+/// The API reference, linked from `GET /`.
+pub const DOCS_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/docs/api.md");
 /// Upper bound on stored tokens.
 pub const MAX_TOKENS: usize = crate::store::MAX_TOKENS;
 
@@ -307,7 +310,9 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
             "/mcp",
             post(crate::mcp::handle).get(crate::mcp::get_not_allowed),
         )
-        .fallback(|| async { ApiError::NotFound("no such route") })
+        .fallback(|| async {
+            ApiError::NotFound("no such route; GET / links to the API reference")
+        })
         .layer(axum::middleware::map_request(json_by_default))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
     if let Some(cors) = cors(&net.cors_origins) {
@@ -388,8 +393,9 @@ fn claim_outcome<T>(state: &AppState, client: &ClientKey, result: ApiResult<T>) 
             if state.limiter.check(&format!("claim:{}", client.0)) {
                 Err(e)
             } else {
-                Err(ApiError::TooManyRequests(
-                    "too many claim attempts, slow down",
+                Err(ApiError::rate_limited(
+                    "too many failed attempts from this address",
+                    state.limiter.retry_after(&format!("claim:{}", client.0)),
                 ))
             }
         }
@@ -472,6 +478,44 @@ impl ApiError {
         }
     }
 
+    /// A `429 rate_limited` error that a retry after `wait` can get past.
+    /// The message gains "try again in N seconds", the body `retryAfter`
+    /// and the response a `Retry-After` header, all with the same seconds.
+    #[must_use]
+    pub fn rate_limited(message: &str, wait: Duration) -> Self {
+        let secs = retry_secs(wait);
+        Self::Coded {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "rate_limited",
+            message: format!("{message}; try again in {}", seconds(secs)),
+            extra: Some(json!({ "retryAfter": secs })),
+        }
+    }
+
+    /// Seconds until a retry can succeed, when known: the `retryAfter`
+    /// field, which the response also sends as `Retry-After`.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<u64> {
+        self.extra()
+            .and_then(|e| e.get("retryAfter"))
+            .and_then(serde_json::Value::as_u64)
+    }
+
+    /// The machine-readable code, such as `limit_reached`.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        self.parts().1
+    }
+
+    /// The extra fields of a coded error, such as `limit` and `resetAt`.
+    #[must_use]
+    pub fn extra(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Coded { extra, .. } => extra.as_ref(),
+            _ => None,
+        }
+    }
+
     fn parts(&self) -> (StatusCode, &'static str) {
         match self {
             Self::Coded { status, code, .. } => (*status, code),
@@ -518,11 +562,37 @@ impl IntoResponse for ApiError {
             obj.extend(extra.clone());
         }
         let mut res = (status, Json(json!({ "error": error }))).into_response();
-        if status == StatusCode::UNAUTHORIZED {
-            res.headers_mut()
-                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-        }
+        error_headers(&mut res, &self);
         res
+    }
+}
+
+/// Whole seconds to wait, rounded up and at least 1.
+#[must_use]
+pub fn retry_secs(wait: Duration) -> u64 {
+    let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+    secs.max(1)
+}
+
+/// "1 second" or "N seconds".
+fn seconds(n: u64) -> String {
+    if n == 1 {
+        "1 second".to_owned()
+    } else {
+        format!("{n} seconds")
+    }
+}
+
+/// The headers an error response carries besides its body:
+/// `WWW-Authenticate` on a 401, and `Retry-After` when the wait is known.
+pub(crate) fn error_headers(res: &mut Response, e: &ApiError) {
+    if res.status() == StatusCode::UNAUTHORIZED {
+        res.headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    }
+    if let Some(secs) = e.retry_after() {
+        res.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(secs));
     }
 }
 
@@ -570,6 +640,17 @@ impl RateLimiter {
         entry.1 <= self.per_minute
     }
 
+    /// How long until the window of `key` starts over, which is when a
+    /// refused key gets its budget back.
+    pub fn retry_after(&self, key: &str) -> Duration {
+        let window = Duration::from_secs(60);
+        let Ok(map) = self.windows.lock() else {
+            return window;
+        };
+        map.get(key)
+            .map_or(window, |(start, _)| window.saturating_sub(start.elapsed()))
+    }
+
     /// Whether `key` has used up its budget for the current window, without
     /// recording a hit.
     pub fn exhausted(&self, key: &str) -> bool {
@@ -584,6 +665,14 @@ impl RateLimiter {
         })
     }
 }
+
+/// Why a token is refused: unknown, revoked or past its expiry.
+pub(crate) const INVALID_TOKEN: &str =
+    "invalid or expired token; ask the owner of this Hashi for a new one";
+
+/// Why a paused token's prompt is refused.
+pub(crate) const TOKEN_PAUSED: &str =
+    "this token is paused by the owner; prompts are accepted again once they resume it";
 
 /// Extractor for an unexpired token (paused tokens pass; see [`submit`]).
 #[derive(Debug)]
@@ -603,13 +692,15 @@ fn bearer(parts: &Parts) -> ApiResult<&str> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .ok_or(ApiError::Unauthorized(
-            "missing Authorization: Bearer <token> header",
+            "missing Authorization header; send Authorization: Bearer <token>",
         ))?;
     header
         .strip_prefix("Bearer ")
         .map(str::trim)
         .filter(|t| !t.is_empty() && t.len() <= 256)
-        .ok_or(ApiError::Unauthorized("malformed Authorization header"))
+        .ok_or(ApiError::Unauthorized(
+            "malformed Authorization header; send Authorization: Bearer <token>",
+        ))
 }
 
 /// Looks up the bearer token, throttling clients that keep presenting
@@ -633,8 +724,9 @@ fn authenticate(
     if state.limiter.check(&key) {
         Err(ApiError::Unauthorized(rejection))
     } else {
-        Err(ApiError::TooManyRequests(
-            "too many invalid tokens from this address, slow down",
+        Err(ApiError::rate_limited(
+            "too many invalid tokens from this address",
+            state.limiter.retry_after(&key),
         ))
     }
 }
@@ -643,7 +735,10 @@ fn rate_limit(state: &AppState, token: &Token) -> ApiResult<()> {
     if state.limiter.check(&token.id) {
         Ok(())
     } else {
-        Err(ApiError::TooManyRequests("rate limit exceeded, slow down"))
+        Err(ApiError::rate_limited(
+            "this token sent too many requests this minute",
+            state.limiter.retry_after(&token.id),
+        ))
     }
 }
 
@@ -655,7 +750,7 @@ impl FromRequestParts<AppState> for Auth {
             parts,
             state,
             |store, secret| store.authenticate(secret),
-            "invalid or expired token",
+            INVALID_TOKEN,
         )?;
         rate_limit(state, &token)?;
         Ok(Self(token))
@@ -670,7 +765,7 @@ impl FromRequestParts<AppState> for AnyToken {
             parts,
             state,
             |store, secret| store.authenticate_any(secret),
-            "invalid token",
+            "unknown or revoked token; ask the owner of this Hashi for a new one",
         )?;
         rate_limit(state, &token)?;
         Ok(Self(token))
@@ -683,13 +778,15 @@ impl FromRequestParts<AppState> for Admin {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
         let Auth(token) = Auth::from_request_parts(parts, state).await?;
         if !token.is_admin() {
-            return Err(ApiError::Forbidden("admin token required".to_owned()));
+            return Err(ApiError::Forbidden(
+                "this endpoint needs an admin token".to_owned(),
+            ));
         }
         if token.status(now_ms()) == TokenStatus::Paused {
             return Err(ApiError::coded(
                 StatusCode::FORBIDDEN,
                 "token_paused",
-                "this admin token is paused",
+                "this admin token is paused; resume it from the dashboard",
             ));
         }
         Ok(Self(token))
@@ -704,7 +801,9 @@ async fn root(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "description": "A bridge to the coding agents on this machine",
         "baseUrl": state.runtime.base_url(),
-        "docs": "POST /v1/ask with Authorization: Bearer <token>",
+        "docs": DOCS_URL,
+        "usage": "POST /v1/ask with Authorization: Bearer <token>. The same token works \
+                  for the OpenAI-compatible API at /v1 and the MCP server at /mcp.",
     }))
 }
 
@@ -918,9 +1017,10 @@ async fn refresh_account(
         .ok_or_else(|| ApiError::Unavailable("usage reads are not set up".to_owned()))?;
     let result = poller.poll(agent, &name).await;
     match &result {
-        Err(crate::usage::poller::PollError::TooSoon(_)) => {
-            return Err(ApiError::TooManyRequests(
+        Err(crate::usage::poller::PollError::TooSoon(wait)) => {
+            return Err(ApiError::rate_limited(
                 "this account was read less than a minute ago",
+                *wait,
             ));
         }
         Err(crate::usage::poller::PollError::NotSupported(why)) => {
@@ -930,7 +1030,7 @@ async fn refresh_account(
             return Err(ApiError::coded(
                 StatusCode::CONFLICT,
                 "account_busy",
-                "a run on this account is active; it is read after the run",
+                "a run on this account is in progress; try again once it ends",
             ));
         }
         _ => {}

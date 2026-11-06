@@ -395,12 +395,18 @@ async fn mcp_cancel_tool_checks_ownership() {
     h.wait_for(&first, "running").await;
     let r = h.tool(&bob, "cancel", json!({ "id": second })).await;
     assert_eq!(r["isError"], true, "{r}");
-    assert_eq!(r["content"][0]["text"], "request not found");
+    let t = r["content"][0]["text"].as_str().unwrap();
+    assert!(t.starts_with("request not found."), "{t}");
+    assert!(t.ends_with("(error code: not_found)"), "{t}");
     let r = h.tool(&alice, "cancel", json!({ "id": second })).await;
     assert_eq!(r["isError"], false, "{r}");
     assert_eq!(h.status_of(&second).await["error"], "cancelled");
     let r = h.tool(&alice, "cancel", json!({ "id": second })).await;
     assert_eq!(r["isError"], true, "{r}");
-    assert_eq!(r["content"][0]["text"], "request already finished");
+    let t = r["content"][0]["text"].as_str().unwrap();
+    assert!(
+        t.contains("already finished") && t.contains("get_result"),
+        "{t}"
+    );
     h.running.shutdown().await;
 }
