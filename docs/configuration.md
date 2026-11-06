@@ -64,8 +64,8 @@ hashi install tailscale --yes              # run it without asking
 hashi install crush                        # Crush, from its README; then start with --enable-crush
 hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
-hashi token update hashi_1a2b3c4d --pause  # or --resume, --daily-requests 100, --clear-limits
-hashi token revoke hashi_1a2b3c4d
+hashi token update ci --pause              # by name, prefix or id; or --resume, --daily-requests 100, --clear-limits
+hashi token revoke ci
 hashi share alice --agents claude          # one-time invite link (see Invites and limits)
 hashi account add claude work              # another login for an agent (see Accounts)
 hashi project add api ~/code/api           # a folder to share (see Projects)
@@ -80,7 +80,19 @@ hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
 hashi update                               # install the latest release (--check, --version v0.3.1, --allow-downgrade, --yes)
 hashi uninstall                            # remove the binary and ~/.hashi (--dry-run, --keep-data, --yes)
+hashi llm                                  # a Markdown guide for an LLM agent (alias: hashi guide)
+hashi llm --output hashi-guide.md          # write it to a file readable only by you
 ```
+
+A token is named by its id, its display prefix (the `PREFIX` column) or its name when no other token has the same one. Run `hashi <command> --help` for every flag; the main commands end their help with examples.
+
+**`--json` for scripts.** `token list`, `invite list`, `account list`, `account usage`, `project list`, `requests list` and `audit` take `--json` and print the same camelCase fields as the matching API listing (`GET /v1/tokens`, `/v1/invites`, `/v1/accounts`, `/v1/projects`, `/v1/access-requests` and `/v1/audit`), wrapped the same way, such as `{"tokens": [...]}`. `requests list --json` also has `pending` (the count of pending requests) and `link`, the ask-access link's state. None of them ever prints a token, an invite or ask-access code, or a key.
+
+```bash
+hashi token list --json | jq -r '.tokens[] | select(.status == "paused") | .name'
+```
+
+**`hashi llm`** (also `hashi guide`) prints a Markdown guide written for an LLM agent such as Claude Code, Codex or Cursor: what Hashi is, rules to follow (treat tokens and links as secrets, ask before anything destructive, read first), the exact commands for common tasks, a command reference generated from this binary's own flags, and HTTP API pointers. Paste it into the agent, or save it with `--output <file>`, which writes it readable only by you. The dashboard's Commands view has the same as "Copy guide for an LLM".
 
 `hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
@@ -351,7 +363,7 @@ Tab `5` lists everything the owner can do, grouped, one row each with its key (o
 | Server | port and bind address, copy the API URL (`c`) | `hashi serve --port --bind` |
 | Install | cloudflared, tailscale, Crush | `hashi install cloudflared\|tailscale\|crush` |
 | Maintenance | check for updates, install the update, doctor, diagnostic report, audit log | `hashi update [--check]`, `hashi doctor`, `hashi report`, `hashi audit` |
-| Help | all key bindings (`?`) | `hashi --help` |
+| Help | copy guide for an LLM (copies the guide and says how many lines), all key bindings (`?`) | `hashi llm`, `hashi --help` |
 
 The tab label shows how many requests for access are waiting, as `Commands ·2`. It updates when a request arrives and with the regular refresh.
 

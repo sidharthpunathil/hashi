@@ -1596,9 +1596,12 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
         },
         Action::Listen => (rt.local_url(), TEXT),
         Action::CopyUrl => (rt.base_url(), TEXT),
-        Action::Connect | Action::Doctor | Action::Report | Action::Audit | Action::Help => {
-            (String::new(), TEXT)
-        }
+        Action::Connect
+        | Action::Doctor
+        | Action::Report
+        | Action::Audit
+        | Action::CopyGuide
+        | Action::Help => (String::new(), TEXT),
     }
 }
 
@@ -1642,6 +1645,7 @@ pub fn action_cli(app: &App, action: Action) -> String {
         Action::Doctor => "hashi doctor".to_owned(),
         Action::Report => "hashi report".to_owned(),
         Action::Audit => "hashi audit".to_owned(),
+        Action::CopyGuide => "hashi llm".to_owned(),
         Action::Help => "hashi --help".to_owned(),
     }
 }

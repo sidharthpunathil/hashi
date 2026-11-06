@@ -12,6 +12,7 @@ pub mod events;
 pub mod forward;
 pub mod guard;
 pub mod install;
+pub mod llm;
 pub mod maintenance;
 pub mod mcp;
 pub mod net;

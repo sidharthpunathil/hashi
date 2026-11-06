@@ -124,10 +124,15 @@ pub enum TokenCommand {
         limits: LimitArgs,
     },
     /// List tokens with status and today's use.
-    List,
+    List {
+        /// Print JSON, as `GET /v1/tokens` shows each token. Never the
+        /// secret.
+        #[arg(long)]
+        json: bool,
+    },
     /// Pause, resume, extend or limit a token.
     Update {
-        /// Token id or display prefix.
+        /// Token id, display prefix or unique name.
         id: String,
         /// Stop the token from sending prompts until resumed.
         #[arg(long, conflicts_with = "resume")]
@@ -164,9 +169,10 @@ pub enum TokenCommand {
         #[command(flatten)]
         limits: LimitArgs,
     },
-    /// Revoke a token by id or prefix.
+    /// Revoke a token by id, prefix or name. It stops its running prompts
+    /// and deletes its workspace.
     Revoke {
-        /// Token id or display prefix.
+        /// Token id, display prefix or unique name.
         id: String,
     },
 }
@@ -219,26 +225,119 @@ pub struct ShareArgs {
 /// `hashi invite ...`
 #[derive(Debug, Subcommand)]
 pub enum InviteCommand {
-    /// List invites.
-    List,
+    /// List invites with their status.
+    List {
+        /// Print JSON, as `GET /v1/invites` shows each invite. Never the
+        /// link.
+        #[arg(long)]
+        json: bool,
+    },
     /// Cancel a pending invite.
     Cancel {
-        /// Invite id.
+        /// Invite id, as `hashi invite list` shows it.
         id: String,
     },
 }
 
-fn find_token(store: &Store, id_or_prefix: &str) -> Result<Token> {
-    let matches: Vec<Token> = store
-        .list_tokens()?
-        .into_iter()
-        .filter(|t| t.id == id_or_prefix || t.prefix == id_or_prefix)
+/// The token with this id or display prefix, else the one with this name.
+fn find_token(store: &Store, key: &str) -> Result<Token> {
+    let tokens = store.list_tokens()?;
+    let by_id: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| t.id == key || t.prefix == key)
         .collect();
+    let matches = if by_id.is_empty() {
+        tokens.iter().filter(|t| t.name == key).collect()
+    } else {
+        by_id
+    };
     match matches.as_slice() {
-        [t] => Ok(t.clone()),
-        [] => bail!("no token matches `{id_or_prefix}`"),
-        _ => bail!("`{id_or_prefix}` matches several tokens; use the full id"),
+        [t] => Ok((*t).clone()),
+        [] => bail!(
+            "no token matches `{}`; `hashi token list` shows names and prefixes",
+            terminal_safe(key)
+        ),
+        _ => bail!(
+            "`{}` matches several tokens; use the id from `hashi token list --json`",
+            terminal_safe(key)
+        ),
     }
+}
+
+/// Prints `rows` under `headers`, each column as wide as its widest cell,
+/// so a long name does not push the columns after it out of line. The
+/// last column is not padded.
+fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    fn width(s: &str) -> usize {
+        s.chars().count()
+    }
+    let mut widths: Vec<usize> = headers.iter().map(|h| width(h)).collect();
+    for row in rows {
+        for (w, cell) in widths.iter_mut().zip(row) {
+            *w = (*w).max(width(cell));
+        }
+    }
+    let line = |cells: Vec<&str>| {
+        let mut out = String::new();
+        let last = cells.len().saturating_sub(1);
+        for (i, cell) in cells.iter().enumerate() {
+            out.push_str(cell);
+            if i < last {
+                out.push_str(&" ".repeat(widths[i] - width(cell) + 2));
+            }
+        }
+        println!("{}", out.trim_end());
+    };
+    line(headers.to_vec());
+    for row in rows {
+        line(row.iter().map(String::as_str).collect());
+    }
+}
+
+fn print_json(value: &serde_json::Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+/// A token as `GET /v1/tokens` shows it: never the secret.
+fn token_json(store: &Store, t: &Token, now: i64) -> Result<serde_json::Value> {
+    let conversations: Vec<serde_json::Value> = store
+        .conversations(&t.id)?
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "agent": c.agent,
+                "account": c.account,
+                "project": c.project,
+                "updatedAt": rfc3339(c.updated_at),
+            })
+        })
+        .collect();
+    let mut v = serde_json::to_value(t)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("status".into(), serde_json::json!(t.status(now)));
+        obj.insert("conversations".into(), serde_json::json!(conversations));
+    }
+    Ok(v)
+}
+
+/// An invite as `GET /v1/invites` shows it: never its code.
+fn invite_json(i: &hashi::store::Invite, now: i64) -> serde_json::Value {
+    serde_json::json!({
+        "id": i.id,
+        "label": i.label,
+        "status": i.status(now),
+        "sessionMode": i.session_mode,
+        "agents": i.agents,
+        "tokenExpiresInDays": i.token_expires_in_days,
+        "limits": i.limits,
+        "expiresAt": rfc3339(i.expires_at),
+        "createdAt": rfc3339(i.created_at),
+        "claimedAt": i.claimed_at.and_then(rfc3339),
+        "accounts": i.accounts,
+        "project": i.project,
+        "shareUsage": i.share_usage,
+    })
 }
 
 /// Checks binding to `project` (by name), with these agents and accounts.
@@ -252,6 +351,15 @@ fn bind(
     hashi::api::check_binding(store, project.as_deref(), agents, accounts)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(project)
+}
+
+/// The agents column: `all` when a token or invite may use every agent.
+fn agents_cell(agents: &[AgentKind]) -> String {
+    if AgentKind::ALL.iter().all(|a| agents.contains(a)) {
+        "all".to_owned()
+    } else {
+        hashi::token::encode_agents(agents)
+    }
 }
 
 fn clean_label(s: &str) -> Result<String> {
@@ -313,27 +421,18 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             eprintln!("store it now, it will not be shown again:");
             println!("{}", secret.raw);
         }
-        TokenCommand::List => {
+        TokenCommand::List { json } => {
             let now = now_ms();
-            println!(
-                "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} {:<12} ACCOUNTS",
-                "NAME",
-                "PREFIX",
-                "ROLE",
-                "STATUS",
-                "SESSION",
-                "AGENTS",
-                "TODAY",
-                "LAST USED",
-                "PROJECT",
-            );
-            for t in store.list_tokens()? {
-                let agents = t
-                    .agents
+            let tokens = store.list_tokens()?;
+            if json {
+                let list = tokens
                     .iter()
-                    .map(|a| a.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
+                    .map(|t| token_json(store, t, now))
+                    .collect::<Result<Vec<_>>>()?;
+                return print_json(&serde_json::json!({ "tokens": list }));
+            }
+            let mut rows = Vec::with_capacity(tokens.len());
+            for t in &tokens {
                 let used = t
                     .last_used_at
                     .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u)));
@@ -342,20 +441,36 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     Some(cap) => format!("{}/{cap}", usage.today_requests),
                     None => usage.today_requests.to_string(),
                 };
-                println!(
-                    "{:<20} {:<16} {:<6} {:<8} {:<10} {:<13} {:<9} {:<10} {:<12} {}",
-                    t.name,
-                    t.prefix,
-                    t.role.as_str(),
-                    t.status(now).as_str(),
-                    t.session_mode.as_str(),
-                    agents,
+                rows.push(vec![
+                    terminal_safe(&t.name),
+                    t.prefix.clone(),
+                    t.role.as_str().to_owned(),
+                    t.status(now).as_str().to_owned(),
+                    t.session_mode.as_str().to_owned(),
+                    agents_cell(&t.agents),
                     today,
                     used,
-                    t.project.as_deref().unwrap_or("-"),
-                    acct::format_bindings(&t.accounts)
-                );
+                    t.project
+                        .as_deref()
+                        .map_or_else(|| "-".to_owned(), terminal_safe),
+                    acct::format_bindings(&t.accounts),
+                ]);
             }
+            print_table(
+                &[
+                    "NAME",
+                    "PREFIX",
+                    "ROLE",
+                    "STATUS",
+                    "SESSION",
+                    "AGENTS",
+                    "TODAY",
+                    "LAST USED",
+                    "PROJECT",
+                    "ACCOUNTS",
+                ],
+                &rows,
+            );
         }
         TokenCommand::Update {
             id,
@@ -436,17 +551,13 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             println!("updated {}: {detail}", t.name);
         }
         TokenCommand::Revoke { id } => {
-            let found = find_token(store, &id).ok();
-            let running = match &found {
-                Some(t) => store.running_for_token(&t.id)?,
-                None => 0,
-            };
-            let name = found.map(|t| t.name);
-            match store.revoke_token(&id)? {
+            let found = find_token(store, &id)?;
+            let running = store.running_for_token(&found.id)?;
+            match store.revoke_token(&found.id)? {
                 Revoke::Revoked(token_id) => {
-                    let target = name.unwrap_or_else(|| id.clone());
+                    let target = found.name;
                     store.audit("cli", "token.revoke", &target, "")?;
-                    println!("revoked {target}");
+                    println!("revoked {}", terminal_safe(&target));
                     if running > 0 {
                         // A running server notices the deleted request rows
                         // within a couple of seconds and kills the runs; give
@@ -462,8 +573,11 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                         eprintln!("warning: could not delete its workspace: {e}");
                     }
                 }
-                Revoke::NotFound => bail!("no token matches `{id}`"),
-                Revoke::LastAdmin => bail!("refusing to revoke the last admin token"),
+                Revoke::NotFound => bail!("no token matches `{}`", terminal_safe(&id)),
+                Revoke::LastAdmin => bail!(
+                    "refusing to revoke the last admin token; create another with \
+                     `hashi token create <name> --admin` first"
+                ),
             }
         }
     }
@@ -549,21 +663,39 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
 /// Fails on database errors or an unknown invite.
 pub fn invite(store: &Store, cmd: InviteCommand) -> Result<()> {
     match cmd {
-        InviteCommand::List => {
+        InviteCommand::List { json } => {
             let now = now_ms();
-            println!(
-                "{:<36} {:<20} {:<8} {:<10}",
-                "ID", "LABEL", "STATUS", "CREATED"
-            );
-            for i in store.list_invites()? {
-                println!(
-                    "{:<36} {:<20} {:<8} {:<10}",
-                    i.id,
-                    i.label,
-                    i.status(now),
-                    format!("{} ago", human_age(i.created_at))
-                );
+            let invites = store.list_invites()?;
+            if json {
+                let list: Vec<_> = invites.iter().map(|i| invite_json(i, now)).collect();
+                return print_json(&serde_json::json!({ "invites": list }));
             }
+            if invites.is_empty() {
+                println!("No invites yet. Create one with `hashi share <label>`.");
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = invites
+                .iter()
+                .map(|i| {
+                    vec![
+                        i.id.clone(),
+                        terminal_safe(&i.label),
+                        i.status(now).to_string(),
+                        agents_cell(&i.agents),
+                        i.project
+                            .as_deref()
+                            .map_or_else(|| "-".to_owned(), terminal_safe),
+                        format!("{} ago", human_age(i.created_at)),
+                        rfc3339(i.expires_at).unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            print_table(
+                &[
+                    "ID", "LABEL", "STATUS", "AGENTS", "PROJECT", "CREATED", "EXPIRES",
+                ],
+                &rows,
+            );
         }
         InviteCommand::Cancel { id } => {
             let label = store
@@ -572,32 +704,59 @@ pub fn invite(store: &Store, cmd: InviteCommand) -> Result<()> {
                 .find(|i| i.id == id)
                 .map(|i| i.label);
             if !store.cancel_invite(&id)? {
-                bail!("no pending invite with id `{id}`");
+                bail!(
+                    "no pending invite with id `{}`; `hashi invite list` shows the ids",
+                    terminal_safe(&id)
+                );
             }
             let label = label.unwrap_or(id);
             store.audit("cli", "invite.cancel", &label, "")?;
-            println!("cancelled invite for {label}");
+            println!("cancelled the invite for {}", terminal_safe(&label));
         }
     }
     Ok(())
 }
 
-/// Runs `hashi audit`.
+/// Runs `hashi audit`, as a table or, with `json`, as `GET /v1/audit`
+/// shows it.
 ///
 /// # Errors
 ///
 /// Fails on database errors.
-pub fn audit(store: &Store, limit: u32) -> Result<()> {
-    for e in store.list_audit(limit)? {
-        println!(
-            "{:<20} {:<10} {:<14} {:<20} {}",
-            rfc3339(e.at).unwrap_or_default(),
-            e.actor,
-            e.action,
-            e.target,
-            e.detail
-        );
+pub fn audit(store: &Store, limit: u32, json: bool) -> Result<()> {
+    let entries = store.list_audit(limit)?;
+    if json {
+        let list: Vec<_> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "at": rfc3339(e.at),
+                    "actor": e.actor,
+                    "action": e.action,
+                    "target": e.target,
+                    "detail": e.detail,
+                })
+            })
+            .collect();
+        return print_json(&serde_json::json!({ "entries": list }));
     }
+    if entries.is_empty() {
+        println!("No sharing or access changes yet.");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .map(|e| {
+            vec![
+                rfc3339(e.at).unwrap_or_default(),
+                terminal_safe(&e.actor),
+                e.action.clone(),
+                terminal_safe(&e.target),
+                terminal_safe(&e.detail),
+            ]
+        })
+        .collect();
+    print_table(&["AT", "ACTOR", "ACTION", "TARGET", "DETAIL"], &rows);
     Ok(())
 }
 
@@ -696,6 +855,10 @@ pub enum AccountCommand {
     },
     /// List accounts with their state and use.
     List {
+        /// Print JSON, as `GET /v1/accounts` shows each account. Never a
+        /// key.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         bins: BinArgs,
     },
@@ -949,20 +1112,27 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             acct::ops::prepare_login(store, home, agent, &name)?;
             sign_in(home, agent, &name, yes, &bins)?;
         }
-        AccountCommand::List { bins } => {
+        AccountCommand::List { json, bins } => {
             let now = now_ms();
+            let rotate_at = cli_rotate_at();
+            if json {
+                let mut list = Vec::new();
+                for a in &hashi::api::accounts_with_usage(store).map_err(api_err)? {
+                    list.push(
+                        hashi::api::account_json_with(store, a, now, rotate_at).map_err(api_err)?,
+                    );
+                }
+                return print_json(&serde_json::json!({ "accounts": list }));
+            }
             let accounts = store.list_accounts()?;
             if accounts.is_empty() {
                 println!(
-                    "no accounts yet; every agent uses your own login (add one with hashi account add)"
+                    "No accounts yet: every agent uses your own login. Add one with \
+                     `hashi account add <agent> <name>`."
                 );
                 return Ok(());
             }
-            println!(
-                "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {:<7} USAGE",
-                "AGENT", "NAME", "KIND", "SIGNED IN", "STATE", "LAST USED", "TODAY", "TOKENS"
-            );
-            let rotate_at = cli_rotate_at();
+            let mut rows = Vec::with_capacity(accounts.len());
             for a in accounts {
                 let summary = store.account_summary(a.agent, &a.name, rotate_at, now)?;
                 let state = match a.status(now) {
@@ -970,9 +1140,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                         format!("limited until {}", rfc3339(until).unwrap_or_default())
                     }
                     hashi::store::AccountStatus::Disabled => match &a.disabled_reason {
-                        Some(why) => {
-                            format!("disabled: {}", hashi::diagnostics::terminal_safe(why))
-                        }
+                        Some(why) => format!("disabled: {}", terminal_safe(why)),
                         None => "disabled".to_owned(),
                     },
                     s => s.as_str().to_owned(),
@@ -981,19 +1149,32 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     .last_used
                     .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u)));
                 let (today, _) = store.account_runs(a.agent, &a.name, now)?;
-                println!(
-                    "{:<9} {:<16} {:<12} {:<14} {:<34} {:<10} {:<6} {:<7} {}",
-                    a.agent.as_str(),
-                    a.name,
-                    kind_cell(&a),
+                rows.push(vec![
+                    a.agent.as_str().to_owned(),
+                    a.name.clone(),
+                    terminal_safe(&kind_cell(&a)),
                     acct::ops::signed_in(home, a.agent, &a.name, a.kind, &bins.bin(a.agent), true),
                     state,
                     used,
-                    today,
-                    store.tokens_using_account(a.agent, &a.name)?,
-                    summary_cell(&summary)
-                );
+                    today.to_string(),
+                    store.tokens_using_account(a.agent, &a.name)?.to_string(),
+                    summary_cell(&summary),
+                ]);
             }
+            print_table(
+                &[
+                    "AGENT",
+                    "NAME",
+                    "KIND",
+                    "SIGNED IN",
+                    "STATE",
+                    "LAST USED",
+                    "TODAY",
+                    "TOKENS",
+                    "USAGE",
+                ],
+                &rows,
+            );
         }
         AccountCommand::Usage {
             agent,
@@ -1301,7 +1482,11 @@ pub enum ProjectCommand {
         settings: ProjectArgs,
     },
     /// List projects with their folder, settings and use.
-    List,
+    List {
+        /// Print JSON, as `GET /v1/projects` shows each project.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a project. Its folder is never touched.
     Remove {
         /// Project name.
@@ -1364,7 +1549,11 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
                 created_at: now_ms(),
             };
             if store.list_projects()?.len() >= hashi::projects::MAX_PROJECTS {
-                bail!("project limit reached, remove one first");
+                bail!(
+                    "the project limit ({}) is reached; remove one first with \
+                     `hashi project remove <name>`",
+                    hashi::projects::MAX_PROJECTS
+                );
             }
             let p = hashi::api::validate_project(store, Some(home), raw, &path).map_err(api_err)?;
             if !store.add_project(&p)? {
@@ -1392,9 +1581,9 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
             clear_rotate_at,
             settings,
         } => {
-            let current = store
-                .get_project(&name)?
-                .with_context(|| format!("no project named {name}"))?;
+            let current = store.get_project(&name)?.with_context(|| {
+                format!("no project named {name}; `hashi project list` shows them")
+            })?;
             let accounts = (clear_accounts || !settings.accounts.is_empty()).then(|| {
                 let mut map = if clear_accounts {
                     AccountMap::new()
@@ -1444,27 +1633,24 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
             store.audit("cli", "project.update", &p.name, &detail)?;
             println!("updated {}: {detail}", p.name);
         }
-        ProjectCommand::List => {
+        ProjectCommand::List { json } => {
             let projects = store.list_projects()?;
+            let now = now_ms();
+            if json {
+                let mut list = Vec::with_capacity(projects.len());
+                for p in &projects {
+                    list.push(hashi::api::project_json(store, p, now).map_err(api_err)?);
+                }
+                return print_json(&serde_json::json!({ "projects": list }));
+            }
             if projects.is_empty() {
                 println!(
-                    "no projects yet; every token runs in its own workspace (add one with hashi project add)"
+                    "No projects yet: every token runs in its own workspace. Add one with \
+                     `hashi project add <name> <path>`."
                 );
                 return Ok(());
             }
-            let now = now_ms();
-            println!(
-                "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} {:<20} PATH",
-                "NAME",
-                "TOKENS",
-                "TODAY",
-                "MONTH",
-                "SPEND",
-                "AGENTS",
-                "ACCOUNTS",
-                "MODELS",
-                "STRATEGY"
-            );
+            let mut rows = Vec::with_capacity(projects.len());
             for p in projects {
                 let st = store.project_stats(&p.name, now)?;
                 let agents = match p.default_agent {
@@ -1479,23 +1665,31 @@ pub fn project(store: &Store, home: &Path, cmd: ProjectCommand) -> Result<()> {
                         r.map_or_else(|| "default".to_owned(), |n| format!("{n}%"))
                     ),
                 };
-                println!(
-                    "{:<16} {:<6} {:<8} {:<8} {:<10} {:<24} {:<20} {:<16} {:<20} {}",
-                    p.name,
-                    st.tokens,
-                    st.today_requests,
-                    st.month_requests,
+                rows.push(vec![
+                    p.name.clone(),
+                    st.tokens.to_string(),
+                    st.today_requests.to_string(),
+                    st.month_requests.to_string(),
                     format!("${:.2}", st.month_cost_usd),
                     agents,
                     acct::format_bindings(&p.accounts),
                     hashi::projects::format_models(&p.models),
                     strategy,
-                    p.path
-                );
+                    terminal_safe(&p.path),
+                ]);
             }
+            print_table(
+                &[
+                    "NAME", "TOKENS", "TODAY", "MONTH", "SPEND", "AGENTS", "ACCOUNTS", "MODELS",
+                    "STRATEGY", "PATH",
+                ],
+                &rows,
+            );
         }
         ProjectCommand::Remove { name, unbind } => match store.remove_project(&name, unbind)? {
-            hashi::store::RemovedProject::NotFound => bail!("no project named {name}"),
+            hashi::store::RemovedProject::NotFound => {
+                bail!("no project named {name}; `hashi project list` shows them")
+            }
             hashi::store::RemovedProject::Bound { tokens, invites } => bail!(
                 "{tokens} token(s) and {invites} pending invite(s) are bound to {name}; pass \
                  --unbind to put them back on their own workspace"
@@ -1527,6 +1721,10 @@ pub enum RequestsCommand {
         /// Show decided and expired requests too.
         #[arg(long)]
         all: bool,
+        /// Print JSON, as `GET /v1/access-requests` shows each request,
+        /// with the ask-access link's state. Never a secret.
+        #[arg(long)]
+        json: bool,
     },
     /// Accept a request. A new person gets a single-use invite that only
     /// they can collect; a token gets the asked values. Flags override what
@@ -1588,9 +1786,10 @@ pub enum RequestsCommand {
         /// Base URL for the link, as for `hashi share`.
         #[arg(long, env = "HASHI_PUBLIC_URL")]
         public_url: Option<String>,
-        /// Port of the local server, used for a local-only link.
-        #[arg(long, default_value_t = 7878, env = "HASHI_PORT")]
-        port: u16,
+        /// Port of the local server, used for a local-only link. Default: the
+        /// one saved from the dashboard in `<home>/settings.json`, else 7878.
+        #[arg(long, env = "HASHI_PORT")]
+        port: Option<u16>,
     },
     /// Close the ask-access link.
     Close,
@@ -1604,7 +1803,10 @@ fn find_request(store: &Store, id: &str) -> Result<hashi::store::AccessRequest> 
         .collect();
     match matches.as_slice() {
         [r] => Ok(r.clone()),
-        [] => bail!("no access request matches `{}`", terminal_safe(id)),
+        [] => bail!(
+            "no access request matches `{}`; `hashi requests list --all` shows them",
+            terminal_safe(id)
+        ),
         _ => bail!(
             "`{}` matches several requests; use more of the id",
             terminal_safe(id)
@@ -1652,13 +1854,64 @@ fn public_base(store: &Store, public_url: Option<&str>, port: u16) -> (String, b
     )
 }
 
-fn print_requests(store: &Store, all: bool) -> Result<()> {
+/// An access request as `GET /v1/access-requests` shows it.
+fn request_json(store: &Store, r: &hashi::store::AccessRequest, now: i64) -> serde_json::Value {
+    let status = r.state(now);
+    let prefill = (status == "pending")
+        .then(|| hashi::access::prefill(store, r).ok())
+        .flatten();
+    serde_json::json!({
+        "id": r.id,
+        "kind": r.kind,
+        "status": status,
+        "name": r.name,
+        "message": r.message,
+        "agents": r.agents,
+        "project": r.project,
+        "asked": r.asked,
+        "summary": hashi::access::asked_text(r),
+        "tokenId": r.token_id,
+        "reason": r.reason,
+        "inviteId": r.invite_id,
+        "createdAt": rfc3339(r.created_at),
+        "expiresAt": rfc3339(r.expires_at),
+        "decidedAt": r.decided_at.and_then(rfc3339),
+        "decidedBy": r.decided_by,
+        "prefill": prefill,
+    })
+}
+
+/// The ask-access link as `GET /v1/request-link` shows it, never its code.
+fn link_json(l: &hashi::store::AccessLink, now: i64) -> serde_json::Value {
+    serde_json::json!({
+        "id": l.id,
+        "status": l.status(now),
+        "project": l.project,
+        "note": l.note,
+        "createdAt": rfc3339(l.created_at),
+        "expiresAt": rfc3339(l.expires_at),
+        "closedAt": l.closed_at.and_then(rfc3339),
+        "createdBy": l.created_by,
+    })
+}
+
+fn print_requests(store: &Store, all: bool, json: bool) -> Result<()> {
     let now = now_ms();
-    let list: Vec<_> = hashi::access::list(store)
-        .map_err(api_err)?
+    let every = hashi::access::list(store).map_err(api_err)?;
+    let pending = every.iter().filter(|r| r.is_pending(now)).count();
+    let list: Vec<_> = every
         .into_iter()
         .filter(|r| all || r.is_pending(now))
         .collect();
+    if json {
+        let requests: Vec<_> = list.iter().map(|r| request_json(store, r, now)).collect();
+        let link = store.latest_access_link()?.map(|l| link_json(&l, now));
+        return print_json(&serde_json::json!({
+            "requests": requests,
+            "pending": pending,
+            "link": link,
+        }));
+    }
     match store.latest_access_link()? {
         Some(link) if link.status(now) == "open" => println!(
             "ask-access link: open, closes {}",
@@ -1717,7 +1970,7 @@ fn print_requests(store: &Store, all: bool) -> Result<()> {
 /// Fails on invalid input, an unknown or decided request, or database errors.
 pub fn requests(store: &Store, cmd: RequestsCommand) -> Result<()> {
     match cmd {
-        RequestsCommand::List { all } => print_requests(store, all)?,
+        RequestsCommand::List { all, json } => print_requests(store, all, json)?,
         RequestsCommand::Accept {
             id,
             label,
@@ -1792,6 +2045,11 @@ pub fn requests(store: &Store, cmd: RequestsCommand) -> Result<()> {
                 },
             )
             .map_err(api_err)?;
+            let saved = store
+                .data_dir()
+                .and_then(|home| hashi::settings::load(&home).ok())
+                .and_then(|s| s.port);
+            let (port, _) = hashi::settings::resolve(port, saved, hashi::settings::DEFAULT_PORT);
             let (base, local) = public_base(store, public_url.as_deref(), port);
             eprintln!(
                 "ask-access link{} (anyone with it can ask; closes {}):",

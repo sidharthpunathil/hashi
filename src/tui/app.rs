@@ -119,13 +119,15 @@ pub enum Action {
     Report,
     /// Show the audit log.
     Audit,
+    /// Copy the `hashi llm` guide for an LLM agent.
+    CopyGuide,
     /// Show every key binding.
     Help,
 }
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
@@ -148,6 +150,7 @@ impl Action {
         Self::Doctor,
         Self::Report,
         Self::Audit,
+        Self::CopyGuide,
         Self::Help,
     ];
 
@@ -166,7 +169,7 @@ impl Action {
             Self::CheckUpdate | Self::InstallUpdate | Self::Doctor | Self::Report | Self::Audit => {
                 "Maintenance"
             }
-            Self::Help => "Help",
+            Self::CopyGuide | Self::Help => "Help",
         }
     }
 
@@ -210,6 +213,7 @@ impl Action {
             Self::Doctor => "Doctor",
             Self::Report => "Diagnostic report",
             Self::Audit => "Audit log",
+            Self::CopyGuide => "Copy guide for an LLM",
             Self::Help => "All key bindings",
         }
     }
@@ -240,6 +244,7 @@ impl Action {
             Self::Doctor => "agents, helpers, accounts, updates and the home",
             Self::Report => "a redacted file to attach to a bug report",
             Self::Audit => "recent sharing and access changes",
+            Self::CopyGuide => "a Markdown guide an LLM agent can follow to run Hashi",
             Self::Help => "every key the dashboard knows",
         }
     }
@@ -1985,6 +1990,11 @@ impl App {
             Action::CopyUrl => {
                 let url = self.state.runtime.base_url();
                 self.copy(&url, "URL copied");
+            }
+            Action::CopyGuide => {
+                let guide = crate::llm::guide();
+                let lines = guide.lines().count();
+                self.copy(&guide, &format!("LLM guide copied ({lines} lines)"));
             }
             Action::Help => self.popup = Some(Popup::Help),
             Action::Ask

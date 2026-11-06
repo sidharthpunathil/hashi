@@ -4,8 +4,40 @@
 //! work in every terminal. OSC 52 is the fallback and also works over SSH in
 //! terminals that support it.
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
+
+thread_local! {
+    /// Where [`copy`] puts text on this thread while [`capture`] is on.
+    static CAPTURED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// A test seam: until the returned guard drops, [`copy`] on this thread
+/// records the text instead of touching the clipboard.
+#[must_use]
+pub fn capture() -> Capture {
+    CAPTURED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    Capture(())
+}
+
+/// Turns [`capture`] off when dropped.
+#[derive(Debug)]
+pub struct Capture(());
+
+impl Capture {
+    /// Every text copied on this thread since [`capture`], oldest first.
+    #[must_use]
+    pub fn copied(&self) -> Vec<String> {
+        CAPTURED.with(|c| c.borrow().clone().unwrap_or_default())
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        CAPTURED.with(|c| *c.borrow_mut() = None);
+    }
+}
 
 /// Copies `text`, returning a human-readable reason on failure.
 ///
@@ -13,6 +45,15 @@ use std::process::{Command, Stdio};
 ///
 /// Fails when neither a native tool nor OSC 52 could be used.
 pub fn copy(text: &str) -> Result<(), String> {
+    let captured = CAPTURED.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|list| list.push(text.to_owned()))
+            .is_some()
+    });
+    if captured {
+        return Ok(());
+    }
     const TOOLS: [(&str, &[&str]); 5] = [
         ("pbcopy", &[]),
         ("clip", &[]),

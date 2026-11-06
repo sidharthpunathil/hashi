@@ -16,6 +16,17 @@ All notable changes to this project are documented here. The format follows [Kee
 - `GET /v1/models` and the MCP `ask_<agent>` tools list only the agents this bridge can run for the token: installed here, or served by a remote account. Before, MCP also listed agents that were not installed and could only answer `503`.
 - The MCP `instructions` and tool descriptions say how long a call waits, when to call `get_result` and `cancel`, and not to send a prompt again. A refused tool call says what to do next and ends with its error code, and a failed run names its request.
 - Error messages say what to do next: the agents a token may use when it names another, the size of an oversized prompt, which characters a model name may use, when a cap resets, and how long to wait after a rate limit. `GET /` links to the API reference. No error code changed.
+- `hashi llm` (also `hashi guide`) prints a Markdown guide that an LLM agent such as Claude Code, Codex or Cursor can follow to run Hashi for you: rules (secrets stay secret, ask before destructive commands, read first), the commands for common tasks, a command reference generated from the binary's own flags, and HTTP API pointers. `--output <file>` writes it readable only by you. The dashboard's Commands view copies it with "Copy guide for an LLM".
+- `--json` on `token list`, `invite list`, `account list`, `project list`, `requests list` and `audit`, with the same camelCase fields as the matching API listing. None prints a secret.
+- Examples at the end of `--help` for `share`, `token`, `account`, `project`, `requests`, `connect` and `llm`.
+
+### Changed
+
+- `hashi token update` and `hashi token revoke` also take a token's name, when no other token has it.
+- The `token list`, `invite list`, `account list`, `project list` and `audit` tables size each column to its widest cell, so a long name no longer pushes the columns after it out of line. A token or invite that may use every agent shows `all`. `invite list` also shows the agents, project and expiry.
+- Empty lists say how to add the first one, errors for an unknown token, invite, project or request name the command that lists them, and refusing to revoke the last admin token says how to make another.
+- `hashi requests open` builds a local-only link with the port saved from the dashboard, as `hashi share` does, instead of always 7878.
+- User-given names, labels and audit text in the CLI tables pass through the same terminal-safe filter as the dashboard.
 
 ## [0.3.1] - 2026-11-06
 
