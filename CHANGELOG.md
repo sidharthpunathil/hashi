@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `hashi llm` (also `hashi guide`) prints a Markdown guide that an LLM agent such as Claude Code, Codex or Cursor can follow to run Hashi for you: rules (secrets stay secret, ask before destructive commands, read first), the commands for common tasks, a command reference generated from the binary's own flags, and HTTP API pointers. `--output <file>` writes it readable only by you. The dashboard's Commands view copies it with "Copy guide for an LLM".
+- `--json` on `token list`, `invite list`, `account list`, `project list`, `requests list` and `audit`, with the same camelCase fields as the matching API listing. None prints a secret.
+- Examples at the end of `--help` for `share`, `token`, `account`, `project`, `requests`, `connect` and `llm`.
+
+### Changed
+
+- `hashi token update` and `hashi token revoke` also take a token's name, when no other token has it.
+- The `token list`, `invite list`, `account list`, `project list` and `audit` tables size each column to its widest cell, so a long name no longer pushes the columns after it out of line. A token or invite that may use every agent shows `all`. `invite list` also shows the agents, project and expiry.
+- Empty lists say how to add the first one, errors for an unknown token, invite, project or request name the command that lists them, and refusing to revoke the last admin token says how to make another.
+- `hashi requests open` builds a local-only link with the port saved from the dashboard, as `hashi share` does, instead of always 7878.
+- User-given names, labels and audit text in the CLI tables pass through the same terminal-safe filter as the dashboard.
+
 ## [0.3.1] - 2026-11-06
 
 ### Changed

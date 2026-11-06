@@ -36,29 +36,34 @@ enum Command {
     /// Start the bridge (the default when no command is given).
     Serve(Box<ServeArgs>),
     /// Create, list, update and revoke API tokens.
-    #[command(subcommand)]
+    #[command(subcommand, after_help = TOKEN_EXAMPLES)]
     Token(admin_cli::TokenCommand),
     /// Create a one-time invite link for a person.
+    #[command(after_help = SHARE_EXAMPLES)]
     Share(admin_cli::ShareArgs),
     /// List or cancel invite links.
     #[command(subcommand)]
     Invite(admin_cli::InviteCommand),
     /// Add, sign in, list, disable and remove agent accounts.
-    #[command(subcommand)]
+    #[command(subcommand, after_help = ACCOUNT_EXAMPLES)]
     Account(admin_cli::AccountCommand),
     /// Add, update, list and remove projects: folders to share.
-    #[command(subcommand)]
+    #[command(subcommand, after_help = PROJECT_EXAMPLES)]
     Project(admin_cli::ProjectCommand),
     /// Show recent sharing and access changes.
     Audit {
         /// How many entries to show.
         #[arg(long, default_value_t = 50)]
         limit: u32,
+        /// Print JSON, as `GET /v1/audit` shows each entry.
+        #[arg(long)]
+        json: bool,
     },
     /// Send one prompt straight to an agent, without the server, or to a
     /// saved remote bridge with --remote.
     Ask(AskArgs),
     /// Redeem an invite link to someone's Hashi and save the token.
+    #[command(after_help = CONNECT_EXAMPLES)]
     Connect(ConnectArgs),
     /// List or remove the bridges saved by `hashi connect`.
     #[command(subcommand)]
@@ -68,9 +73,10 @@ enum Command {
     Request(RequestArgs),
     /// See and decide requests for access, and open or close the
     /// ask-access link people use to ask.
-    #[command(subcommand)]
+    #[command(subcommand, after_help = REQUESTS_EXAMPLES)]
     Requests(admin_cli::RequestsCommand),
-    /// Check that the agents, cloudflared and Tailscale are installed.
+    /// Check the agents, cloudflared, Tailscale, accounts and updates. Changes
+    /// nothing.
     Doctor(DoctorArgs),
     /// Write a redacted diagnostic report to attach to a bug report.
     Report(ReportArgs),
@@ -81,6 +87,72 @@ enum Command {
     /// Show the official install command for a helper (cloudflared or
     /// tailscale) or for Crush, and run it after you confirm.
     Install(InstallArgs),
+    /// Print a Markdown guide that lets an LLM agent (Claude Code, Codex,
+    /// Cursor) run Hashi for you.
+    #[command(
+        visible_alias = "guide",
+        after_help = "Examples:\n  hashi llm | pbcopy\n  hashi llm --output hashi-guide.md"
+    )]
+    Llm(LlmArgs),
+}
+
+const TOKEN_EXAMPLES: &str = "Examples:
+  hashi token create ci-bot --agents claude --daily-requests 100
+  hashi token create docs-site --project docs --expires-in-days 90
+  hashi token list --json
+  hashi token update ci-bot --pause
+  hashi token update ci-bot --resume --monthly-budget 20
+  hashi token revoke ci-bot
+
+A token is named by its id, its prefix (the PREFIX column) or its name.";
+
+const SHARE_EXAMPLES: &str = "Examples:
+  hashi share alice
+  hashi share alice --agents claude,codex --daily-requests 50 --expires-in-days 30
+  hashi share bob --project web --link-hours 168 --share-usage
+
+The link prints on standard output and works once. Without a public URL it
+works only on this machine: start with --tunnel or --tailscale, or set
+HASHI_PUBLIC_URL.";
+
+const ACCOUNT_EXAMPLES: &str = "Examples:
+  hashi account add claude work
+  hashi account add codex ci --kind api-key --key-env OPENAI_API_KEY
+  hashi account add claude via-alice --remote alice
+  hashi account list --json
+  hashi account usage --refresh
+  hashi token update ci-bot --account claude=work,default";
+
+const PROJECT_EXAMPLES: &str = "Examples:
+  hashi project add web /home/me/src/web --agents claude,codex --account claude=work
+  hashi project update web --account-strategy most-left --rotate-at 85
+  hashi project list --json
+  hashi share bob --project web
+  hashi project remove web --unbind";
+
+const REQUESTS_EXAMPLES: &str = "Examples:
+  hashi requests open --project web --hours 72
+  hashi requests list
+  hashi requests list --all --json
+  hashi requests accept 3f2a --daily-requests 30
+  hashi requests decline 3f2a --reason \"not this week\"
+  hashi requests close
+
+A request is named by its id or a unique start of it (4 characters or more).";
+
+const CONNECT_EXAMPLES: &str = "Examples:
+  hashi connect https://their-host/claim/hashi_inv_<code> --name alice
+  hashi connect <invite link> --setup claude
+  hashi ask --remote alice \"Summarise the README\"
+
+The token is saved in the data directory and never printed.";
+
+#[derive(Debug, Args)]
+struct LlmArgs {
+    /// Write the guide to this file, readable only by you, instead of
+    /// printing it.
+    #[arg(long, short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -487,6 +559,7 @@ fn home_dir(custom: Option<PathBuf>) -> Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    hashi::llm::set_command(<Cli as clap::CommandFactory>::command);
     let cli = Cli::parse();
     let home = home_dir(cli.home)?;
     // Before the dashboard starts: ratatui chains its terminal restore in
@@ -504,7 +577,9 @@ async fn main() -> Result<()> {
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Account(cmd)) => admin_cli::account(&server::open_store(&home)?, &home, cmd),
         Some(Command::Project(cmd)) => admin_cli::project(&server::open_store(&home)?, &home, cmd),
-        Some(Command::Audit { limit }) => admin_cli::audit(&server::open_store(&home)?, limit),
+        Some(Command::Audit { limit, json }) => {
+            admin_cli::audit(&server::open_store(&home)?, limit, json)
+        }
         Some(Command::Ask(args)) if args.remote.is_some() => ask_remote(home, args).await,
         Some(Command::Ask(args)) => ask(&home, args).await,
         Some(Command::Connect(args)) => connect(home, args).await,
@@ -520,6 +595,7 @@ async fn main() -> Result<()> {
         Some(Command::Update(args)) => {
             tokio::task::spawn_blocking(move || update(&home, &args)).await?
         }
+        Some(Command::Llm(args)) => llm(&args),
         Some(Command::Uninstall(args)) => hashi::uninstall::run(
             &home,
             hashi::uninstall::Options {
@@ -850,6 +926,24 @@ async fn request(home: PathBuf, args: RequestArgs) -> Result<()> {
         .context("the request thread stopped")?
 }
 
+/// `hashi llm`: prints the guide, or writes it owner-only with `--output`.
+fn llm(args: &LlmArgs) -> Result<()> {
+    let guide = hashi::llm::guide();
+    match &args.output {
+        None => print!("{guide}"),
+        Some(path) => {
+            diagnostics::write_private(path, &guide)
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!(
+                "wrote the guide ({} lines) to {}",
+                guide.lines().count(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Writes the redacted diagnostic report. Nothing is uploaded.
 async fn report(home: &std::path::Path, args: ReportArgs) -> Result<()> {
     let agents = server::discover_agents(&args.agents.configs()).await;
@@ -1115,20 +1209,93 @@ mod tests {
         assert!(crush.allow_newer);
     }
 
-    /// Every leaf subcommand path, such as `token update`.
+    /// Every leaf subcommand path, such as `token update`, and each
+    /// visible alias of a leaf, such as `guide` for `llm`.
     fn leaf_paths(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
-        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
-            let path = if prefix.is_empty() {
-                sub.get_name().to_owned()
+        let join = |name: &str| {
+            if prefix.is_empty() {
+                name.to_owned()
             } else {
-                format!("{prefix} {}", sub.get_name())
-            };
+                format!("{prefix} {name}")
+            }
+        };
+        for sub in cmd.get_subcommands().filter(|s| s.get_name() != "help") {
+            let path = join(sub.get_name());
             if sub.has_subcommands() {
                 leaf_paths(sub, &path, out);
             } else {
                 out.push(path);
+                out.extend(sub.get_visible_aliases().map(join));
             }
         }
+    }
+
+    #[test]
+    fn the_llm_guide_names_every_subcommand_path() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let guide = hashi::llm::guide_for(&cmd);
+        let paths = hashi::llm::command_paths(&cmd);
+        assert!(paths.len() > 30, "{paths:?}");
+        for path in &paths {
+            assert!(
+                guide.contains(&format!("### `hashi {path}`")),
+                "the guide has no section for `hashi {path}`"
+            );
+        }
+        // Flags come with their help and say whether they take a value.
+        assert!(guide.contains("`--expires-in-days <EXPIRES_IN_DAYS>`"));
+        assert!(guide.contains("`--admin`: Grant admin rights. Switch, takes no value."));
+        assert!(guide.contains("Also: `guide`."));
+        let lines = guide.lines().count();
+        assert!((300..=1_200).contains(&lines), "{lines} lines");
+    }
+
+    #[test]
+    fn the_llm_guide_has_no_secrets_or_dash_substitutes() {
+        use clap::CommandFactory;
+        let guide = hashi::llm::guide_for(&Cli::command());
+        // `hashi_` then 8 or more hex digits is a token, a prefix or a code.
+        for (i, _) in guide.match_indices("hashi_") {
+            let rest = &guide[i + "hashi_".len()..];
+            let rest = ["inv_", "ask_", "pick_"]
+                .iter()
+                .find_map(|p| rest.strip_prefix(p))
+                .unwrap_or(rest);
+            let hex = rest.chars().take_while(char::is_ascii_hexdigit).count();
+            assert!(hex < 8, "token-like text at byte {i}");
+        }
+        for word in ["Bearer hashi", "sk-ant-", "sk-proj-", "sk_live_"] {
+            assert!(!guide.contains(word), "{word}");
+        }
+        for c in [
+            '\u{2014}', '\u{2012}', '\u{2015}', '\u{2212}', '\u{FE58}', '\u{FF0D}',
+        ] {
+            assert!(!guide.contains(c), "U+{:04X}", u32::from(c));
+        }
+        assert!(!guide.contains(" \u{2013} "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn llm_output_writes_the_guide_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guide.md");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let args = match Cli::try_parse_from(["hashi", "guide", "--output", path.to_str().unwrap()])
+            .map(|c| c.command)
+        {
+            Ok(Some(Command::Llm(args))) => args,
+            other => panic!("unexpected parse: {other:?}"),
+        };
+        llm(&args).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# Running Hashi for your owner"));
+        assert!(text.contains("## Rules"));
     }
 
     #[test]

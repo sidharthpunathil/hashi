@@ -2708,3 +2708,19 @@ fn u_in_the_accounts_popup_asks_for_a_usage_read() {
         "{frame}"
     );
 }
+
+#[test]
+fn the_copy_guide_row_copies_the_llm_guide_and_says_how_many_lines() {
+    let clipboard = hashi::tui::clipboard::capture();
+    let mut app = App::new(without_helpers(), None, false);
+    select_action(&mut app, Action::CopyGuide);
+    assert_eq!(Action::CopyGuide.group(), "Help");
+    assert_eq!(ui::action_cli(&app, Action::CopyGuide), "hashi llm");
+    assert!(draw(&mut app, 190, 44).contains("Copy guide for an LLM"));
+    app.on_key(key(KeyCode::Enter));
+    let guide = hashi::llm::guide();
+    assert_eq!(clipboard.copied(), std::slice::from_ref(&guide));
+    let lines = guide.lines().count();
+    assert!(lines > 100, "{lines}");
+    assert_eq!(toast(&app), format!("LLM guide copied ({lines} lines)"));
+}

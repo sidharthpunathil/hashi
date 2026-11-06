@@ -202,6 +202,9 @@ pub const TABLE: &[(&str, Entry)] = &[
     ("report", Entry::Row(Action::Report)),
     ("update", Entry::Row(Action::InstallUpdate)),
     ("install", Entry::Row(Action::InstallCloudflared)),
+    ("llm", Entry::Row(Action::CopyGuide)),
+    // `hashi guide` is the same command under its alias.
+    ("guide", Entry::Row(Action::CopyGuide)),
 ];
 
 /// The entry for a subcommand path such as `token update`.

@@ -217,6 +217,7 @@ Missing `cloudflared` or `tailscale`? `hashi install cloudflared` or `hashi inst
 - [Remote access and HTTPS](docs/remote-access.md)
 - [Performance](docs/performance.md): measurements and how to reproduce them
 - [Changelog](CHANGELOG.md) and [security policy](SECURITY.md)
+- Give an LLM agent `hashi llm` and it can run Hashi for you
 
 Bug reports and pull requests are welcome: [CONTRIBUTING.md](CONTRIBUTING.md) covers the local setup and the checks CI runs. Found a bug? `hashi report` writes a redacted diagnostic file and prints a prefilled issue link; nothing is uploaded ([details](docs/configuration.md#reporting-a-bug)).
 
