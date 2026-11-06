@@ -492,6 +492,26 @@ impl ApiError {
         }
     }
 
+    /// A coded error that a retry after `wait` can get past, such as a
+    /// request for more sent too soon after the last. Like
+    /// [`Self::rate_limited`], the message, the body's `retryAfter` and the
+    /// `Retry-After` header all carry the same seconds.
+    #[must_use]
+    pub fn coded_retry(
+        status: StatusCode,
+        code: &'static str,
+        message: &str,
+        wait: Duration,
+    ) -> Self {
+        let secs = retry_secs(wait);
+        Self::Coded {
+            status,
+            code,
+            message: format!("{message}; try again in {}", seconds(secs)),
+            extra: Some(json!({ "retryAfter": secs })),
+        }
+    }
+
     /// Seconds until a retry can succeed, when known: the `retryAfter`
     /// field, which the response also sends as `Retry-After`.
     #[must_use]

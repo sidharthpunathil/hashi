@@ -177,7 +177,7 @@ curl -X POST https://host/v1/ask-access/status -H "Content-Type: application/jso
 
 `name` is 1 to 60 characters, `message` up to 500, and `agents` must be among the link's (left out, all of them). Control, bidi and zero-width characters are removed before the lengths are checked, and again whenever a request is shown. The pickup secret is shown once and stored as a hash. `status` is `pending`, `accepted` (with the claim code and URL), `claimed`, `declined` (with the owner's `reason`) or `expired`. A closed or expired link answers `410 link_closed`, an unknown one `404 link_not_found`, a full link `409 link_full` and a full server `409 requests_full`.
 
-A token asks for more with `POST /v1/me/requests` (any token, even paused or expired; not admin tokens): `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`, `agents` (on top of the current ones), `expiresInDays` and `message`, all optional but at least one. A token may hold 3 open requests (`409 too_many_open_requests`) and open one an hour (`429 request_too_soon`). `GET /v1/me/requests` lists its own requests and their state.
+A token asks for more with `POST /v1/me/requests` (any token, even paused or expired; not admin tokens): `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`, `agents` (on top of the current ones), `expiresInDays` and `message`, all optional but at least one. A token may hold 3 open requests (`409 too_many_open_requests`) and open one an hour (`429 request_too_soon`, with `retryAfter` and `Retry-After` saying when the next one can be sent). `GET /v1/me/requests` lists its own requests and their state.
 
 `GET /v1/access-requests` (admin) lists every request, newest first, with `kind` (`new` or `more`), `status`, `name`, `message`, `agents`, `project`, `asked`, a one-line `summary` and, while pending, a `prefill`: the values accepting would use. For `more` the prefill has `current`, the token's limits, agents and expiry now, and `limits` with the asked values over them. Never a secret, an address or an account name of the requester.
 
@@ -300,7 +300,7 @@ claude mcp add --transport http hashi https://your-host/mcp --header "Authorizat
 
 ## Errors
 
-Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`. Some add fields: `limit_reached` has `limit`, `resetAt` and `retryAfter`, and a `rate_limited` whose window is known has `retryAfter`. `retryAfter` is whole seconds until a retry can succeed, and the response sends the same number as a `Retry-After` header. A `429` without it (`too_many_pending`, `too_many_waits`, `request_too_soon`, a full queue) has no fixed wait: retry after a request finishes, or later. A `401` sends `WWW-Authenticate: Bearer`.
+Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`. Some add fields: `limit_reached` has `limit`, `resetAt` and `retryAfter`, `request_too_soon` has `retryAfter`, and a `rate_limited` whose window is known has `retryAfter`. `retryAfter` is whole seconds until a retry can succeed, and the response sends the same number as a `Retry-After` header. A `429` without it (`too_many_pending`, `too_many_waits`, a full queue) has no fixed wait: retry after a request finishes, or later. A `401` sends `WWW-Authenticate: Bearer`.
 
 | Status | Code | When |
 |---|---|---|
@@ -330,7 +330,7 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 429 | `limit_reached` | A daily or monthly cap was hit; `limit`, `resetAt` and `retryAfter` (also `Retry-After`) say which and until when |
 | 429 | `too_many_pending` | The token already has `maxPending` prompts in flight |
 | 429 | `too_many_waits` | OpenAI endpoint: the token already holds 4 open long polls or streams |
-| 429 | `request_too_soon` | A token asked for more less than an hour after its last request |
+| 429 | `request_too_soon` | A token asked for more less than an hour after its last request; `retryAfter` (also `Retry-After`) says when the next one can be sent |
 | 429 | `rate_limited` | Per-token rate limit, full queue, too many failed token, invite, link or pickup attempts from one address, or an account refresh within a minute of the last. All but the full queue carry `retryAfter` and `Retry-After` |
 | 500 | `internal` | A bug in Hashi. The error also carries an `errorId` to quote in a bug report |
 | 502 | `agent_failed` | OpenAI endpoint: the agent run failed or was cancelled; `message` says why |

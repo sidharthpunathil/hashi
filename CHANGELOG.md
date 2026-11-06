@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-06
+
+### Fixed
+
+- A request for more sent within an hour of the last (`429 request_too_soon`) now says when the next one can be sent: `Retry-After`, `retryAfter` in the body and "try again in N minutes" in the message, like the other rate-limited errors. MCP `request_more` reports the same wait.
+
 ## [0.3.1] - 2026-11-06
 
 ### Added

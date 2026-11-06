@@ -881,3 +881,46 @@ async fn ask_access_page_has_strict_csp() {
     assert!(!html.contains("style=") && !html.contains("onclick"));
     h.running.shutdown().await;
 }
+
+/// A second request for more within the hour says when the next one can be
+/// sent: `Retry-After`, the body's `retryAfter` and the message agree, and
+/// the wait is under an hour.
+#[tokio::test]
+async fn a_request_for_more_too_soon_says_when_to_retry() {
+    let h = harness().await;
+    let (token, _) = h.user_token(json!({ "agents": ["claude"] })).await;
+    let (status, _) = h
+        .post(
+            "/v1/me/requests",
+            Some(&token),
+            json!({ "message": "first" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let res = h
+        .http
+        .post(format!("{}/v1/me/requests", h.base))
+        .bearer_auth(&token)
+        .json(&json!({ "message": "again" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let header: u64 = res.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let v: Value = res.json().await.unwrap();
+    assert_eq!(v["error"]["code"], "request_too_soon");
+    assert_eq!(v["error"]["retryAfter"].as_u64(), Some(header));
+    assert!((3500..=3600).contains(&header), "{header}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("try again in"),
+        "{v}"
+    );
+    h.running.shutdown().await;
+}

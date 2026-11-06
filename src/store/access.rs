@@ -219,8 +219,9 @@ pub enum AccessAdmission {
     TotalFull,
     /// The token already has [`MAX_OPEN_PER_TOKEN`] open requests.
     TokenBusy,
-    /// The token opened one less than [`MORE_EVERY_MS`] ago.
-    TooSoon,
+    /// The token opened one less than [`MORE_EVERY_MS`] ago; the next one
+    /// can be sent after this long.
+    TooSoon(std::time::Duration),
 }
 
 /// What a pickup secret currently points at.
@@ -433,8 +434,11 @@ impl Store {
                 [tok],
                 |r| r.get(0),
             )?;
-            if last.is_some_and(|at| now - at < MORE_EVERY_MS) {
-                return Ok(AccessAdmission::TooSoon);
+            if let Some(at) = last.filter(|at| now - at < MORE_EVERY_MS) {
+                let wait = u64::try_from(MORE_EVERY_MS - (now - at)).unwrap_or(0);
+                return Ok(AccessAdmission::TooSoon(std::time::Duration::from_millis(
+                    wait,
+                )));
             }
         }
         let pickup = (new.kind == AccessKind::New).then(|| {

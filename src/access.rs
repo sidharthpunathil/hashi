@@ -343,7 +343,7 @@ pub fn submit_new(store: &Store, input: NewPerson) -> ApiResult<(AccessRequest, 
             "requests_full",
             "this Hashi has too many requests waiting; try again later",
         )),
-        AccessAdmission::TokenBusy | AccessAdmission::TooSoon => Err(full(
+        AccessAdmission::TokenBusy | AccessAdmission::TooSoon(_) => Err(full(
             "requests_full",
             "this Hashi cannot take a request right now",
         )),
@@ -450,10 +450,11 @@ pub fn submit_more(store: &Store, token: &Token, input: MoreInput) -> ApiResult<
                 "you already have {MAX_OPEN_PER_TOKEN} open requests; wait for the owner to answer"
             ),
         )),
-        AccessAdmission::TooSoon => Err(ApiError::coded(
+        AccessAdmission::TooSoon(wait) => Err(ApiError::coded_retry(
             StatusCode::TOO_MANY_REQUESTS,
             "request_too_soon",
-            "you can send one request an hour; try again later",
+            "you can send one request an hour",
+            wait,
         )),
         AccessAdmission::LinkFull | AccessAdmission::TotalFull => Err(full(
             "requests_full",
