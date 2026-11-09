@@ -61,6 +61,7 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     ("share", Entry::Row(Action::NewInvite)),
+    ("share-login", Entry::Row(Action::ShareLogin)),
     ("requests list", Entry::Row(Action::AccessRequests)),
     (
         "requests accept",

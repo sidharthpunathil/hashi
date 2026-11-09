@@ -148,6 +148,7 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
         ),
         Popup::Remotes { selected } => remotes(app, frame, *selected),
         Popup::Connect(form) => connect(frame, form, app.tick),
+        Popup::ShareLogin(form) => share_login(frame, form, app.tick),
         Popup::ConfirmRemoveRemote { name } => fitted(
             frame,
             64,
@@ -394,12 +395,21 @@ fn edit_token(frame: &mut Frame, form: &EditTokenForm, tick: u64) {
         text(5, &form.daily_budget, "none"),
         text(6, &form.monthly_budget, "none"),
         text(7, &form.max_pending, "none"),
-        text(8, &form.accounts, "default (or claude=work,personal)"),
+        text(
+            EditTokenForm::STOP_AT,
+            &form.stop_at,
+            "none (or 70: stop at 70% of your quota)",
+        ),
+        text(
+            EditTokenForm::ACCOUNTS,
+            &form.accounts,
+            "default (or claude=work,personal)",
+        ),
         form_field(
-            f(9),
-            EditTokenForm::LABELS[9],
+            f(EditTokenForm::PROJECT),
+            EditTokenForm::LABELS[EditTokenForm::PROJECT],
             W,
-            form_toggle(&form.project.label(), f(9)),
+            form_toggle(&form.project.label(), f(EditTokenForm::PROJECT)),
         ),
         form_field(
             f(EditTokenForm::SHARE_USAGE),
@@ -639,6 +649,17 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             .find(|u| u.agent == sel.state.agent && u.name == sel.state.name)
             .cloned()
     });
+    if let Some(sel) = list.get(selected)
+        && let Some(by) = &sel.state.shared_by
+    {
+        foot.push(Line::from(vec![
+            Span::styled("shared ", t::muted()),
+            Span::styled(
+                crate::share::share_note(by, sel.state.remind_at, sel.state.share_until, now),
+                t::fg(t::AMBER),
+            ),
+        ]));
+    }
     match usage {
         Some(u) => foot.extend(super::usage::lines(&[u], rotate_at, 24)),
         None if list.is_empty() => {}
@@ -989,6 +1010,42 @@ fn request_status_lines(app: &App) -> Vec<Line<'static>> {
         ]));
     }
     out
+}
+
+fn share_login(frame: &mut Frame, form: &forms::ShareLoginForm, tick: u64) {
+    const W: usize = 11;
+    let f = |i: usize| form.field == i;
+    let label = |i: usize| forms::ShareLoginForm::LABELS[i];
+    let choice = |i: usize, value: String| form_field(f(i), label(i), W, form_toggle(&value, f(i)));
+    let fields = vec![
+        form_field(
+            f(0),
+            label(0),
+            W,
+            form_text(&form.label, f(0), "dana", tick),
+        ),
+        choice(1, form.login_label()),
+        choice(2, form.source_label()),
+        choice(3, form.remind_label()),
+        choice(4, form.days_label()),
+        choice(5, crate::tui::app::link_short(form.link_hours())),
+    ];
+    let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
+    lines.push(Line::raw(""));
+    lines.push(muted_line(
+        "  Hands over the key. Nothing is enforced: you are both reminded,",
+    ));
+    lines.push(muted_line(
+        "  and their copy switches off when the share ends.",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(key_hint(&[
+        ("↑↓", "field"),
+        ("←→", "change"),
+        ("enter", "create link"),
+        ("esc", "cancel"),
+    ]));
+    fitted(frame, 80, "share a login", lines);
 }
 
 fn connect(frame: &mut Frame, form: &forms::ConnectForm, tick: u64) {

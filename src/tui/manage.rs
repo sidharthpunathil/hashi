@@ -12,7 +12,7 @@ use super::access::{AcceptForm, DeclineForm, FormAction};
 use super::app::{Action, App, Done, PendingCommand, Popup, Tab};
 use super::forms::{
     self, AccountForm, AskForm, ConnectForm, EditTokenForm, FieldError, ListenForm, ProjectForm,
-    ReportForm, Target, cycle, edit, edit_secret,
+    ReportForm, ShareLoginForm, Target, cycle, edit, edit_secret,
 };
 use crate::accounts::{self as acct, AccountKind};
 use crate::agent::{AgentConfig, AgentKind};
@@ -118,9 +118,15 @@ impl App {
         }
         for d in done {
             match d {
-                Done::Connected(Ok(name)) => {
+                Done::Connected(Ok((name, login))) => {
                     self.state.bus.log(format!("connected to a bridge: {name}"));
-                    self.notify(format!("connected; saved as {name}"));
+                    match login {
+                        Some(note) => {
+                            self.state.bus.log(note.clone());
+                            self.notify(format!("connected as {name}; {note}"));
+                        }
+                        None => self.notify(format!("connected; saved as {name}")),
+                    }
                     if matches!(self.popup, Some(Popup::Connect(_))) {
                         let selected = self
                             .remote_names()
@@ -322,6 +328,12 @@ impl App {
             Action::Projects => Some(Popup::Projects { selected: 0 }),
             Action::Bridges => Some(Popup::Remotes { selected: 0 }),
             Action::Connect => Some(Popup::Connect(Box::default())),
+            Action::ShareLogin => {
+                let mut form =
+                    ShareLoginForm::new(crate::share::shareable_logins(&self.state.store));
+                self.fill_sources(&mut form);
+                Some(Popup::ShareLogin(Box::new(form)))
+            }
             Action::Listen => Some(Popup::Listen(Box::new(ListenForm::new(
                 self.state.runtime.listen.addr(),
             )))),
@@ -396,6 +408,7 @@ impl App {
             },
             Popup::Remotes { selected } => self.remotes_key(selected, code),
             Popup::Connect(form) => self.connect_key(form, code),
+            Popup::ShareLogin(form) => self.share_login_key(form, code),
             Popup::ConfirmRemoveRemote { name } => match code {
                 KeyCode::Char('y' | 'Y') => {
                     match self.home().map(|h| crate::remote::forget(&h, &name)) {
@@ -1518,6 +1531,66 @@ impl App {
         Some(Popup::Remotes { selected })
     }
 
+    /// Refills where a login share's usage can be read from, for the
+    /// login the form has chosen.
+    fn fill_sources(&self, form: &mut ShareLoginForm) {
+        if let Some((agent, ..)) = form.selected() {
+            form.sources = crate::share::usage_sources(&self.state.store, *agent);
+            form.source = 0;
+        }
+    }
+
+    fn share_login_key(&mut self, mut form: Box<ShareLoginForm>, code: KeyCode) -> Option<Popup> {
+        match code {
+            KeyCode::Esc => return None,
+            KeyCode::Enter => return self.create_login_share(form),
+            _ if nav(&mut form.field, ShareLoginForm::FIELDS, code, |_| false) => {}
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field > 0 => {
+                let by = if code == KeyCode::Left { -1 } else { 1 };
+                if form.step(by) {
+                    self.fill_sources(&mut form);
+                }
+                form.error = None;
+            }
+            _ if form.field == 0 && edit(&mut form.label, code, 100) => form.error = None,
+            _ => {}
+        }
+        Some(Popup::ShareLogin(form))
+    }
+
+    fn create_login_share(&mut self, mut form: Box<ShareLoginForm>) -> Option<Popup> {
+        let new = match form.to_new() {
+            Ok(n) => n,
+            Err((field, e)) => {
+                form.field = field;
+                form.error = Some((field, e));
+                return Some(Popup::ShareLogin(form));
+            }
+        };
+        let Some(home) = self.home() else {
+            form.error = Some((0, "no Hashi home here".to_owned()));
+            return Some(Popup::ShareLogin(form));
+        };
+        match crate::share::create_login_share(&self.state.store, &home, &new, "dashboard") {
+            Ok((invite, code)) => {
+                self.state
+                    .bus
+                    .log(format!("login share created for {}", invite.label));
+                self.refresh();
+                Some(Popup::InviteReveal {
+                    label: invite.label,
+                    code,
+                    link_hours: new.link_hours,
+                })
+            }
+            Err(e) => {
+                form.field = 1;
+                form.error = Some((1, e));
+                Some(Popup::ShareLogin(form))
+            }
+        }
+    }
+
     fn connect_key(&mut self, mut form: Box<ConnectForm>, code: KeyCode) -> Option<Popup> {
         if form.busy {
             return if code == KeyCode::Esc {
@@ -1571,7 +1644,18 @@ impl App {
             .name("hashi-connect".to_owned())
             .spawn(move || {
                 let result = crate::remote::redeem(&home, &link, name.as_deref())
-                    .map(|(remote, _)| remote.name)
+                    .map(|r| {
+                        let note = r.login.map(|l| match l {
+                            crate::remote::LoginAdded::Account { agent, name, .. } => {
+                                format!("their login was added as account {agent}:{name}")
+                            }
+                            crate::remote::LoginAdded::Saved { path, .. } => format!(
+                                "their key could not be added and is kept in {}",
+                                path.display()
+                            ),
+                        });
+                        (r.remote.name, note)
+                    })
                     .map_err(|e| format!("{e:#}"));
                 Self::finish(&slot, Done::Connected(result));
             });

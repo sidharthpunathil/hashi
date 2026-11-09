@@ -214,6 +214,23 @@ fn limit_error(limit: &'static str, message: String, reset_at: i64, now: i64) ->
     }
 }
 
+/// `429 limit_reached` for a token past its stop on the owner's quota.
+/// The message already says when it opens again.
+fn stop_error(message: String, opens_at: i64, now: i64) -> ApiError {
+    let wait = u64::try_from(opens_at.saturating_sub(now)).unwrap_or(0);
+    let retry_after = super::retry_secs(Duration::from_millis(wait));
+    ApiError::Coded {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "limit_reached",
+        message,
+        extra: Some(json!({
+            "limit": "stopAtPercent",
+            "resetAt": rfc3339(opens_at),
+            "retryAfter": retry_after,
+        })),
+    }
+}
+
 /// Whether a run on `agent` for this token could go to an enabled remote
 /// account, which runs on a friend's bridge, so the agent need not be
 /// installed here.
@@ -372,6 +389,19 @@ pub async fn submit(state: &AppState, token: &Token, input: SubmitInput) -> ApiR
 
     if let Some(name) = &input.account {
         check_pinned_account(state, token, agent, name)?;
+    }
+    if let Some(stop) = eff.stop_at {
+        let names = match &input.account {
+            Some(name) => vec![name.clone()],
+            None => crate::accounts::for_agent(&eff.accounts, agent),
+        };
+        if let Some(held) = state.store.all_past_stop(agent, &names, stop, now)? {
+            let message = crate::usage::stop_message(agent, stop, &held);
+            // Without a known reset, a client is told to come back in an
+            // hour, when the usage will have been read again.
+            let opens = held.opens_at.unwrap_or(now + 3_600_000);
+            return Err(stop_error(message, opens, now));
+        }
     }
     let id = uuid::Uuid::new_v4().to_string();
     // Pinned before the row exists, so no worker can claim it first.

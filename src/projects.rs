@@ -274,6 +274,8 @@ pub struct Effective {
     pub account_strategy: Option<Strategy>,
     /// The project's rotate threshold, when it sets one.
     pub rotate_at: Option<u8>,
+    /// The token's stop on the owner's quota, a percent of any window.
+    pub stop_at: Option<u8>,
 }
 
 impl Effective {
@@ -325,6 +327,7 @@ pub fn effective(token: &Token, project: Option<&Project>) -> Effective {
             cwd: Cwd::Workspace,
             account_strategy: None,
             rotate_at: None,
+            stop_at: token.limits.stop_at_percent,
         };
     };
     let agents: Vec<AgentKind> = token
@@ -362,6 +365,7 @@ pub fn effective(token: &Token, project: Option<&Project>) -> Effective {
         cwd: Cwd::Project(PathBuf::from(&p.path)),
         account_strategy: p.account_strategy,
         rotate_at: p.rotate_at,
+        stop_at: token.limits.stop_at_percent,
     }
 }
 
@@ -424,6 +428,8 @@ mod tests {
             accounts,
             project: None,
             share_usage: false,
+            remind_at: None,
+            login_account: None,
         }
     }
 

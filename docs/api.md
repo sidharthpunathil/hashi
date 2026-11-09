@@ -146,7 +146,9 @@ A token with a `project` runs in the project's folder. It may use the agents bot
 
 `accounts` looks like `{"claude": ["work", "personal"], "codex": ["ci"]}`. Each name must be an account added with `hashi account add`, or `default` for your own login; an unknown name is refused with `400`. A run uses the first listed account that is enabled and not at its limit, and fails over to the next one when it hits the agent's limit. Token listings and `PATCH` responses show `accounts` to admins; `/v1/me`, MCP and the claim page never do.
 
-`limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd` and `maxPending`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code, opencode and Crush do, so budgets bound only those.
+`limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`, `maxPending` and `stopAtPercent`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code, opencode and Crush do, so budgets bound only those.
+
+`stopAtPercent` (1 to 100) keeps the rest of the owner's quota for the owner: once every account that could serve the token's prompt has used that share of any quota window (5 hours or week), the prompt is refused with `429 limit_reached`, `limit: "stopAtPercent"`, and `resetAt` and `retryAfter` saying when it opens again. Usage Hashi has not read yet never holds a token back.
 
 `shareUsage: true` adds `agentUsage` to the token's `GET /v1/me`: for each agent it may use, the most headroom left on an account serving it that can take a run, as a whole percent, that account's next reset and its state (`ok`, `warning`, `limited` or `unknown`). When every account serving the agent is at its limit or disabled, the state is `limited`, `headroom` is `0` and `nextReset` is when the first comes back. Account names, how many accounts there are and their windows are never included:
 
@@ -154,11 +156,17 @@ A token with a `project` runs in the project's folder. It may use the agents bot
 "agentUsage": { "claude": { "headroom": 62, "nextReset": "2026-11-06T16:00:00Z", "state": "ok" } }
 ```
 
-`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits`, `accounts`, `project` and `shareUsage`. A `limits` object replaces the whole set, except `maxPending`, which keeps its value unless you send it (`null` clears it). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`. `project` binds the token to a project, and `null` puts it back on its own workspace; the result is checked as on create.
+`PATCH /v1/tokens/{id}` accepts `name`, `note`, `paused`, `expiresInDays` (from now; `0` removes the expiry), `limits`, `accounts`, `project` and `shareUsage`. A `limits` object replaces the whole set, except `maxPending` and `stopAtPercent`, which keep their values unless you send them (`null` clears them). An `accounts` object replaces the whole map; `{}` puts every agent back on `default`. `project` binds the token to a project, and `null` puts it back on its own workspace; the result is checked as on create.
 
 ## `POST /v1/invites`
 
 Accepts `label`, `sessionMode`, `agents`, `expiresInDays` (counted from the claim), `limits`, `linkHours` (`1`, `24` or `168`, default `24`), `accounts`, `project` and `shareUsage` (as for tokens; the claim preview and the claim page say when it is on). It answers with the one-time `url`, and `localOnly: true` when no public URL is configured. At most 100 invites can be pending at once. `POST /v1/claim/preview` shows the project's name, never its folder or accounts.
+
+### Login shares
+
+With `loginAccount` (`"<agent>:<name>"` of an `api-key` or `oauth-token` account), the invite hands that account's key over instead: the person runs the agent on their own machine, so nothing can be enforced, only reminded. It takes `label`, `remindAt` (1 to 100), `expiresInDays` (how long the share lasts), `linkHours`, and optionally `accounts` naming the one account whose usage the key spends (default: the agent's `default`). The token the claim creates has `shareUsage` on and only that account, so the person's Hashi can read the owner's usage through it; token listings show `loginAccount` and `remindAt`.
+
+The preview has `login: {agent, remindAt}` and never the key. The redeem answer adds `login: {agent, kind, key, remindAt, until}`. The key is read before the code is used: when it cannot be read the answer is `409 login_unavailable` and the link keeps working. `hashi connect` saves the key as an account named after the remote, marks it shared, reads its usage through the remote, logs a reminder when it crosses `remindAt`, and switches it off (with a way back) after `until`. The owner's dashboard logs a reminder too.
 
 ## Access requests
 
@@ -322,12 +330,13 @@ Errors share one shape: `{"error": {"code": "rate_limited", "message": "..."}}`.
 | 409 | `link_full`, `requests_full` | The ask-access link holds 50 pending requests, or the server 200 |
 | 409 | `too_many_open_requests` | A token already has 3 open requests for more |
 | 409 | `not_pending` | Accepting or declining a request that was already decided or expired |
+| 409 | `login_unavailable` | A login share's key cannot be read on the owner's machine; the link still works |
 | 410 | `invite_expired` | The invite link is past its expiry |
 | 410 | `link_closed` | The ask-access link was closed or has expired |
 | 413 | | Body larger than 64 KB |
 | 413 | `too_large` | A token that may run on a remote account sent a prompt that would pass 64 KB once forwarded |
 | 421 | `unknown_host` | Plain HTTP request with a `Host` Hashi does not serve (see `--allowed-host`) |
-| 429 | `limit_reached` | A daily or monthly cap was hit; `limit`, `resetAt` and `retryAfter` (also `Retry-After`) say which and until when |
+| 429 | `limit_reached` | A daily or monthly cap was hit, or the owner's quota passed the token's `stopAtPercent`; `limit`, `resetAt` and `retryAfter` (also `Retry-After`) say which and until when |
 | 429 | `too_many_pending` | The token already has `maxPending` prompts in flight |
 | 429 | `too_many_waits` | OpenAI endpoint: the token already holds 4 open long polls or streams |
 | 429 | `request_too_soon` | A token asked for more less than an hour after its last request; `retryAfter` (also `Retry-After`) says when the next one can be sent |

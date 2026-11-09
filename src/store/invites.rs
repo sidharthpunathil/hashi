@@ -72,6 +72,21 @@ pub struct Invite {
     /// Whether the created token may see the headroom of the accounts
     /// serving it, in `/v1/me`.
     pub share_usage: bool,
+    /// For a login share: the account whose key the link hands over, as
+    /// `<agent>:<name>`. `None` for an ordinary invite.
+    pub login_account: Option<String>,
+    /// For a login share: the percent of a window at which both sides are
+    /// reminded.
+    pub remind_at: Option<u8>,
+}
+
+/// What a login share hands over, set on an invite after it is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginShare {
+    /// The account whose key is given, as `<agent>:<name>`.
+    pub account: String,
+    /// The percent of a window at which both sides are reminded.
+    pub remind_at: Option<u8>,
 }
 
 impl Invite {
@@ -119,7 +134,8 @@ pub enum Redeemed {
 
 const INVITE_COLUMNS: &str = "id, label, session_mode, agents, token_expires_in_days, \
      daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd, max_pending, \
-     expires_at, created_at, claimed_at, token_id, accounts, project, share_usage";
+     expires_at, created_at, claimed_at, token_id, accounts, project, share_usage, \
+     stop_at_percent, login_account, remind_at";
 
 impl Store {
     /// Creates an invite and returns it with its one-time code.
@@ -160,6 +176,8 @@ impl Store {
             accounts: new.accounts.clone(),
             project: new.project.clone(),
             share_usage: false,
+            login_account: None,
+            remind_at: None,
         };
         let l = invite.limits;
         let mut conn = self.conn()?;
@@ -175,8 +193,8 @@ impl Store {
         tx.execute(
             "INSERT INTO invites (id, hash, label, session_mode, agents, token_expires_in_days,
                  daily_requests, monthly_requests, daily_budget_usd, monthly_budget_usd,
-                 max_pending, expires_at, created_at, accounts, project)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 max_pending, expires_at, created_at, accounts, project, stop_at_percent)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 invite.id,
                 hash,
@@ -193,6 +211,7 @@ impl Store {
                 invite.created_at,
                 acct::encode(&invite.accounts),
                 invite.project,
+                l.stop_at_percent,
             ],
         )?;
         tx.commit()?;
@@ -223,6 +242,20 @@ impl Store {
         let n = self.conn()?.execute(
             "UPDATE invites SET share_usage = ?2 WHERE id = ?1",
             params![id, share],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Makes invite `id` a login share. Returns `false` if there is no
+    /// such invite.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_invite_login(&self, id: &str, login: &LoginShare) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "UPDATE invites SET login_account = ?2, remind_at = ?3 WHERE id = ?1",
+            params![id, login.account, login.remind_at],
         )?;
         Ok(n == 1)
     }
@@ -326,6 +359,14 @@ impl Store {
             )?;
             token.share_usage = true;
         }
+        if invite.login_account.is_some() {
+            tx.execute(
+                "UPDATE tokens SET login_account = ?2, remind_at = ?3 WHERE id = ?1",
+                params![token.id, invite.login_account, invite.remind_at],
+            )?;
+            token.login_account.clone_from(&invite.login_account);
+            token.remind_at = invite.remind_at;
+        }
         tx.commit()?;
         Ok(Redeemed::Token(Box::new(token), secret))
     }
@@ -357,6 +398,7 @@ fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Result<Invite>> {
                 daily_budget_usd: r.get(7)?,
                 monthly_budget_usd: r.get(8)?,
                 max_pending: r.get(9)?,
+                stop_at_percent: r.get(17)?,
             },
             expires_at: r.get(10)?,
             created_at: r.get(11)?,
@@ -365,6 +407,8 @@ fn row_to_invite(r: &Row<'_>) -> rusqlite::Result<Result<Invite>> {
             accounts: acct::decode(&accounts),
             project: r.get(15)?,
             share_usage: r.get(16)?,
+            login_account: r.get(18)?,
+            remind_at: r.get(19)?,
         })
     };
     Ok(build())

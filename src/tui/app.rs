@@ -8,6 +8,7 @@ use ratatui::widgets::TableState;
 
 use super::forms::{
     AccountForm, AskForm, ConnectForm, EditTokenForm, ListenForm, ProjectForm, ReportForm,
+    ShareLoginForm,
 };
 use super::one_line;
 use super::theme::{self, Rgb};
@@ -85,6 +86,8 @@ pub enum Action {
     StopPublic,
     /// Create an invite link.
     NewInvite,
+    /// Hand over a key account through a link.
+    ShareLogin,
     /// Create a token.
     NewToken,
     /// See and decide requests for access, and open or close the link.
@@ -127,12 +130,13 @@ pub enum Action {
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
         Self::StopPublic,
         Self::NewInvite,
+        Self::ShareLogin,
         Self::NewToken,
         Self::AccessRequests,
         Self::Ask,
@@ -161,7 +165,7 @@ impl Action {
             Self::Cloudflare | Self::TailscaleServe | Self::TailscaleFunnel | Self::StopPublic => {
                 "Go public"
             }
-            Self::NewInvite | Self::NewToken | Self::AccessRequests => "Share",
+            Self::NewInvite | Self::ShareLogin | Self::NewToken | Self::AccessRequests => "Share",
             Self::Ask => "Ask",
             Self::Accounts | Self::Projects | Self::Bridges | Self::Connect => "Manage",
             Self::Listen | Self::CopyUrl => "Server",
@@ -196,6 +200,7 @@ impl Action {
             Self::TailscaleFunnel => "Tailscale funnel",
             Self::StopPublic => "Stop going public",
             Self::NewInvite => "New invite",
+            Self::ShareLogin => "Share a login",
             Self::NewToken => "New token",
             Self::AccessRequests => "Access requests",
             Self::Ask => "Ask an agent",
@@ -226,7 +231,8 @@ impl Action {
             Self::TailscaleServe => "your tailnet only, at <machine>.<tailnet>.ts.net",
             Self::TailscaleFunnel => "anyone on the internet, through Tailscale",
             Self::StopPublic => "turn off the active route; links go back to local",
-            Self::NewInvite => "a one-time link that gives someone their own token",
+            Self::NewInvite => "a link: they send prompts here, your limits hold",
+            Self::ShareLogin => "a link that hands over a key: for someone you trust",
             Self::NewToken => "an API token for a script or app",
             Self::AccessRequests => "people asking for access or for more, and the link",
             Self::Ask => "a prompt through the queue, or to a bridge you use",
@@ -452,6 +458,9 @@ impl TokenForm {
 const DAILY_PROMPTS: [Option<u32>; 4] = [None, Some(25), Some(100), Some(500)];
 /// Daily budget choices for an invite, in USD.
 const DAILY_BUDGET: [Option<f64>; 3] = [None, Some(5.0), Some(20.0)];
+/// Stop choices for an invite: the share of your quota after which their
+/// prompts are refused, in percent.
+const STOP_AT: [Option<u8>; 5] = [None, Some(50), Some(70), Some(80), Some(90)];
 /// Token lifetime choices for an invite, in days.
 const LIFETIME_DAYS: [Option<u32>; 4] = [None, Some(1), Some(7), Some(30)];
 /// How long an invite link stays valid, in hours.
@@ -472,6 +481,7 @@ pub struct ShareForm {
     pub mode: SessionMode,
     daily: usize,
     budget: usize,
+    stop: usize,
     lifetime: usize,
     link: usize,
     /// Accounts per agent, typed as `claude=work,personal codex=team`.
@@ -488,13 +498,15 @@ pub struct ShareForm {
 
 impl ShareForm {
     /// Number of fields.
-    pub const FIELDS: usize = 10;
+    pub const FIELDS: usize = 11;
+    /// Index of the stop-at choice.
+    pub const STOP_AT: usize = 5;
     /// Index of the accounts text field.
-    pub const ACCOUNTS: usize = 7;
+    pub const ACCOUNTS: usize = 8;
     /// Index of the project selector, the last field.
-    pub const PROJECT: usize = 9;
+    pub const PROJECT: usize = 10;
     /// Index of the share usage toggle.
-    pub const SHARE_USAGE: usize = 8;
+    pub const SHARE_USAGE: usize = 9;
 
     fn new(projects: Vec<String>) -> Self {
         Self {
@@ -504,6 +516,7 @@ impl ShareForm {
             mode: SessionMode::Stateless,
             daily: 0,
             budget: 0,
+            stop: 0,
             lifetime: 0,
             link: 1,
             accounts: String::new(),
@@ -524,8 +537,9 @@ impl ShareForm {
             }
             3 => self.daily = cycle(self.daily, DAILY_PROMPTS.len(), by),
             4 => self.budget = cycle(self.budget, DAILY_BUDGET.len(), by),
-            5 => self.lifetime = cycle(self.lifetime, LIFETIME_DAYS.len(), by),
-            6 => self.link = cycle(self.link, LINK_HOURS.len(), by),
+            Self::STOP_AT => self.stop = cycle(self.stop, STOP_AT.len(), by),
+            6 => self.lifetime = cycle(self.lifetime, LIFETIME_DAYS.len(), by),
+            7 => self.link = cycle(self.link, LINK_HOURS.len(), by),
             Self::PROJECT => self.project.shift(by),
             Self::SHARE_USAGE => self.share_usage = !self.share_usage,
             _ => {}
@@ -550,6 +564,16 @@ impl ShareForm {
             .copied()
             .flatten()
             .map_or_else(|| "none".to_owned(), |b| format!("${b:.0} a day"))
+    }
+
+    /// The stop on your quota, as shown in the form.
+    #[must_use]
+    pub fn stop_label(&self) -> String {
+        STOP_AT
+            .get(self.stop)
+            .copied()
+            .flatten()
+            .map_or_else(|| "none".to_owned(), |p| format!("at {p}% of your quota"))
     }
 
     /// Token lifetime, as shown in the form.
@@ -582,6 +606,7 @@ impl ShareForm {
             limits: Limits {
                 daily_requests: DAILY_PROMPTS.get(self.daily).copied().flatten(),
                 daily_budget_usd: DAILY_BUDGET.get(self.budget).copied().flatten(),
+                stop_at_percent: STOP_AT.get(self.stop).copied().flatten(),
                 max_pending: Some(INVITE_MAX_PENDING),
                 ..Limits::default()
             },
@@ -744,6 +769,8 @@ pub enum Popup {
     },
     /// "Connect to a bridge" form.
     Connect(Box<ConnectForm>),
+    /// "Share a login" form.
+    ShareLogin(Box<ShareLoginForm>),
     /// Bridge removal confirmation.
     ConfirmRemoveRemote {
         /// The bridge's name.
@@ -806,7 +833,7 @@ pub enum Popup {
 #[derive(Debug, Clone)]
 pub enum Done {
     /// `hashi connect`: the name saved under, or why it failed.
-    Connected(Result<String, String>),
+    Connected(Result<(String, Option<String>), String>),
     /// `hashi ask --remote`: the bridge asked and its answer or error.
     Answer {
         /// The bridge.
@@ -1372,6 +1399,7 @@ impl App {
             | Popup::ConfirmRemoveProject { .. }
             | Popup::Remotes { .. }
             | Popup::Connect(_)
+            | Popup::ShareLogin(_)
             | Popup::ConfirmRemoveRemote { .. }
             | Popup::Audit { .. }
             | Popup::Doctor
@@ -2003,6 +2031,7 @@ impl App {
             | Action::Projects
             | Action::Bridges
             | Action::Connect
+            | Action::ShareLogin
             | Action::Listen
             | Action::InstallUpdate
             | Action::Doctor

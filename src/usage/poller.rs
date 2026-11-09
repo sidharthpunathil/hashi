@@ -187,10 +187,12 @@ impl Poller {
                     .map(|a| (*agent, a.name.clone())),
             );
         }
+        // Remote accounts, and logins someone shared, are read through the
+        // friend's bridge whatever their agent.
         out.extend(
             accounts
                 .iter()
-                .filter(|a| a.kind == AccountKind::Remote && !a.disabled)
+                .filter(|a| (a.kind == AccountKind::Remote || a.shared_by.is_some()) && !a.disabled)
                 .map(|a| (a.agent, a.name.clone())),
         );
         out
@@ -233,10 +235,17 @@ impl Poller {
                 }
             }
         };
-        if let Some(a) = state.as_ref().filter(|a| a.kind == AccountKind::Remote) {
+        let before = self.used(agent, name);
+        if let Some(a) = state
+            .as_ref()
+            .filter(|a| a.kind == AccountKind::Remote || a.shared_by.is_some())
+        {
             self.mark(&key, None);
             let result = self.read_remote(a).await;
             self.finish(&key, agent, name, &result);
+            if result.is_ok() {
+                self.remind(agent, name, before);
+            }
             return result;
         }
         if !supports(agent) {
@@ -271,7 +280,56 @@ impl Poller {
             _ => self.read_codex(name, kind).await,
         };
         self.finish(&key, agent, name, &result);
+        if result.is_ok() {
+            self.remind(agent, name, before);
+        }
         result
+    }
+
+    /// The highest used percent of an account's windows now, when known.
+    fn used(&self, agent: AgentKind, name: &str) -> Option<f64> {
+        self.store
+            .account_summary(agent, name, 100, now_ms())
+            .ok()
+            .and_then(|s| s.used())
+    }
+
+    /// Reminds about logins shared either way once a read takes an
+    /// account from under the agreed percent to at or over it: the person
+    /// holding a shared login, and the owner who shared one whose quota
+    /// this account is.
+    fn remind(&self, agent: AgentKind, name: &str, before: Option<f64>) {
+        let after = self.used(agent, name);
+        let shown = after.unwrap_or_default();
+        if let Ok(Some(a)) = self.store.get_account(agent, name)
+            && let (Some(by), Some(pct)) = (&a.shared_by, a.remind_at)
+            && crate::share::crossed(before, after, pct)
+        {
+            self.bus.log(format!(
+                "reminder: {agent}:{name} is at {shown:.0}% of {by}'s quota; \
+                 they asked you to stop at {pct}%"
+            ));
+        }
+        let now = now_ms();
+        for t in self.store.list_tokens().unwrap_or_default() {
+            let (Some(login), Some(pct)) = (&t.login_account, t.remind_at) else {
+                continue;
+            };
+            if t.status(now) != crate::token::TokenStatus::Active
+                || !acct::for_agent(&t.accounts, agent)
+                    .iter()
+                    .any(|n| n == name)
+                || !t.allows(agent)
+                || !crate::share::crossed(before, after, pct)
+            {
+                continue;
+            }
+            self.bus.log(format!(
+                "reminder: {agent}:{name} is at {shown:.0}% and {} holds your login {login}; \
+                 you agreed they stop at {pct}%",
+                t.name
+            ));
+        }
     }
 
     /// Records a failed read as the account's note and schedules the
@@ -298,7 +356,11 @@ impl Poller {
     /// headroom, or the token's own caps. The token is never stored or
     /// logged.
     async fn read_remote(&self, a: &crate::store::AccountState) -> Result<(), PollError> {
-        let remote = a.remote.clone().unwrap_or_default();
+        let remote = a
+            .remote
+            .clone()
+            .or_else(|| a.shared_by.clone())
+            .unwrap_or_default();
         let target =
             crate::forward::Target::load(&self.home, &remote, a.remote_agent.unwrap_or(a.agent))
                 .map_err(|why| PollError::Failed {
@@ -496,6 +558,10 @@ impl Poller {
         cancel: CancellationToken,
     ) {
         loop {
+            match crate::share::end_expired_shares(&self.store, now_ms()) {
+                Ok(ended) => ended.into_iter().for_each(|m| self.bus.log(m)),
+                Err(e) => tracing::warn!(error = %e, "could not check shared logins"),
+            }
             let now = Instant::now();
             let due: Vec<Key> = {
                 let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);

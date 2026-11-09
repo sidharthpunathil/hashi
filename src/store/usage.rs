@@ -242,6 +242,61 @@ impl Store {
             .optional()?)
     }
 
+    /// Whether every enabled account in `names` has used `stop` percent of
+    /// a window at `now`; then the soonest time one of them opens again.
+    /// `None` when any of them is under the stop or not known.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn all_past_stop(
+        &self,
+        agent: AgentKind,
+        names: &[String],
+        stop: u8,
+        now: i64,
+    ) -> Result<Option<crate::usage::PastStop>> {
+        let mut held: Option<crate::usage::PastStop> = None;
+        for name in names {
+            if name != crate::accounts::DEFAULT
+                && self.get_account(agent, name)?.is_none_or(|a| a.disabled)
+            {
+                continue;
+            }
+            let Some(p) = self.past_stop(agent, name, stop, now)? else {
+                return Ok(None);
+            };
+            held = Some(match held {
+                None => p,
+                Some(h) => crate::usage::PastStop {
+                    used: h.used.min(p.used),
+                    opens_at: match (h.opens_at, p.opens_at) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    },
+                },
+            });
+        }
+        Ok(held)
+    }
+
+    /// Whether an account has used `stop` percent of any window at `now`
+    /// (see [`crate::usage::past_stop`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn past_stop(
+        &self,
+        agent: AgentKind,
+        name: &str,
+        stop: u8,
+        now: i64,
+    ) -> Result<Option<crate::usage::PastStop>> {
+        let windows = self.usage_windows(agent, name)?;
+        Ok(crate::usage::past_stop(&windows, stop, now))
+    }
+
     /// An account's [`Summary`] at `now` under `rotate_at`: its windows and
     /// its limited mark. A disabled account is summarised like any other.
     ///

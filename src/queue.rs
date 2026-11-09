@@ -60,7 +60,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::accounts::{self as acct, AccountKind, AccountMap};
+use crate::accounts::{self as acct, AccountKind};
 use crate::agent::{self, AgentConfig, AgentKind, EnvOverride, Invocation, Limits};
 use crate::events::{Bus, Event};
 use crate::guard::ResourceGuard;
@@ -693,7 +693,21 @@ impl Worker {
         eff: &Effective,
         tried: &[String],
     ) -> Result<Option<Picked>, Halt> {
+        let now = now_ms();
+        let past_stop = |name: &str| -> Result<bool, Halt> {
+            Ok(match eff.stop_at {
+                Some(stop) => self
+                    .store
+                    .past_stop(self.agent, name, stop, now)
+                    .map_err(|e| e.to_string())?
+                    .is_some(),
+                None => false,
+            })
+        };
         let Some(list) = eff.accounts.get(&self.agent).filter(|l| !l.is_empty()) else {
+            if past_stop(acct::DEFAULT)? {
+                return Ok(None);
+            }
             return Ok(Some(Picked {
                 name: acct::DEFAULT.to_owned(),
                 kind: AccountKind::Default,
@@ -702,7 +716,6 @@ impl Worker {
                 remote: None,
             }));
         };
-        let now = now_ms();
         let policy = self.policy(eff);
         let mut names: Vec<&String> = Vec::new();
         let mut kinds = Vec::new();
@@ -737,7 +750,8 @@ impl Worker {
                     .is_none_or(|s| s.status(now) == AccountStatus::Ready)
                 && (remote.is_none()
                     || (req.hops < crate::forward::MAX_HOPS
-                        && !self.dispatcher.backed_off(self.agent, name)));
+                        && !self.dispatcher.backed_off(self.agent, name)))
+                && !past_stop(name)?;
             let summary = self
                 .store
                 .account_summary(self.agent, name, policy.rotate_at, now)
@@ -818,10 +832,15 @@ impl Worker {
     }
 
     /// Why no account of the token's list can run this agent now.
-    fn none_left(&self, accounts: &AccountMap) -> String {
+    fn none_left(&self, eff: &Effective) -> String {
         let now = now_ms();
-        let names = acct::for_agent(accounts, self.agent);
+        let names = acct::for_agent(&eff.accounts, self.agent);
         let agent = self.agent.display_name();
+        if let Some(stop) = eff.stop_at
+            && let Ok(Some(held)) = self.store.all_past_stop(self.agent, &names, stop, now)
+        {
+            return crate::usage::stop_message(self.agent, stop, &held);
+        }
         if names
             .iter()
             .any(|n| self.dispatcher.backed_off(self.agent, n))
@@ -912,7 +931,7 @@ impl Worker {
         };
 
         let Some(account) = self.pick_account(req, &eff, &req.accounts_tried)? else {
-            return Err(Halt::Failed(self.none_left(&eff.accounts)));
+            return Err(Halt::Failed(self.none_left(&eff)));
         };
         // Moving a conversation to another account starts it fresh there,
         // rather than resuming an older one kept on that account.
@@ -1134,7 +1153,7 @@ impl Worker {
                 },
                 Err(e) => Halt::Failed(e.to_string()),
             },
-            Ok(None) => Halt::Failed(last_error.unwrap_or_else(|| self.none_left(&eff.accounts))),
+            Ok(None) => Halt::Failed(last_error.unwrap_or_else(|| self.none_left(eff))),
             Err(halt) => halt,
         }
     }

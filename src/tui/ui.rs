@@ -1666,6 +1666,16 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             0 => ("no pending invites".to_owned(), TEXT),
             n => (format!("{n} pending"), TEXT),
         },
+        Action::ShareLogin => match app
+            .tokens
+            .iter()
+            .filter(|t| t.login_account.is_some())
+            .count()
+        {
+            0 => ("no logins shared".to_owned(), TEXT),
+            1 => ("1 login shared".to_owned(), TEXT),
+            n => (format!("{n} logins shared"), TEXT),
+        },
         Action::NewToken => match app.tokens.len() {
             1 => ("1 token".to_owned(), TEXT),
             n => (format!("{n} tokens"), TEXT),
@@ -1749,6 +1759,7 @@ pub fn action_cli(app: &App, action: Action) -> String {
             _ => "hashi serve without --tunnel".to_owned(),
         },
         Action::NewInvite => "hashi share <label>".to_owned(),
+        Action::ShareLogin => "hashi share-login <label> --account <agent>:<name>".to_owned(),
         Action::NewToken => "hashi token create <name>".to_owned(),
         Action::AccessRequests => "hashi requests list".to_owned(),
         Action::Ask => "hashi ask \"<prompt>\"".to_owned(),
@@ -2457,7 +2468,7 @@ pub(super) fn form_error(error: Option<&String>, indent: usize) -> Line<'static>
 
 fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
     const W: usize = 16;
-    let rect = centered(area, 72, 20);
+    let rect = centered(area, 72, 21);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(
@@ -2482,16 +2493,22 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
             form_toggle(&form.budget_label(), f(4)),
         ),
         form_field(
-            f(5),
-            "token lifetime",
+            f(ShareForm::STOP_AT),
+            "stop at",
             W,
-            form_toggle(form.lifetime_label(), f(5)),
+            form_toggle(&form.stop_label(), f(ShareForm::STOP_AT)),
         ),
         form_field(
             f(6),
+            "token lifetime",
+            W,
+            form_toggle(form.lifetime_label(), f(6)),
+        ),
+        form_field(
+            f(7),
             "link valid for",
             W,
-            form_toggle(form.link_label(), f(6)),
+            form_toggle(form.link_label(), f(7)),
         ),
         form_field(
             f(ShareForm::ACCOUNTS),
@@ -2521,11 +2538,11 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
         ),
         Line::raw(""),
         Line::from(Span::styled(
-            "  The link works once and creates a user token for them.",
+            "  The link works once and creates a user token for them. Your login",
             t::muted(),
         )),
         Line::from(Span::styled(
-            "  At most 3 of their prompts run at a time.",
+            "  stays here; at most 3 of their prompts run at a time.",
             t::muted(),
         )),
         Line::raw(""),

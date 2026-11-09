@@ -122,6 +122,11 @@ pub struct Limits {
     /// Prompts queued or running at once.
     #[serde(default)]
     pub max_pending: Option<u32>,
+    /// Stop when the owner's account serving the token has used this
+    /// percent of any quota window (5 hours or week), so the rest stays
+    /// the owner's. 1 to 100.
+    #[serde(default)]
+    pub stop_at_percent: Option<u8>,
 }
 
 impl Limits {
@@ -132,6 +137,7 @@ impl Limits {
             .into_iter()
             .flatten()
             .all(|b| b.is_finite() && b >= 0.0)
+            && self.stop_at_percent.is_none_or(|p| (1..=100).contains(&p))
     }
 }
 
@@ -195,6 +201,12 @@ pub struct Token {
     /// Whether `/v1/me` shows this token the headroom of the accounts
     /// serving each of its agents. Off unless the owner turns it on.
     pub share_usage: bool,
+    /// For a login share: remind the owner when the account the token
+    /// reads has used this percent of a window.
+    pub remind_at: Option<u8>,
+    /// For a login share: the account whose key the person was given, as
+    /// `<agent>:<name>`. The token itself only reads usage.
+    pub login_account: Option<String>,
 }
 
 impl Token {

@@ -183,6 +183,8 @@ pub struct EditTokenForm {
     pub monthly_budget: String,
     /// Prompts in flight at once.
     pub max_pending: String,
+    /// Stop at this percent of the owner's quota, 1 to 100.
+    pub stop_at: String,
     /// Accounts per agent, as `claude=work,personal codex=team`.
     pub accounts: String,
     /// The project the token is bound to.
@@ -195,15 +197,17 @@ pub struct EditTokenForm {
 
 impl EditTokenForm {
     /// Number of fields.
-    pub const FIELDS: usize = 11;
+    pub const FIELDS: usize = 12;
     /// Index of the expiry field.
     pub const EXPIRY: usize = 2;
+    /// Index of the stop-at field.
+    pub const STOP_AT: usize = 8;
     /// Index of the accounts field.
-    pub const ACCOUNTS: usize = 8;
+    pub const ACCOUNTS: usize = 9;
     /// Index of the project selector.
-    pub const PROJECT: usize = 9;
+    pub const PROJECT: usize = 10;
     /// Index of the share usage toggle.
-    pub const SHARE_USAGE: usize = 10;
+    pub const SHARE_USAGE: usize = 11;
     /// Labels, in field order.
     pub const LABELS: [&'static str; Self::FIELDS] = [
         "name",
@@ -214,6 +218,7 @@ impl EditTokenForm {
         "daily budget",
         "month budget",
         "max pending",
+        "stop at %",
         "accounts",
         "project",
         "share usage",
@@ -233,6 +238,7 @@ impl EditTokenForm {
             daily_budget: show_money(l.daily_budget_usd),
             monthly_budget: show_money(l.monthly_budget_usd),
             max_pending: show_count(l.max_pending),
+            stop_at: show_count(l.stop_at_percent.map(u32::from)),
             accounts: bindings_text(&token.accounts),
             project: ProjectChoice::with(projects, token.project.as_deref()),
             share_usage: token.share_usage,
@@ -252,7 +258,8 @@ impl EditTokenForm {
             5 => &mut self.daily_budget,
             6 => &mut self.monthly_budget,
             7 => &mut self.max_pending,
-            8 => &mut self.accounts,
+            Self::STOP_AT => &mut self.stop_at,
+            Self::ACCOUNTS => &mut self.accounts,
             _ => return None,
         })
     }
@@ -310,6 +317,10 @@ impl EditTokenForm {
             daily_budget_usd: parse_money(&self.daily_budget, 5)?,
             monthly_budget_usd: parse_money(&self.monthly_budget, 6)?,
             max_pending: Some(parse_count(&self.max_pending, 7, 1..=100)?),
+            stop_at_percent: Some(
+                parse_count(&self.stop_at, Self::STOP_AT, 1..=100)?
+                    .and_then(|n| u8::try_from(n).ok()),
+            ),
         };
         if limits.apply(t.limits) != t.limits {
             body.limits = Some(limits);
@@ -881,6 +892,176 @@ impl ProjectForm {
             map.insert(agent, model);
         }
         Ok(map)
+    }
+}
+
+// ── share a login ──────────────────────────────────────────────────────────
+
+/// Reminder choices for a login share, in percent.
+pub const REMIND_AT: [Option<u8>; 5] = [None, Some(50), Some(70), Some(80), Some(90)];
+/// How long a login share lasts, in days.
+pub const SHARE_DAYS: [Option<u32>; 4] = [None, Some(1), Some(7), Some(30)];
+
+/// The "share a login" form: a one-time link that hands over a key
+/// account, with reminders instead of limits (see [`crate::share`]).
+#[derive(Debug, Clone)]
+pub struct ShareLoginForm {
+    /// Focused field, `0..FIELDS`.
+    pub field: usize,
+    /// Who it is for.
+    pub label: String,
+    /// The key accounts that can be handed over.
+    pub logins: Vec<(AgentKind, String, acct::AccountKind)>,
+    /// Index into `logins`.
+    pub login: usize,
+    /// The accounts of the chosen login's agent whose usage Hashi reads.
+    pub sources: Vec<String>,
+    /// Index into `sources`.
+    pub source: usize,
+    /// Index into [`REMIND_AT`].
+    pub remind: usize,
+    /// Index into [`SHARE_DAYS`].
+    pub days: usize,
+    /// Index into [`crate::share::LINK_HOURS`].
+    pub link: usize,
+    /// The field that failed and why.
+    pub error: Option<FieldError>,
+}
+
+impl ShareLoginForm {
+    /// Number of fields.
+    pub const FIELDS: usize = 6;
+    /// Labels, in field order.
+    pub const LABELS: [&'static str; Self::FIELDS] = [
+        "label",
+        "login",
+        "usage from",
+        "remind at",
+        "share for",
+        "link valid",
+    ];
+
+    /// The form, with the key accounts that can be handed over.
+    #[must_use]
+    pub fn new(logins: Vec<(AgentKind, String, acct::AccountKind)>) -> Self {
+        Self {
+            field: 0,
+            label: String::new(),
+            logins,
+            login: 0,
+            sources: vec![acct::DEFAULT.to_owned()],
+            source: 0,
+            remind: 2,
+            days: 2,
+            link: 1,
+            error: None,
+        }
+    }
+
+    /// The chosen key account.
+    #[must_use]
+    pub fn selected(&self) -> Option<&(AgentKind, String, acct::AccountKind)> {
+        self.logins.get(self.login)
+    }
+
+    /// The chosen login, as shown.
+    #[must_use]
+    pub fn login_label(&self) -> String {
+        match self.selected() {
+            Some((agent, name, kind)) => format!("{agent}:{name} ({kind})"),
+            None => "none: add an api-key or oauth-token account first".to_owned(),
+        }
+    }
+
+    /// Where the usage is read from, as shown.
+    #[must_use]
+    pub fn source_label(&self) -> String {
+        let name = self
+            .sources
+            .get(self.source)
+            .map_or("default", String::as_str);
+        match self.selected() {
+            Some((agent, ..)) => format!("{agent}:{name}"),
+            None => name.to_owned(),
+        }
+    }
+
+    /// The reminder, as shown.
+    #[must_use]
+    pub fn remind_label(&self) -> String {
+        REMIND_AT.get(self.remind).copied().flatten().map_or_else(
+            || "no reminder".to_owned(),
+            |p| format!("{p}% of your quota"),
+        )
+    }
+
+    /// How long the share lasts, as shown.
+    #[must_use]
+    pub fn days_label(&self) -> String {
+        match SHARE_DAYS.get(self.days).copied().flatten() {
+            None => "until you revoke it".to_owned(),
+            Some(1) => "1 day".to_owned(),
+            Some(d) => format!("{d} days"),
+        }
+    }
+
+    /// How long the link stays valid, in hours.
+    #[must_use]
+    pub fn link_hours(&self) -> u32 {
+        crate::share::LINK_HOURS
+            .get(self.link)
+            .copied()
+            .unwrap_or(24)
+    }
+
+    /// Moves the focused choice by `by`. Returns `true` when the login
+    /// changed, so the caller refills [`Self::sources`].
+    pub fn step(&mut self, by: isize) -> bool {
+        match self.field {
+            1 => {
+                self.login = cycle(self.login, self.logins.len(), by);
+                return true;
+            }
+            2 => self.source = cycle(self.source, self.sources.len(), by),
+            3 => self.remind = cycle(self.remind, REMIND_AT.len(), by),
+            4 => self.days = cycle(self.days, SHARE_DAYS.len(), by),
+            5 => self.link = cycle(self.link, crate::share::LINK_HOURS.len(), by),
+            _ => {}
+        }
+        false
+    }
+
+    /// The share to create.
+    ///
+    /// # Errors
+    ///
+    /// The field that is missing.
+    pub fn to_new(&self) -> Result<crate::share::NewLoginShare, FieldError> {
+        let label = self.label.trim();
+        if label.is_empty() {
+            return Err((0, "who it is for, for example dana".to_owned()));
+        }
+        let Some((agent, name, _)) = self.selected() else {
+            return Err((
+                1,
+                "add a key account first: Accounts, a, kind oauth-token (from claude \
+                 setup-token) or api-key"
+                    .to_owned(),
+            ));
+        };
+        Ok(crate::share::NewLoginShare {
+            label: label.to_owned(),
+            agent: *agent,
+            account: name.clone(),
+            usage_from: self
+                .sources
+                .get(self.source)
+                .cloned()
+                .unwrap_or_else(|| acct::DEFAULT.to_owned()),
+            remind_at: REMIND_AT.get(self.remind).copied().flatten(),
+            days: SHARE_DAYS.get(self.days).copied().flatten(),
+            link_hours: self.link_hours(),
+        })
     }
 }
 

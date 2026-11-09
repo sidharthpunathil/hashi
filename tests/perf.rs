@@ -147,6 +147,7 @@ fn seed() -> Seeded {
                         daily_budget_usd: Some(1_000_000.0),
                         monthly_budget_usd: Some(10_000_000.0),
                         max_pending: Some(1_000),
+                        stop_at_percent: None,
                     }
                 },
                 accounts: account_map(i),

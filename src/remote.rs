@@ -383,9 +383,126 @@ fn free_name(remotes: &[Remote], wanted: &str) -> String {
 ///
 /// Fails on a bad link, a refused claim, or when saving fails.
 pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
-    let (remote, server) = redeem(home, &opts.url, opts.name.as_deref())?;
-    print_connected(home, &remote, &server, opts.setup_claude.as_deref());
-    Ok(remote)
+    let r = redeem(home, &opts.url, opts.name.as_deref())?;
+    if let Some(login) = &r.login {
+        print_login(&r.remote, &r.server, login);
+    } else {
+        print_connected(home, &r.remote, &r.server, opts.setup_claude.as_deref());
+    }
+    Ok(r.remote)
+}
+
+/// What redeeming an invite link saved.
+#[derive(Debug, Clone)]
+pub struct Redemption {
+    /// The saved bridge.
+    pub remote: Remote,
+    /// The server's name, as it gave it.
+    pub server: String,
+    /// For a login share: what happened to the key.
+    pub login: Option<LoginAdded>,
+}
+
+/// Where a login share's key went.
+#[derive(Debug, Clone)]
+pub enum LoginAdded {
+    /// Added as the account `<agent>:<name>`.
+    Account {
+        /// The agent.
+        agent: crate::agent::AgentKind,
+        /// The account's name.
+        name: String,
+        /// Remind at this percent.
+        remind_at: Option<u8>,
+        /// When the share ends, Unix ms.
+        until: Option<i64>,
+    },
+    /// Could not be added; the key was kept in this owner-only file, with
+    /// the reason.
+    Saved {
+        /// The agent.
+        agent: crate::agent::AgentKind,
+        /// The file holding the key.
+        path: PathBuf,
+        /// Why it was not added.
+        why: String,
+    },
+}
+
+/// Adds a login share's key as an account, or keeps it in an owner-only
+/// file when that fails: the link is already used, so the key must not be
+/// lost.
+fn add_login(home: &Path, remote: &str, v: &Value) -> Result<LoginAdded> {
+    let grant = crate::share::LoginGrant::from_json(v).map_err(|e| anyhow::anyhow!(e))?;
+    let added = crate::server::open_store(home)
+        .and_then(|store| crate::share::add_shared_login(&store, home, &grant, remote, "connect"));
+    match added {
+        Ok(name) => Ok(LoginAdded::Account {
+            agent: grant.agent,
+            name,
+            remind_at: grant.remind_at,
+            until: grant.until,
+        }),
+        Err(e) => {
+            let path = home.join(format!("shared-login-{remote}.key"));
+            write_private(&path, &format!("{}\n", grant.key.as_str()))
+                .with_context(|| format!("saving the shared key to {}", path.display()))?;
+            Ok(LoginAdded::Saved {
+                agent: grant.agent,
+                path,
+                why: format!("{e:#}"),
+            })
+        }
+    }
+}
+
+/// What `hashi connect` prints for a login share.
+fn print_login(remote: &Remote, server: &str, login: &LoginAdded) {
+    let server = terminal_safe(server);
+    println!();
+    match login {
+        LoginAdded::Account {
+            agent,
+            name,
+            remind_at,
+            until,
+        } => {
+            println!(
+                "  \u{2713} {server} shared their {} login, added as account {agent}:{name}",
+                agent.display_name()
+            );
+            if let Some(p) = remind_at {
+                println!("    they asked you to stop at {p}% of their quota; Hashi reminds you");
+            }
+            if let Some(t) = until.and_then(crate::util::rfc3339) {
+                println!("    the share ends {t}; then the account is switched off");
+            }
+            println!(
+                "    their usage is read through \"{}\": hashi account usage",
+                remote.name
+            );
+            println!();
+            println!("  Use it from a token or project:");
+            println!("    hashi token update <id> --account {agent}={name}");
+        }
+        LoginAdded::Saved { agent, path, why } => {
+            println!(
+                "  ! {server} shared their {} login, but it could not be added: {}",
+                agent.display_name(),
+                terminal_safe(why)
+            );
+            println!(
+                "    the key is kept in {} (only you can read it)",
+                path.display()
+            );
+            println!(
+                "    add it with: hashi account add {agent} {} --kind oauth-token --key-stdin < {}",
+                remote.name.replace('_', "-"),
+                path.display()
+            );
+        }
+    }
+    println!();
 }
 
 /// Redeems an invite link and saves the token under `name` (default: from
@@ -396,7 +513,7 @@ pub fn connect(home: &Path, opts: &ConnectOptions) -> Result<Remote> {
 /// # Errors
 ///
 /// Fails on a bad link, a refused claim, or when saving fails.
-pub fn redeem(home: &Path, url: &str, name: Option<&str>) -> Result<(Remote, String)> {
+pub fn redeem(home: &Path, url: &str, name: Option<&str>) -> Result<Redemption> {
     let link = parse_invite_url(url)?;
     let mut remotes = load(home)?;
     if let Some(n) = name {
@@ -460,7 +577,15 @@ pub fn redeem(home: &Path, url: &str, name: Option<&str>) -> Result<(Remote, Str
     remotes.push(remote.clone());
     save(home, &remotes)?;
     let server = r["server"].as_str().unwrap_or("the bridge").to_owned();
-    Ok((remote, server))
+    let login = match r.get("login").filter(|v| v.is_object()) {
+        Some(v) => Some(add_login(home, &remote.name, v)?),
+        None => None,
+    };
+    Ok(Redemption {
+        remote,
+        server,
+        login,
+    })
 }
 
 /// What `hashi connect` prints once a bridge is saved: where the token is

@@ -28,7 +28,9 @@ pub use access::{
 };
 pub use accounts::{AccountState, AccountStatus, RemovedAccount};
 pub use audit::AuditEntry;
-pub use invites::{INVITE_PREFIX, Invite, InviteState, MAX_PENDING_INVITES, NewInvite, Redeemed};
+pub use invites::{
+    INVITE_PREFIX, Invite, InviteState, LoginShare, MAX_PENDING_INVITES, NewInvite, Redeemed,
+};
 pub use projects::{ProjectStats, RemovedProject};
 pub use usage::{Conversation, PollStatus, Spend};
 
@@ -612,9 +614,29 @@ CREATE INDEX IF NOT EXISTS idx_requests_project_usage ON requests(project, creat
 DROP INDEX IF EXISTS idx_requests_project;
 ";
 
-const MIGRATIONS: [&str; 9] = [
+/// Version 10: two ways to share. Tokens and invites gain
+/// `stop_at_percent`, a limit on the owner's quota: the token stops once
+/// the account serving it has used that much of a window. A login share
+/// (an invite with `login_account`) hands the person the account's key
+/// itself; the token it creates only reads the owner's usage, and both
+/// sides are reminded at `remind_at` percent. The person's copy of the
+/// key is an account with `shared_by` (the remote its usage comes from),
+/// `remind_at` and `share_until`.
+const SCHEMA_V10: &str = r"
+ALTER TABLE tokens ADD COLUMN stop_at_percent INTEGER;
+ALTER TABLE tokens ADD COLUMN remind_at INTEGER;
+ALTER TABLE tokens ADD COLUMN login_account TEXT;
+ALTER TABLE invites ADD COLUMN stop_at_percent INTEGER;
+ALTER TABLE invites ADD COLUMN login_account TEXT;
+ALTER TABLE invites ADD COLUMN remind_at INTEGER;
+ALTER TABLE accounts ADD COLUMN shared_by TEXT;
+ALTER TABLE accounts ADD COLUMN remind_at INTEGER;
+ALTER TABLE accounts ADD COLUMN share_until INTEGER;
+";
+
+const MIGRATIONS: [&str; 10] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9,
+    SCHEMA_V9, SCHEMA_V10,
 ];
 
 /// Prepared statements kept per connection. The hot paths cache about 40.
@@ -636,7 +658,8 @@ const TOKEN_USAGE_SQL: &str = "SELECT
 
 const TOKEN_COLUMNS: &str = "id, name, prefix, role, session_mode, agents, expires_at, created_at, \
      last_used_at, paused, note, daily_requests, monthly_requests, daily_budget_usd, \
-     monthly_budget_usd, max_pending, accounts, project, share_usage";
+     monthly_budget_usd, max_pending, accounts, project, share_usage, stop_at_percent, remind_at, \
+     login_account";
 
 const REQUEST_COLUMNS: &str = "id, token_id, token_name, agent, model, message, stateful, status, \
      response, error, input_tokens, output_tokens, cost_usd, created_at, started_at, completed_at, \
@@ -788,7 +811,7 @@ impl Store {
             "UPDATE tokens SET name = ?1, note = ?2, paused = ?3, expires_at = ?4,
                  daily_requests = ?5, monthly_requests = ?6, daily_budget_usd = ?7,
                  monthly_budget_usd = ?8, max_pending = ?9, accounts = ?11, project = ?12,
-                 share_usage = ?13
+                 share_usage = ?13, stop_at_percent = ?14
              WHERE id = ?10",
             params![
                 t.name,
@@ -804,6 +827,7 @@ impl Store {
                 acct::encode(&t.accounts),
                 t.project,
                 t.share_usage,
+                l.stop_at_percent,
             ],
         )?;
         Ok(())
@@ -1742,13 +1766,16 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
         accounts: new.accounts.clone(),
         project: new.project.clone(),
         share_usage: false,
+        remind_at: None,
+        login_account: None,
     };
     let l = token.limits;
     conn.execute(
         "INSERT INTO tokens (id, name, hash, prefix, role, session_mode, agents, expires_at,
              created_at, note, daily_requests, monthly_requests, daily_budget_usd,
-             monthly_budget_usd, max_pending, accounts, project)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             monthly_budget_usd, max_pending, accounts, project, stop_at_percent)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18)",
         params![
             token.id,
             token.name,
@@ -1767,6 +1794,7 @@ fn insert_token(conn: &Connection, new: &NewToken) -> Result<(Token, GeneratedTo
             l.max_pending,
             acct::encode(&token.accounts),
             token.project,
+            l.stop_at_percent,
         ],
     )?;
     Ok((token, secret))
@@ -1796,10 +1824,13 @@ fn row_to_token(r: &Row<'_>) -> rusqlite::Result<Result<Token>> {
                 daily_budget_usd: r.get(13)?,
                 monthly_budget_usd: r.get(14)?,
                 max_pending: r.get(15)?,
+                stop_at_percent: r.get(19)?,
             },
             accounts: acct::decode(&accounts),
             project: r.get(17)?,
             share_usage: r.get(18)?,
+            remind_at: r.get(20)?,
+            login_account: r.get(21)?,
         })
     };
     Ok(build())
@@ -2539,6 +2570,7 @@ mod tests {
             daily_budget_usd: Some(1.5),
             monthly_budget_usd: Some(20.0),
             max_pending: Some(2),
+            stop_at_percent: Some(70),
         };
         s.save_token_policy(&t).unwrap();
         let back = s.get_token(&t.id).unwrap().unwrap();
