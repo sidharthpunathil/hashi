@@ -1366,10 +1366,14 @@ fn edit_token_form_checks_each_field_and_saves_through_the_shared_update() {
     }
     typed(&mut app, "7");
 
-    // Accounts that do not exist are refused next to the field.
+    // Stop at 70% of the owner's quota.
     for _ in 0..6 {
         app.on_key(key(KeyCode::Down));
     }
+    typed(&mut app, "70");
+
+    // Accounts that do not exist are refused next to the field.
+    app.on_key(key(KeyCode::Down));
     typed(&mut app, "claude=ghost");
     app.on_key(key(KeyCode::Enter));
     let Some(Popup::EditToken(form)) = &app.popup else {
@@ -1382,7 +1386,7 @@ fn edit_token_form_checks_each_field_and_saves_through_the_shared_update() {
     }
 
     // A note, then save.
-    for _ in 0..7 {
+    for _ in 0..8 {
         app.on_key(key(KeyCode::Up));
     }
     typed(&mut app, "for the CI");
@@ -1391,6 +1395,7 @@ fn edit_token_form_checks_each_field_and_saves_through_the_shared_update() {
     let t = app.state.store.get_token(&id).unwrap().unwrap();
     assert_eq!(t.note.as_deref(), Some("for the CI"));
     assert_eq!(t.limits.daily_requests, Some(50));
+    assert_eq!(t.limits.stop_at_percent, Some(70));
     assert!(t.expires_at.is_some());
     assert!(toast(&app).contains("updated alice"));
     let audit = app.state.store.list_audit(10).unwrap();
@@ -2723,4 +2728,85 @@ fn the_copy_guide_row_copies_the_llm_guide_and_says_how_many_lines() {
     let lines = guide.lines().count();
     assert!(lines > 100, "{lines}");
     assert_eq!(toast(&app), format!("LLM guide copied ({lines} lines)"));
+}
+
+#[test]
+fn a_login_is_shared_from_the_dashboard_with_reminders_and_no_key_on_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::new(state_at(dir.path()), None, false);
+    let secret = "sk-ant-oat01-DashboardShare-123456";
+
+    // Without a key account, the form says what to add.
+    select_action(&mut app, Action::ShareLogin);
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::ShareLogin(_))));
+    typed(&mut app, "dana");
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("add a key account first"), "{out}");
+    app.on_key(key(KeyCode::Esc));
+
+    let home = app.home().unwrap();
+    hashi::accounts::ops::create(
+        &app.state.store,
+        &home,
+        AgentKind::Claude,
+        "bot",
+        hashi::accounts::AccountKind::OauthToken,
+        Some(secret),
+        "test",
+    )
+    .unwrap();
+    select_action(&mut app, Action::ShareLogin);
+    app.on_key(key(KeyCode::Enter));
+    typed(&mut app, "dana");
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("claude:bot (oauth-token)"), "{out}");
+    assert!(out.contains("70% of your quota"), "{out}");
+    assert!(out.contains("7 days"), "{out}");
+    assert!(!out.contains("DashboardShare"));
+    app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.popup, Some(Popup::InviteReveal { .. })),
+        "{:?}",
+        app.popup
+    );
+    assert!(!draw(&mut app, 140, 44).contains("DashboardShare"));
+    let invite = app
+        .state
+        .store
+        .list_invites()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.label == "dana")
+        .unwrap();
+    assert_eq!(invite.login_account.as_deref(), Some("claude:bot"));
+    assert_eq!(invite.remind_at, Some(70));
+    assert_eq!(invite.token_expires_in_days, Some(7));
+    assert!(invite.share_usage);
+}
+
+#[test]
+fn the_share_form_sets_a_stop_on_the_owners_quota() {
+    let mut app = App::new(state(), None, false);
+    app.on_key(key(KeyCode::Char('3')));
+    app.on_key(key(KeyCode::Char('s')));
+    assert!(matches!(app.popup, Some(Popup::Share(_))));
+    typed(&mut app, "carol");
+    for _ in 0..hashi::tui::app::ShareForm::STOP_AT {
+        app.on_key(key(KeyCode::Down));
+    }
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Right));
+    assert!(draw(&mut app, 140, 44).contains("at 70% of your quota"));
+    app.on_key(key(KeyCode::Enter));
+    let invite = app
+        .state
+        .store
+        .list_invites()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.label == "carol")
+        .unwrap();
+    assert_eq!(invite.limits.stop_at_percent, Some(70));
 }

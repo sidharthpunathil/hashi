@@ -33,6 +33,10 @@ pub struct LimitArgs {
     /// Prompts queued or running at once.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub max_pending: Option<u32>,
+    /// Stop once the owner's account serving it has used this percent of
+    /// its 5-hour or weekly quota, keeping the rest for the owner.
+    #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub stop_at: Option<u8>,
 }
 
 impl LimitArgs {
@@ -42,6 +46,7 @@ impl LimitArgs {
             || self.daily_budget.is_some()
             || self.monthly_budget.is_some()
             || self.max_pending.is_some()
+            || self.stop_at.is_some()
     }
 
     /// Overlays the given flags on `base`.
@@ -52,6 +57,7 @@ impl LimitArgs {
             daily_budget_usd: self.daily_budget.or(base.daily_budget_usd),
             monthly_budget_usd: self.monthly_budget.or(base.monthly_budget_usd),
             max_pending: self.max_pending.or(base.max_pending),
+            stop_at_percent: self.stop_at.or(base.stop_at_percent),
         }
     }
 }
@@ -220,6 +226,105 @@ pub struct ShareArgs {
     pub share_usage: bool,
     #[command(flatten)]
     pub limits: LimitArgs,
+}
+
+/// `hashi share-login ...`: a one-time link that hands over a key account.
+#[derive(Debug, Args)]
+pub struct ShareLoginArgs {
+    /// Who it is for.
+    pub label: String,
+    /// The key account to hand over, as <agent>:<name>, for example
+    /// claude:bot (an OAuth token from `claude setup-token`, or an API key).
+    #[arg(long, value_name = "AGENT:NAME")]
+    pub account: String,
+    /// The account whose quota the key spends, read for reminders:
+    /// default, or a login account of the same agent.
+    #[arg(long, value_name = "NAME", default_value = "default")]
+    pub usage_from: String,
+    /// Remind both of you when that quota has used this percent of a
+    /// 5-hour or weekly window.
+    #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pub remind_at: Option<u8>,
+    /// The share ends this many days after it is claimed: their copy is
+    /// switched off and the usage reading stops.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3650))]
+    pub days: Option<u32>,
+    /// How long the link works, in hours.
+    #[arg(
+        long,
+        default_value = "24",
+        value_parser = clap::builder::PossibleValuesParser::new(["1", "24", "168"])
+            .map(|s| s.parse::<u32>().unwrap_or(24)),
+    )]
+    pub link_hours: u32,
+    /// Base URL for the link, as for `hashi share`.
+    #[arg(long, env = "HASHI_PUBLIC_URL")]
+    pub public_url: Option<String>,
+    /// Port of the local server, used for a local-only link.
+    #[arg(long, env = "HASHI_PORT")]
+    pub port: Option<u16>,
+}
+
+/// `hashi share-login`: creates a login share and prints its link.
+///
+/// # Errors
+///
+/// Fails on a bad account or field, or on database errors.
+pub fn share_login(store: &Store, home: &Path, args: ShareLoginArgs) -> Result<()> {
+    let (agent, account) =
+        hashi::share::parse_account_ref(&args.account).map_err(|e| anyhow::anyhow!(e))?;
+    let new = hashi::share::NewLoginShare {
+        label: clean_label(&args.label)?,
+        agent,
+        account,
+        usage_from: args.usage_from,
+        remind_at: args.remind_at,
+        days: args.days,
+        link_hours: args.link_hours,
+    };
+    let (invite, code) = hashi::share::create_login_share(store, home, &new, "cli")
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let (base, local) = link_base(store, args.public_url.as_deref(), args.port);
+    eprintln!(
+        "login share of {agent}:{} for {} (works once, expires {}):",
+        new.account,
+        invite.label,
+        rfc3339(invite.expires_at).unwrap_or_default()
+    );
+    println!("{base}/claim/{code}");
+    eprintln!(
+        "the link hands over the key itself: send it privately, to someone you trust. \
+         They open it with `hashi connect <link>`."
+    );
+    if local {
+        eprintln!(
+            "note: this link only works on this machine. Press t in the dashboard to go public, \
+             start with --tunnel or set HASHI_PUBLIC_URL to share it."
+        );
+    }
+    Ok(())
+}
+
+/// The base URL for a link, and whether it only works on this machine.
+fn link_base(store: &Store, public_url: Option<&str>, port: Option<u16>) -> (String, bool) {
+    // A running server records its public URL (configured or tunnel) for us.
+    let public = public_url.map_or_else(
+        || {
+            store
+                .data_dir()
+                .and_then(|home| hashi::server::read_public_url(&home))
+        },
+        |u| Some(u.trim_end_matches('/').to_owned()),
+    );
+    // The flag or variable, else the port saved from the dashboard.
+    let saved = store
+        .data_dir()
+        .and_then(|home| hashi::settings::load(&home).ok())
+        .and_then(|s| s.port);
+    let (port, _) = hashi::settings::resolve(port, saved, hashi::settings::DEFAULT_PORT);
+    let local = public.is_none();
+    let base = public.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
+    (base, local)
 }
 
 /// `hashi invite ...`
@@ -500,6 +605,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
                     daily_budget_usd: full.daily_budget_usd,
                     monthly_budget_usd: full.monthly_budget_usd,
                     max_pending: Some(full.max_pending),
+                    stop_at_percent: Some(full.stop_at_percent),
                 }
             });
             let accounts = (clear_accounts || !accounts.is_empty()).then(|| {
@@ -618,24 +724,7 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         &invite.label,
         &format!("link valid {}h", args.link_hours),
     )?;
-    // A running server records its public URL (configured or tunnel) for us.
-    let public = args.public_url.as_deref().map_or_else(
-        || {
-            store
-                .data_dir()
-                .and_then(|home| hashi::server::read_public_url(&home))
-        },
-        |u| Some(u.trim_end_matches('/').to_owned()),
-    );
-    // The flag or variable, else the port saved from the dashboard.
-    let saved = store
-        .data_dir()
-        .and_then(|home| hashi::settings::load(&home).ok())
-        .and_then(|s| s.port);
-    let (port, _) = hashi::settings::resolve(args.port, saved, hashi::settings::DEFAULT_PORT);
-    let base = public
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
+    let (base, local) = link_base(store, args.public_url.as_deref(), args.port);
     eprintln!(
         "invite for {}{} (works once, expires {}):",
         invite.label,
@@ -647,7 +736,7 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         rfc3339(invite.expires_at).unwrap_or_default()
     );
     println!("{base}/claim/{code}");
-    if public.is_none() {
+    if local {
         eprintln!(
             "note: this link only works on this machine. Press t in the dashboard to go public, \
              start with --tunnel or set HASHI_PUBLIC_URL to share it."
@@ -1014,7 +1103,10 @@ fn kind_cell(a: &hashi::store::AccountState) -> String {
     match (&a.remote, a.remote_agent) {
         (Some(r), Some(ra)) if ra != a.agent => format!("remote via {r} ({ra})"),
         (Some(r), _) => format!("remote via {r}"),
-        _ => a.kind.as_str().to_owned(),
+        _ => match &a.shared_by {
+            Some(by) => format!("{}, shared by {by}", a.kind),
+            None => a.kind.as_str().to_owned(),
+        },
     }
 }
 
@@ -1260,16 +1352,7 @@ fn usage_bar(used: f64, width: usize) -> String {
     format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
-/// Time until `at`, short: `2h 10m`, `4d 3h`.
-fn until(at: i64, now: i64) -> String {
-    let secs = (at.saturating_sub(now) / 1_000).max(0);
-    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
-    match (d, h) {
-        (0, 0) => format!("{m}m"),
-        (0, h) => format!("{h}h {m}m"),
-        (d, h) => format!("{d}d {h}h"),
-    }
-}
+use hashi::util::until;
 
 /// `hashi account usage`: each account's windows, plan, source and state,
 /// after reading Claude Code and Codex quota first with `--refresh`.
@@ -1363,6 +1446,17 @@ fn account_usage(
             head.push_str(&format!("  ({}, {} ago)", w.source.as_str(), human_age(at)));
         }
         println!("{head}");
+        if let Some(by) = &a.shared_by {
+            println!(
+                "  {}",
+                terminal_safe(&hashi::share::share_note(
+                    by,
+                    a.remind_at,
+                    a.share_until,
+                    now
+                ))
+            );
+        }
         if windows.is_empty() {
             let spend = store.account_spend_today(a.agent, &a.name, now)?;
             let (runs, _) = store.account_runs(a.agent, &a.name, now)?;
@@ -1830,6 +1924,9 @@ fn limits_text(l: &Limits) -> String {
     }
     if let Some(n) = l.max_pending {
         parts.push(format!("{n} at a time"));
+    }
+    if let Some(n) = l.stop_at_percent {
+        parts.push(format!("stops at {n}% of your quota"));
     }
     if parts.is_empty() {
         "no limits".to_owned()

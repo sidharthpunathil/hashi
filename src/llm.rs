@@ -323,6 +323,20 @@ hashi share "Alice" --project web --link-hours 168
 - `--link-hours` is `1`, `24` (default) or `168`.
 - Without a public URL the link works only on this machine; see "Go public".
 - See pending invites with `hashi invite list --json`, and cancel one (ask first) with `hashi invite cancel <id>`.
+- `--stop-at 70` refuses the person's prompts once the owner's account serving them has used 70% of its 5-hour or weekly quota, so the rest stays the owner's. `hashi token update <id> --stop-at 80` changes it later.
+
+### Hand a login to someone the owner trusts
+
+`hashi share-login` makes a one-time link that hands over the key of one of the owner's key accounts, so the person runs the agent on their own machine. Nothing is enforced after that: both sides are reminded instead.
+
+```bash
+hashi share-login "Dana" --account claude:bot --remind-at 70 --days 7
+```
+
+- The account must be an `api-key` or `oauth-token` account (`claude setup-token` makes a long-lived Claude token; the owner runs it). The link is a secret that carries the key: never print or repeat it.
+- `--usage-from` names the account whose quota the key spends (default `default`); the person's Hashi reads it through the link to remind them.
+- Ask before sharing a login: a subscription login is meant for one person, and the owner decides.
+- The person runs `hashi connect "<link>"`; the key becomes an account named after the remote, switched off when `--days` ends.
 
 ### Create a token for an app
 

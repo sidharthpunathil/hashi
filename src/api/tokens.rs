@@ -106,6 +106,10 @@ pub struct LimitsPatch {
     /// Prompts in flight: left out keeps the current cap, `null` removes it.
     #[serde(default, deserialize_with = "present")]
     pub max_pending: Option<Option<u32>>,
+    /// Stop at this percent of the owner's quota: left out keeps the
+    /// current value, `null` removes it.
+    #[serde(default, deserialize_with = "present")]
+    pub stop_at_percent: Option<Option<u8>>,
 }
 
 impl LimitsPatch {
@@ -118,6 +122,7 @@ impl LimitsPatch {
             daily_budget_usd: self.daily_budget_usd,
             monthly_budget_usd: self.monthly_budget_usd,
             max_pending: self.max_pending.unwrap_or(current.max_pending),
+            stop_at_percent: self.stop_at_percent.unwrap_or(current.stop_at_percent),
         }
     }
 }
@@ -166,6 +171,14 @@ fn validate_note(note: Option<String>) -> ApiResult<Option<String>> {
 ///
 /// Returns [`ApiError::BadRequest`] for invalid limits.
 pub fn validate_limits(limits: Limits) -> ApiResult<Limits> {
+    if limits
+        .stop_at_percent
+        .is_some_and(|p| !(1..=100).contains(&p))
+    {
+        return Err(ApiError::BadRequest(
+            "stopAtPercent must be from 1 to 100".to_owned(),
+        ));
+    }
     if !limits.is_valid() {
         return Err(ApiError::BadRequest(
             "budgets must be zero or more".to_owned(),

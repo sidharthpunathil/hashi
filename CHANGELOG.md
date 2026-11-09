@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Two ways to share, both through a one-time link and both in the dashboard:
+  - **Bridge share** (`hashi share`, New invite): the person sends prompts to your Hashi and your login never leaves your machine. New `--stop-at PCT` (`stopAtPercent`, "stop at" in the share and token forms) refuses their prompts once your account has used that share of its 5-hour or weekly quota, with when it opens again; a friend's Hashi fails over on it like any other limit.
+  - **Login share** (`hashi share-login`, Share a login): for someone you trust, the link hands over the key of an API-key or OAuth-token account, so they run the agent on their own machine. Nothing is enforced; instead their Hashi reads your usage through the link, both of you get a reminder at `--remind-at` percent, and their copy is switched off when `--days` ends. `hashi connect` and the dashboard's Connect add it as an account.
+- `hashi account usage` and the Accounts popup show who shared a login, the agreed percent and when the share ends.
+
 ## [0.3.2] - 2026-11-06
 
 ### Fixed

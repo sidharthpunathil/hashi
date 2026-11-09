@@ -318,6 +318,7 @@ impl AcceptForm {
             daily_budget_usd: opt(&self.daily_budget, "budget a day")?,
             monthly_budget_usd: opt(&self.monthly_budget, "budget a month")?,
             max_pending: None,
+            stop_at_percent: None,
         };
         let new = self.is_new();
         Ok(AcceptInput {

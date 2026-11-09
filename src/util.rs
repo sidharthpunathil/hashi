@@ -86,6 +86,18 @@ pub fn human_duration(d: Duration) -> String {
     }
 }
 
+/// Time until `at`, short: `2h 10m`, `4d 3h`.
+#[must_use]
+pub fn until(at: i64, now: i64) -> String {
+    let secs = (at.saturating_sub(now) / 1_000).max(0);
+    let (d, h, m) = (secs / 86_400, secs % 86_400 / 3_600, secs % 3_600 / 60);
+    match (d, h) {
+        (0, 0) => format!("{m}m"),
+        (0, h) => format!("{h}h {m}m"),
+        (d, h) => format!("{d}d {h}h"),
+    }
+}
+
 /// Human friendly byte count in binary units: `512 B`, `640 KiB`, `512 MiB`, `3.2 GiB`.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]

@@ -816,3 +816,27 @@ fn a_first_run_with_an_agent_points_at_ask_and_tokens() {
     assert!(frame.contains("Press a to ask from here"), "{frame}");
     assert!(frame.contains("3 Tokens"), "{frame}");
 }
+
+#[test]
+fn both_share_forms_fit_a_24_row_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let mut app = filled_app(home.path());
+    open(&mut app, Action::NewInvite);
+    let frame = text(&mut app, 80, 24);
+    for want in ["label", "stop at", "project", "create link"] {
+        assert!(frame.contains(want), "{want} missing:\n{frame}");
+    }
+    open(&mut app, Action::ShareLogin);
+    let frame = text(&mut app, 80, 24);
+    for want in [
+        "label",
+        "login",
+        "usage from",
+        "remind at",
+        "share for",
+        "link valid",
+        "create link",
+    ] {
+        assert!(frame.contains(want), "{want} missing:\n{frame}");
+    }
+}

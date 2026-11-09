@@ -41,6 +41,10 @@ enum Command {
     /// Create a one-time invite link for a person.
     #[command(after_help = SHARE_EXAMPLES)]
     Share(admin_cli::ShareArgs),
+    /// Hand someone you trust one of your key accounts through a one-time
+    /// link: reminders instead of limits.
+    #[command(name = "share-login", after_help = SHARE_LOGIN_EXAMPLES)]
+    ShareLogin(admin_cli::ShareLoginArgs),
     /// List or cancel invite links.
     #[command(subcommand)]
     Invite(admin_cli::InviteCommand),
@@ -110,10 +114,29 @@ const SHARE_EXAMPLES: &str = "Examples:
   hashi share alice
   hashi share alice --agents claude,codex --daily-requests 50 --expires-in-days 30
   hashi share bob --project web --link-hours 168 --share-usage
+  hashi share carol --agents claude --stop-at 70 --expires-in-days 7
 
 The link prints on standard output and works once. Without a public URL it
 works only on this machine: start with --tunnel or --tailscale, or set
-HASHI_PUBLIC_URL.";
+HASHI_PUBLIC_URL.
+
+They send prompts to this Hashi, so your login never leaves this machine and
+every limit holds. --stop-at 70 refuses their prompts once your account has
+used 70% of its 5-hour or weekly quota. To hand over a key instead, see
+`hashi share-login`.";
+
+const SHARE_LOGIN_EXAMPLES: &str = "Examples:
+  claude setup-token            # makes a long-lived token for your plan
+  hashi account add claude bot --kind oauth-token --key-stdin
+  hashi share-login dana --account claude:bot --remind-at 70 --days 7
+
+The link hands over the key itself, so dana runs Claude Code on their own
+machine. Nothing can be enforced after that; instead both of you are
+reminded at --remind-at percent, their Hashi reads your usage through the
+link, and their copy is switched off when --days ends. They open it with
+`hashi connect <link>` or the dashboard's Connect. Revoke the token the link
+created to stop the usage reading; revoke the key where it was made to take
+it back.";
 
 const ACCOUNT_EXAMPLES: &str = "Examples:
   hashi account add claude work
@@ -574,6 +597,9 @@ async fn main() -> Result<()> {
         Some(Command::Serve(args)) => serve(&home, *args).await,
         Some(Command::Token(cmd)) => admin_cli::token(&server::open_store(&home)?, cmd),
         Some(Command::Share(args)) => admin_cli::share(&server::open_store(&home)?, args),
+        Some(Command::ShareLogin(args)) => {
+            admin_cli::share_login(&server::open_store(&home)?, &home, args)
+        }
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Account(cmd)) => admin_cli::account(&server::open_store(&home)?, &home, cmd),
         Some(Command::Project(cmd)) => admin_cli::project(&server::open_store(&home)?, &home, cmd),

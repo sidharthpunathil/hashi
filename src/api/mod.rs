@@ -970,6 +970,9 @@ pub fn accounts_with_usage(store: &Store) -> ApiResult<Vec<crate::store::Account
                 remote: None,
                 remote_agent: None,
                 disabled_reason: None,
+                shared_by: None,
+                remind_at: None,
+                share_until: None,
             });
         }
     }
@@ -1076,6 +1079,9 @@ async fn refresh_account(
             remote: None,
             remote_agent: None,
             disabled_reason: None,
+            shared_by: None,
+            remind_at: None,
+            share_until: None,
         });
     let rotate_at = state.dispatcher.usage().policy().rotate_at;
     let mut v = account_json_with(&state.store, &a, now, rotate_at)?;

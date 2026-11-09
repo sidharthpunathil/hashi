@@ -234,6 +234,53 @@ impl Window {
     }
 }
 
+/// How far past a token's stop an account is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PastStop {
+    /// The highest used percent among the windows at or over the stop.
+    pub used: f64,
+    /// When every one of those windows has reset, Unix ms, when known.
+    pub opens_at: Option<i64>,
+}
+
+/// Whether `windows` say an account has used `stop` percent or more of
+/// any window at `now`. Unknown usage is never past the stop: a token is
+/// only held back on figures Hashi has.
+#[must_use]
+pub fn past_stop(windows: &[Window], stop: u8, now: i64) -> Option<PastStop> {
+    let over: Vec<(f64, Option<i64>)> = windows
+        .iter()
+        .filter_map(|w| w.used_at(now).map(|u| (u, w.resets_at)))
+        .filter(|(u, _)| *u >= f64::from(stop))
+        .collect();
+    if over.is_empty() {
+        return None;
+    }
+    let used = over.iter().map(|(u, _)| *u).fold(0.0, f64::max);
+    let opens_at = over
+        .iter()
+        .map(|(_, r)| *r)
+        .try_fold(i64::MIN, |acc, r| r.map(|r| acc.max(r)));
+    Some(PastStop { used, opens_at })
+}
+
+/// What a token holder is told when the owner's quota is past their
+/// token's stop: no account names, only the agent, the stop and when it
+/// opens again.
+#[must_use]
+pub fn stop_message(agent: AgentKind, stop: u8, held: &PastStop) -> String {
+    let agent = agent.display_name();
+    let base = format!(
+        "the owner keeps the rest of their {agent} quota: this token stops at {stop}% \
+         and it is at {:.0}%",
+        held.used
+    );
+    match held.opens_at.and_then(crate::util::rfc3339) {
+        Some(at) => format!("{base}; it opens again at {at}"),
+        None => format!("{base}; try again later"),
+    }
+}
+
 /// `pct` within 0 to 100, with anything not a number as 0.
 #[must_use]
 pub fn clamp_percent(pct: f64) -> f64 {

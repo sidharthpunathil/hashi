@@ -39,6 +39,14 @@ pub struct AccountState {
     /// Why Hashi switched the account off on its own, for example because
     /// the remote bridge paused or revoked its token. Cleared on enable.
     pub disabled_reason: Option<String>,
+    /// For a login someone shared: the saved remote its usage is read
+    /// through (see [`crate::share`]).
+    pub shared_by: Option<String>,
+    /// For a login someone shared: the percent of a window at which they
+    /// asked to be left the rest.
+    pub remind_at: Option<u8>,
+    /// For a login someone shared: when the share ends, Unix ms.
+    pub share_until: Option<i64>,
 }
 
 /// Whether an account can take a run.
@@ -90,7 +98,7 @@ pub struct RemovedAccount {
 }
 
 const ACCOUNT_COLUMNS: &str = "agent, name, kind, disabled, limited_until, last_used, created_at, \
-     remote, remote_agent, disabled_reason";
+     remote, remote_agent, disabled_reason, shared_by, remind_at, share_until";
 
 fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
     let agent: String = r.get(0)?;
@@ -110,6 +118,9 @@ fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
             remote: r.get(7)?,
             remote_agent: remote_agent.and_then(|a| a.parse().ok()),
             disabled_reason: r.get(9)?,
+            shared_by: r.get(10)?,
+            remind_at: r.get(11)?,
+            share_until: r.get(12)?,
         })
     };
     Ok(build())
@@ -190,6 +201,29 @@ impl Store {
                 remote,
                 remote_agent.as_str()
             ],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Marks a key account as a login someone shared through the remote
+    /// `shared_by`, with its reminder and end. Returns `false` if there is
+    /// no such account.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn set_account_share(
+        &self,
+        agent: AgentKind,
+        name: &str,
+        shared_by: &str,
+        remind_at: Option<u8>,
+        until: Option<i64>,
+    ) -> Result<bool> {
+        let n = self.conn()?.execute(
+            "UPDATE accounts SET shared_by = ?3, remind_at = ?4, share_until = ?5
+             WHERE agent = ?1 AND name = ?2",
+            params![agent.as_str(), name, shared_by, remind_at, until],
         )?;
         Ok(n == 1)
     }

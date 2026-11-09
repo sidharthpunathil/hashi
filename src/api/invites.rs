@@ -50,6 +50,16 @@ pub struct CreateInviteBody {
     /// `POST /v1/tokens`. The claim page says so.
     #[serde(default)]
     pub share_usage: Option<bool>,
+    /// Makes this a login share: the key account, as `<agent>:<name>`,
+    /// whose key the link hands over. `accounts` may name the one account
+    /// of that agent whose usage is read for reminders (default: the
+    /// agent's default account); `agents`, `limits`, `project` and
+    /// `sessionMode` do not apply.
+    #[serde(default)]
+    pub login_account: Option<String>,
+    /// For a login share: remind both sides at this percent of a window.
+    #[serde(default)]
+    pub remind_at: Option<u8>,
 }
 
 /// Body of the claim endpoints.
@@ -74,7 +84,42 @@ fn invite_json(i: &Invite, now: i64) -> Value {
         "accounts": i.accounts,
         "project": i.project,
         "shareUsage": i.share_usage,
+        "loginAccount": i.login_account,
+        "remindAt": i.remind_at,
     })
+}
+
+/// Creates a login share from `POST /v1/invites`.
+fn create_login(
+    state: &AppState,
+    admin: &str,
+    body: CreateInviteBody,
+    account: &str,
+) -> ApiResult<(Invite, String)> {
+    let (agent, name) = crate::share::parse_account_ref(account).map_err(ApiError::BadRequest)?;
+    let usage_from = match body.accounts.as_ref().and_then(|m| m.get(&agent)) {
+        Some(list) if list.len() == 1 => list[0].clone(),
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "a login share reads usage from one account: accounts must name one".to_owned(),
+            ));
+        }
+        None => crate::accounts::DEFAULT.to_owned(),
+    };
+    let home = state
+        .store
+        .data_dir()
+        .ok_or_else(|| ApiError::BadRequest("this Hashi has no data directory".to_owned()))?;
+    let new = crate::share::NewLoginShare {
+        label: body.label,
+        agent,
+        account: name,
+        usage_from,
+        remind_at: body.remind_at,
+        days: body.expires_in_days,
+        link_hours: body.link_hours.unwrap_or(24),
+    };
+    crate::share::create_login_share(&state.store, &home, &new, admin).map_err(ApiError::BadRequest)
 }
 
 /// Validates a create request and fills in defaults.
@@ -213,6 +258,30 @@ pub(super) async fn create(
     body: Result<Json<CreateInviteBody>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
+    if let Some(account) = body.login_account.clone() {
+        let (invite, code) = create_login(&state, &admin.name, body, &account)?;
+        state
+            .bus
+            .log(format!("login share created for {}", invite.label));
+        let now = now_ms();
+        let public = state.runtime.public_url();
+        let base = public.clone().unwrap_or_else(|| state.runtime.local_url());
+        return Ok((
+            StatusCode::CREATED,
+            Json(json!({
+                "url": format!("{base}/claim/{code}"),
+                "localOnly": public.is_none(),
+                "warning": "Send this link privately. It works once, cannot be shown again, \
+                            and hands over the key itself.",
+                "invite": invite_json(&invite, now),
+            })),
+        ));
+    }
+    if body.remind_at.is_some() {
+        return Err(ApiError::BadRequest(
+            "remindAt is for login shares; give loginAccount too".to_owned(),
+        ));
+    }
     let share_usage = body.share_usage.unwrap_or(false);
     let mut new = validate_new_invite(body)?;
     new.accounts = super::check_accounts(&state.store, new.accounts)?;
@@ -294,6 +363,34 @@ pub(super) async fn cancel(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The key of a login share's account, or why the link cannot hand it
+/// over now.
+fn login_key(
+    state: &AppState,
+    account: &str,
+) -> ApiResult<(
+    AgentKind,
+    crate::accounts::AccountKind,
+    zeroize::Zeroizing<String>,
+)> {
+    let unavailable = |why: String| {
+        tracing::warn!("a login share could not be handed over: {why}");
+        ApiError::coded(
+            StatusCode::CONFLICT,
+            "login_unavailable",
+            "the owner's key for this link cannot be read right now; ask them to check it",
+        )
+    };
+    let (agent, name) = crate::share::parse_account_ref(account).map_err(unavailable)?;
+    let home = state
+        .store
+        .data_dir()
+        .ok_or_else(|| unavailable("this Hashi has no data directory".to_owned()))?;
+    let (kind, key) =
+        crate::share::read_login_key(&state.store, &home, agent, &name).map_err(unavailable)?;
+    Ok((agent, kind, key))
+}
+
 fn check_code(code: &str) -> ApiResult<()> {
     // Failed attempts are rate limited per client address by the handlers
     // (see `claim_outcome`).
@@ -342,7 +439,15 @@ fn preview_code(state: &AppState, body: ClaimJson) -> ApiResult<Json<Value>> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
     check_code(&body.code)?;
     match state.store.preview_invite(&body.code)? {
-        InviteState::Pending(i) => Ok(Json(json!({
+        InviteState::Pending(i) => Ok(Json(preview_json(state, &i))),
+        InviteState::Claimed => Err(claimed()),
+        InviteState::Expired => Err(expired()),
+        InviteState::NotFound => Err(not_found()),
+    }
+}
+
+fn preview_json(state: &AppState, i: &Invite) -> Value {
+    let mut v = json!({
             "label": i.label,
             "server": state.runtime.name,
             "agents": super::runnable_agents(state, &i.agents),
@@ -354,11 +459,25 @@ fn preview_code(state: &AppState, body: ClaimJson) -> ApiResult<Json<Value>> {
             "linkExpiresAt": rfc3339(i.expires_at),
             "notice": "The owner of this Hashi can see the prompts you send and the answers you get.",
             "shareUsage": i.share_usage,
-        }))),
-        InviteState::Claimed => Err(claimed()),
-        InviteState::Expired => Err(expired()),
-        InviteState::NotFound => Err(not_found()),
+    });
+    if let Some((agent, _)) = i
+        .login_account
+        .as_deref()
+        .and_then(|a| crate::share::parse_account_ref(a).ok())
+    {
+        v["login"] = json!({ "agent": agent, "remindAt": i.remind_at });
+        v["notice"] = json!(format!(
+            "This link hands you the owner's {} key, so you run {} on your own machine. \
+             The owner trusts you to stop at the limit you agreed{}; Hashi reminds you \
+             and switches your copy off when the share ends.",
+            agent.display_name(),
+            agent.display_name(),
+            i.remind_at
+                .map(|p| format!(" ({p}% of their quota)"))
+                .unwrap_or_default(),
+        ));
     }
+    v
 }
 
 pub(super) async fn redeem(
@@ -373,6 +492,15 @@ pub(super) async fn redeem(
 fn redeem_code(state: &AppState, body: ClaimJson) -> ApiResult<(StatusCode, Json<Value>)> {
     let Json(body) = body.map_err(|e| ApiError::BadRequest(e.body_text()))?;
     check_code(&body.code)?;
+    // A login share's key is read before the code is used, so a key that
+    // cannot be read leaves the link working for when the owner fixes it.
+    let login = match state.store.preview_invite(&body.code)? {
+        InviteState::Pending(i) => match i.login_account.as_deref() {
+            Some(account) => Some(login_key(state, account)?),
+            None => None,
+        },
+        _ => None,
+    };
     match state.store.redeem_invite(&body.code)? {
         Redeemed::Token(token, secret) => {
             state
@@ -380,9 +508,21 @@ fn redeem_code(state: &AppState, body: ClaimJson) -> ApiResult<(StatusCode, Json
                 .audit(&token.name, "invite.claim", &token.name, &token.prefix)?;
             state.bus.log(format!("invite claimed by {}", token.name));
             let base = state.runtime.base_url();
+            let login = login.map(|(agent, kind, key)| {
+                crate::share::grant_json(agent, kind, &key, token.remind_at, token.expires_at)
+            });
+            if let Some(account) = &token.login_account {
+                state
+                    .store
+                    .audit(&token.name, "share.login", account, "key handed over")?;
+                state
+                    .bus
+                    .log(format!("{} collected the login {account}", token.name));
+            }
             Ok((
                 StatusCode::CREATED,
                 Json(json!({
+                    "login": login,
                     "token": secret.raw,
                     "warning": "Save this token now. It cannot be shown again.",
                     "name": token.name,
@@ -423,6 +563,8 @@ mod tests {
             accounts: None,
             project: None,
             share_usage: None,
+            login_account: None,
+            remind_at: None,
         }
     }
 

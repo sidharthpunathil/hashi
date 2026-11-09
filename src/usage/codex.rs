@@ -285,16 +285,60 @@ async fn answer<R: tokio::io::AsyncBufRead + Unpin>(
             let text = err
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("an error");
-            return Err(format!(
-                "codex app-server answered: {}",
-                crate::util::truncate(&crate::diagnostics::redact(text), 200)
-            ));
+                .unwrap_or_default();
+            return Err(describe_error(text));
         }
         return msg
             .get("result")
             .cloned()
             .ok_or_else(|| "codex app-server answered without a result".to_owned());
+    }
+}
+
+/// The note for a sign-in the usage endpoint refused. The poller matches
+/// on it to wait longer and to name the command that fixes it.
+pub const SIGN_IN_REJECTED: &str = "the Codex sign-in was rejected";
+
+/// A short, plain reason for an app-server error. The raw message can
+/// carry a whole HTTP response (status, headers, JSON body), which is
+/// never shown: only what went wrong in words.
+#[must_use]
+pub fn describe_error(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if has(&[
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "sign in",
+        "log in",
+        "login",
+    ]) {
+        SIGN_IN_REJECTED.to_owned()
+    } else if has(&["429", "too many requests", "rate limited"]) {
+        "the Codex usage endpoint is busy, trying again shortly".to_owned()
+    } else if has(&[
+        "500",
+        "502",
+        "503",
+        "504",
+        "server error",
+        "unavailable",
+        "bad gateway",
+    ]) {
+        "the Codex usage endpoint is down, trying again shortly".to_owned()
+    } else if has(&[
+        "timed out",
+        "timeout",
+        "connect",
+        "dns",
+        "network",
+        "resolve",
+    ]) {
+        "the Codex usage endpoint could not be reached".to_owned()
+    } else {
+        "Codex could not read its rate limits".to_owned()
     }
 }
 
@@ -531,6 +575,26 @@ mod tests {
         assert!(q.windows[1].is_weekly());
         assert_eq!(q.windows[2].key, "codex_other.primary");
         assert_eq!(q.windows[2].label, "Codex primary, GPT-5.5");
+    }
+
+    #[test]
+    fn app_server_errors_become_short_plain_notes() {
+        let raw = "failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage \
+                   failed: 401 Unauthorized; content-type=text/plain; body={\n  \"error\": {\n    \"message\": \"x\"";
+        assert_eq!(describe_error(raw), SIGN_IN_REJECTED);
+        assert_eq!(
+            describe_error("GET /usage failed: 503 Service Unavailable"),
+            "the Codex usage endpoint is down, trying again shortly"
+        );
+        assert_eq!(
+            describe_error("GET /usage failed: 429 Too Many Requests"),
+            "the Codex usage endpoint is busy, trying again shortly"
+        );
+        assert_eq!(describe_error(""), "Codex could not read its rate limits");
+        for text in [raw, "503", "429", "weird"] {
+            let note = describe_error(text);
+            assert!(!note.contains("http") && !note.contains('{'), "{note}");
+        }
     }
 
     #[test]

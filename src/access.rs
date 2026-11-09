@@ -654,6 +654,7 @@ pub fn prefill(store: &Store, r: &AccessRequest) -> ApiResult<Prefill> {
                 daily_budget_usd: a.daily_budget_usd.or(token.limits.daily_budget_usd),
                 monthly_budget_usd: a.monthly_budget_usd.or(token.limits.monthly_budget_usd),
                 max_pending: token.limits.max_pending,
+                stop_at_percent: token.limits.stop_at_percent,
             };
             let mut agents = token.agents.clone();
             agents.extend(r.agents.iter().copied());
@@ -789,6 +790,8 @@ fn accept_new(
         project: input.project.or(pre.project),
         // Shared usage stays off unless the owner turns it on later.
         share_usage: None,
+        login_account: None,
+        remind_at: None,
     })?;
     new.accounts = crate::api::check_accounts(store, new.accounts)?;
     crate::api::check_binding(store, new.project.as_deref(), &new.agents, &new.accounts)?;
@@ -852,6 +855,7 @@ fn accept_more(
         daily_budget_usd: over.daily_budget_usd.or(pre.limits.daily_budget_usd),
         monthly_budget_usd: over.monthly_budget_usd.or(pre.limits.monthly_budget_usd),
         max_pending: over.max_pending.or(pre.limits.max_pending),
+        stop_at_percent: over.stop_at_percent.or(pre.limits.stop_at_percent),
     })?;
     token.agents = sorted(input.agents.unwrap_or(pre.agents));
     if token.agents.is_empty() {
