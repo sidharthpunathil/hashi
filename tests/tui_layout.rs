@@ -864,3 +864,17 @@ fn the_pool_popups_fit_a_24_row_terminal() {
         assert!(frame.contains(want), "{want} missing:\n{frame}");
     }
 }
+
+#[test]
+fn every_details_popup_fits_24_rows_with_its_keys() {
+    let home = tempfile::tempdir().unwrap();
+    let mut app = filled_app(home.path());
+    for action in Action::ALL {
+        app.tab = Tab::Commands;
+        app.popup = Some(Popup::Details { action, scroll: 0 });
+        let frame = text(&mut app, 80, 24);
+        assert!(frame.contains(action.title()), "{action:?}:\n{frame}");
+        assert!(frame.contains("What it is"), "{action:?}:\n{frame}");
+        assert!(frame.contains("esc"), "{action:?} hides its keys:\n{frame}");
+    }
+}

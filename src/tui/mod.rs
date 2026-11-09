@@ -4,6 +4,7 @@ pub mod access;
 pub mod app;
 pub mod cache;
 pub mod clipboard;
+pub mod details;
 pub mod forms;
 mod manage;
 mod panels;

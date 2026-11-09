@@ -335,6 +335,7 @@ Nearly everything the CLI does can be done from the dashboard, through the same 
 | `Enter` | Run the selected row (Commands view) |
 | `a` | Ask an agent: the prompt popup (any view) |
 | `n` / `d` | Create a token (Tokens and Commands views) / revoke one (Tokens view) |
+| `d` | Details of the selected row: what it is, how it works, what to know and the same command from a terminal (Commands view). In it, `↑` `↓` scroll, `←` `→` step to the other rows and `Enter` runs it |
 | `e` | Edit the selected token: name, note, expiry, limits, accounts and project (Tokens view) |
 | `s` | Share: create an invite link (Tokens and Commands views) |
 | `p` | Pause or resume the selected token |
@@ -352,7 +353,7 @@ No two actions in one view share a key. Forms move between fields with `↑` `�
 
 ### Commands view
 
-Tab `5` lists everything the owner can do, grouped, one row each with its key (or `enter`), what it does, its state right now and the command that does the same from a terminal:
+Tab `5` lists everything the owner can do, grouped, one row each with its key (or `enter`), what it does, its state right now and the command that does the same from a terminal. `d` opens the selected row's details: what it is, how it works step by step, what to know before using it, and how to run it here and from a terminal:
 
 | Group | Rows | Same from a terminal |
 |---|---|---|
