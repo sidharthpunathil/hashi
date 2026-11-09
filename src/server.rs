@@ -1288,6 +1288,9 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         hub.install(poller, None);
     }
 
+    // Workers for the pools this Hashi joined, on other hosts.
+    crate::pool_client::spawn(state.clone(), cfg.home.clone(), cancel.clone());
+
     let mut app = api::router(state.clone(), &net);
     if tls_config.is_some() {
         // Browsers should keep using HTTPS for this host from now on.

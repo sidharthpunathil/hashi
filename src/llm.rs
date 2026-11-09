@@ -338,6 +338,19 @@ hashi share-login "Dana" --account claude:bot --remind-at 70 --days 7
 - Ask before sharing a login: a subscription login is meant for one person, and the owner decides.
 - The person runs `hashi connect "<link>"`; the key becomes an account named after the remote, switched off when `--days` ends.
 
+### Pools: a party where everyone lends their agents
+
+```bash
+hashi pool open --via lan            # host: a join link for this wifi (or --via cloudflare, tailscale)
+hashi pool join "<link>" --name sid --agents claude --stop-at 70 --hours 4   # member
+hashi pool status                    # host: who is in, online, headroom per agent
+```
+
+- Members need no public URL: their Hashi asks the host for work and runs it with their own accounts and limits. `hashi serve` must run on their machine. Pausing their local `pool ...` token takes them out of rotation.
+- Each member gets a pool token on the host (saved as the remote `<host>-pool`, so `hashi ask --remote <host>-pool` works), and `GET /v1/pool` shows everyone's agents and headroom.
+- Every share takes `--via auto|cloudflare|tailscale|lan|local`. `lan` is plain http on the local network: say so to the owner.
+- Ask before kicking someone (`hashi pool kick <name>`) or leaving (`hashi pool leave`).
+
 ### Create a token for an app
 
 ```bash

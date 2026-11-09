@@ -1666,6 +1666,24 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             0 => ("no pending invites".to_owned(), TEXT),
             n => (format!("{n} pending"), TEXT),
         },
+        Action::Pool => {
+            let members = app.state.store.list_pool_members().map_or(0, |m| m.len());
+            let open = app
+                .state
+                .store
+                .pool_link()
+                .ok()
+                .flatten()
+                .is_some_and(|l| l.is_open(crate::util::now_ms()));
+            match (open, members) {
+                (false, 0) => ("no pool".to_owned(), TEXT),
+                (true, 0) => ("link open, nobody yet".to_owned(), TEXT),
+                (o, n) => (
+                    format!("{n} in the pool{}", if o { ", link open" } else { "" }),
+                    TEXT,
+                ),
+            }
+        }
         Action::ShareLogin => match app
             .tokens
             .iter()
@@ -1760,6 +1778,7 @@ pub fn action_cli(app: &App, action: Action) -> String {
         },
         Action::NewInvite => "hashi share <label>".to_owned(),
         Action::ShareLogin => "hashi share-login <label> --account <agent>:<name>".to_owned(),
+        Action::Pool => "hashi pool status".to_owned(),
         Action::NewToken => "hashi token create <name>".to_owned(),
         Action::AccessRequests => "hashi requests list".to_owned(),
         Action::Ask => "hashi ask \"<prompt>\"".to_owned(),
@@ -2161,9 +2180,14 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
             label,
             code,
             link_hours,
+            via,
+            pool,
         } => {
-            let url = app.invite_url(code);
-            let local_only = &app.local_only();
+            let url = app.share_link(code, *via, *pool);
+            let ready = crate::links::base(&app.state.runtime, *via).is_ok();
+            let local_only = &(!ready
+                || *via == crate::links::Via::Local
+                || (*via == crate::links::Via::Auto && app.local_only()));
             let starting = matches!(app.tunnel, TunnelState::Starting);
             let mut height: u16 = if *local_only { 15 } else { 12 };
             let width = u16::try_from(url.chars().count() + 10)
@@ -2212,13 +2236,27 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
             lines.push(Line::from(vec![
                 Span::styled("◌ ", t::fg(t::ORCHID)),
                 Span::styled(
-                    format!(
-                        "Works once, expires in {}. Opening it gives them their own token.",
-                        super::app::link_short(*link_hours)
-                    ),
+                    if *pool {
+                        format!(
+                            "Anyone may join for {}. Joining lends their agents to your pool.",
+                            super::app::link_short(*link_hours)
+                        )
+                    } else {
+                        format!(
+                            "Works once, expires in {}. Opening it gives them their own token.",
+                            super::app::link_short(*link_hours)
+                        )
+                    },
                     t::muted(),
                 ),
             ]));
+            if *via == crate::links::Via::Lan {
+                height += 1;
+                lines.push(Line::from(Span::styled(
+                    "  Plain http on this wifi: use a tunnel on a network you do not trust.",
+                    t::muted(),
+                )));
+            }
             let rect = centered(area, width, height);
             if *local_only {
                 lines.push(Line::raw(""));
@@ -2468,7 +2506,7 @@ pub(super) fn form_error(error: Option<&String>, indent: usize) -> Line<'static>
 
 fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64) {
     const W: usize = 16;
-    let rect = centered(area, 72, 21);
+    let rect = centered(area, 72, 22);
     let f = |i: usize| form.field == i;
     let lines = vec![
         form_field(
@@ -2509,6 +2547,12 @@ fn render_share_form(frame: &mut Frame, area: Rect, form: &ShareForm, tick: u64)
             "link valid for",
             W,
             form_toggle(form.link_label(), f(7)),
+        ),
+        form_field(
+            f(ShareForm::VIA),
+            "link via",
+            W,
+            form_toggle(form.via.label(), f(ShareForm::VIA)),
         ),
         form_field(
             f(ShareForm::ACCOUNTS),

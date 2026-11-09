@@ -941,7 +941,7 @@ fn commands_tab_lists_every_group_with_state_and_cli() {
     let mut app = App::new(without_helpers(), None, false);
     app.on_key(key(KeyCode::Char('5')));
     assert_eq!(app.tab, Tab::Commands);
-    let out = draw(&mut app, 170, 44);
+    let out = draw(&mut app, 170, 50);
     for text in [
         "5 Commands",
         "Go public",
@@ -1272,7 +1272,7 @@ fn state_at(dir: &std::path::Path) -> AppState {
 fn every_commands_row_shows_its_cli_and_every_cli_command_has_a_place() {
     let mut app = App::new(without_helpers(), None, false);
     app.on_key(key(KeyCode::Char('5')));
-    let out = draw(&mut app, 190, 44);
+    let out = draw(&mut app, 190, 50);
     for action in Action::ALL {
         let cli = ui::action_cli(&app, action);
         assert!(
@@ -2638,6 +2638,8 @@ fn bidi_and_zero_width_characters_never_reach_the_terminal() {
             label: EVIL.into(),
             code: "abc".into(),
             link_hours: 1,
+            via: hashi::links::Via::Auto,
+            pool: false,
         },
         Popup::RemoteAnswer {
             remote: EVIL.into(),
@@ -2809,4 +2811,39 @@ fn the_share_form_sets_a_stop_on_the_owners_quota() {
         .find(|i| i.label == "carol")
         .unwrap();
     assert_eq!(invite.limits.stop_at_percent, Some(70));
+}
+
+#[test]
+fn a_pool_link_is_opened_from_the_dashboard_and_members_show_up() {
+    let mut app = App::new(state(), None, false);
+    select_action(&mut app, Action::Pool);
+    app.on_key(key(KeyCode::Enter));
+    assert!(draw(&mut app, 140, 44).contains("Nobody is in your pool yet"));
+    app.on_key(key(KeyCode::Char('o')));
+    // Link via: this machine only, so nothing has to start.
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    for _ in 0..4 {
+        app.on_key(key(KeyCode::Right));
+    }
+    assert!(draw(&mut app, 140, 44).contains("this machine only"));
+    app.on_key(key(KeyCode::Enter));
+    let Some(Popup::InviteReveal { code, pool, .. }) = &app.popup else {
+        panic!("expected the link, got {:?}", app.popup)
+    };
+    assert!(*pool && code.starts_with("hashi_pool_"));
+    let out = draw(&mut app, 160, 44);
+    assert!(out.contains("/pool/hashi_pool_"), "{out}");
+    let link = app.state.store.pool_link().unwrap().unwrap();
+    app.state
+        .store
+        .add_pool_member(&link, "sid", &[AgentKind::Claude], None)
+        .unwrap();
+    app.on_key(key(KeyCode::Esc));
+    select_action(&mut app, Action::Pool);
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    assert!(out.contains("sid") && out.contains("offline"), "{out}");
+    app.on_key(key(KeyCode::Char('x')));
+    assert!(app.state.store.list_pool_members().unwrap().is_empty());
 }

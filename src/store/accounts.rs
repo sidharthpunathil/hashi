@@ -47,6 +47,8 @@ pub struct AccountState {
     pub remind_at: Option<u8>,
     /// For a login someone shared: when the share ends, Unix ms.
     pub share_until: Option<i64>,
+    /// For a pool account: the member who offers it.
+    pub pool_member: Option<String>,
 }
 
 /// Whether an account can take a run.
@@ -98,7 +100,7 @@ pub struct RemovedAccount {
 }
 
 const ACCOUNT_COLUMNS: &str = "agent, name, kind, disabled, limited_until, last_used, created_at, \
-     remote, remote_agent, disabled_reason, shared_by, remind_at, share_until";
+     remote, remote_agent, disabled_reason, shared_by, remind_at, share_until, pool_member";
 
 fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
     let agent: String = r.get(0)?;
@@ -121,6 +123,7 @@ fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
             shared_by: r.get(10)?,
             remind_at: r.get(11)?,
             share_until: r.get(12)?,
+            pool_member: r.get(13)?,
         })
     };
     Ok(build())

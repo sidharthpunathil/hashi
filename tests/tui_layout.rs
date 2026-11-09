@@ -498,6 +498,8 @@ fn shots() {
                     label: "zoe".into(),
                     code: "hashi_inv_0123456789abcdef0123456789".into(),
                     link_hours: 24,
+                    via: hashi::links::Via::Auto,
+                    pool: false,
                 });
             }),
         ),
@@ -837,6 +839,28 @@ fn both_share_forms_fit_a_24_row_terminal() {
         "link valid",
         "create link",
     ] {
+        assert!(frame.contains(want), "{want} missing:\n{frame}");
+    }
+}
+
+#[test]
+fn the_pool_popups_fit_a_24_row_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let mut app = filled_app(home.path());
+    open(&mut app, Action::Pool);
+    let frame = text(&mut app, 80, 24);
+    for want in ["pool", "open link", "join a pool"] {
+        assert!(frame.contains(want), "{want} missing:\n{frame}");
+    }
+    app.on_key(key(KeyCode::Char('o')));
+    let frame = text(&mut app, 80, 24);
+    for want in ["joins for", "people", "link via", "open link"] {
+        assert!(frame.contains(want), "{want} missing:\n{frame}");
+    }
+    app.on_key(key(KeyCode::Esc));
+    app.on_key(key(KeyCode::Char('a')));
+    let frame = text(&mut app, 80, 24);
+    for want in ["link", "your name", "agents", "stop at", "stay for", "join"] {
         assert!(frame.contains(want), "{want} missing:\n{frame}");
     }
 }
