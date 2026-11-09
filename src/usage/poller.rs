@@ -452,9 +452,20 @@ impl Poller {
         };
         let quota = codex::read(&bin, env.as_ref(), expected.as_deref(), &self.home)
             .await
-            .map_err(|why| PollError::Failed {
-                note: format!("unknown, {why}"),
-                retry: claude::DEFAULT_RETRY,
+            .map_err(|why| {
+                if why == codex::SIGN_IN_REJECTED {
+                    PollError::Failed {
+                        note: format!(
+                            "unknown, {why}; sign in again with `hashi account login codex {name}`"
+                        ),
+                        retry: claude::AUTH_RETRY,
+                    }
+                } else {
+                    PollError::Failed {
+                        note: format!("unknown, {why}"),
+                        retry: claude::DEFAULT_RETRY,
+                    }
+                }
             })?;
         let store_err = |e: crate::store::StoreError| PollError::Failed {
             note: e.to_string(),
