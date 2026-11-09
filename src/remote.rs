@@ -329,7 +329,14 @@ fn read(
     res: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     url: &str,
 ) -> Result<(u16, Value)> {
-    let mut res = res.with_context(|| format!("could not reach {}", terminal_safe(url)))?;
+    let mut res = res.map_err(|e| {
+        tracing::info!(error = %e, "could not reach the bridge");
+        anyhow::anyhow!(
+            "could not reach {}: {}",
+            terminal_safe(url),
+            crate::util::http_failure(&e)
+        )
+    })?;
     let status = res.status().as_u16();
     let body = res.body_mut().read_json::<Value>().unwrap_or(Value::Null);
     Ok((status, body))

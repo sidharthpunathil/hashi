@@ -136,6 +136,40 @@ pub struct Poller {
 }
 
 /// Up to `max` of random delay.
+/// A failed save of a reading. The database's own error goes to the log.
+fn store_failed(e: crate::store::StoreError) -> PollError {
+    tracing::warn!(error = %e, "could not save a usage reading");
+    PollError::Failed {
+        note: "unknown, Hashi could not save the reading; see `hashi doctor`".to_owned(),
+        retry: MIN_GAP,
+    }
+}
+
+/// Why a Codex account's settings could not be loaded, in words.
+fn account_note(e: &std::io::Error, name: &str) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => format!(
+            "unknown, the account's files are missing; sign in again with \
+             `hashi account login codex {name}`"
+        ),
+        std::io::ErrorKind::PermissionDenied => {
+            "unknown, Hashi is not allowed to read the account's files".to_owned()
+        }
+        _ => "unknown, the account could not be loaded".to_owned(),
+    }
+}
+
+/// `note`, or a plain stand-in when it still looks like raw error text
+/// (a URL, JSON, several lines). Every source should already say what
+/// went wrong in words; this keeps a missed one off the screen.
+fn plain_note(note: String) -> String {
+    if crate::util::looks_raw(&note) {
+        "unknown, the usage could not be read; the details are in Hashi's log".to_owned()
+    } else {
+        note
+    }
+}
+
 fn jitter(max: Duration) -> Duration {
     let ms = u64::try_from(max.as_millis()).unwrap_or(0);
     if ms == 0 {
@@ -336,8 +370,10 @@ impl Poller {
     /// retry, then publishes the account's usage.
     fn finish(&self, key: &Key, agent: AgentKind, name: &str, result: &Result<(), PollError>) {
         if let Err(PollError::Failed { note, retry }) = result {
-            let note = crate::util::truncate(&crate::diagnostics::redact(note), 200);
-            tracing::info!(agent = %agent, account = %name, "usage unknown: {note}");
+            let raw = crate::diagnostics::redact(note);
+            tracing::info!(agent = %agent, account = %name,
+                            "usage unknown: {}", crate::util::truncate(&raw, 500));
+            let note = crate::util::truncate(&plain_note(raw), 200);
             if let Err(e) = self
                 .store
                 .set_poll_status(agent, name, false, None, Some(&note))
@@ -388,13 +424,9 @@ impl Poller {
             retry: claude::DEFAULT_RETRY,
         })?;
         let reading = crate::forward::me_windows(&me, remote_agent, &remote);
-        let store_err = |e: crate::store::StoreError| PollError::Failed {
-            note: e.to_string(),
-            retry: MIN_GAP,
-        };
         self.store
             .replace_usage(a.agent, &a.name, &reading.windows)
-            .map_err(store_err)?;
+            .map_err(store_failed)?;
         let plan = if reading.shared {
             format!("via {remote}, shared")
         } else {
@@ -402,11 +434,11 @@ impl Poller {
         };
         self.store
             .set_poll_status(a.agent, &a.name, true, Some(&plan), reading.note.as_deref())
-            .map_err(store_err)?;
+            .map_err(store_failed)?;
         if let Some(until) = reading.limited_until.filter(|u| *u > now_ms()) {
             self.store
                 .set_account_limited(a.agent, &a.name, until)
-                .map_err(store_err)?;
+                .map_err(store_failed)?;
         }
         Ok(())
     }
@@ -472,14 +504,11 @@ impl Poller {
                         None,
                     )
                 })
-                .map_err(|e| PollError::Failed {
-                    note: e.to_string(),
-                    retry: MIN_GAP,
-                }),
+                .map_err(store_failed),
             claude::Reply::Busy(after) => Err(PollError::Failed {
                 note: format!(
-                    "unknown, the usage endpoint asked to wait {}s",
-                    after.as_secs()
+                    "unknown, the Claude usage endpoint is busy, trying again in {}",
+                    claude::wait_words(after)
                 ),
                 retry: after,
             }),
@@ -503,8 +532,9 @@ impl Poller {
             retry: self.settings.interval,
         })?;
         let env = acct::run_env(&self.home, AgentKind::Codex, name, kind).map_err(|e| {
+            tracing::info!(account = %name, error = %e, "could not load the Codex account");
             PollError::Failed {
-                note: format!("unknown, the account could not be loaded: {e}"),
+                note: account_note(&e, name),
                 retry: self.settings.interval,
             }
         })?;
@@ -529,22 +559,18 @@ impl Poller {
                     }
                 }
             })?;
-        let store_err = |e: crate::store::StoreError| PollError::Failed {
-            note: e.to_string(),
-            retry: MIN_GAP,
-        };
         self.store
             .replace_usage(AgentKind::Codex, name, &quota.windows)
-            .map_err(store_err)?;
+            .map_err(store_failed)?;
         self.store
             .set_poll_status(AgentKind::Codex, name, true, quota.plan.as_deref(), None)
-            .map_err(store_err)?;
+            .map_err(store_failed)?;
         if let Some(Some(until)) = quota.reached
             && until > now_ms()
         {
             self.store
                 .set_account_limited(AgentKind::Codex, name, until)
-                .map_err(store_err)?;
+                .map_err(store_failed)?;
         }
         Ok(())
     }
@@ -635,4 +661,37 @@ impl Poller {
 #[must_use]
 pub const fn supports(agent: AgentKind) -> bool {
     matches!(agent, AgentKind::Claude | AgentKind::Codex)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_raw_note_is_replaced_and_a_plain_one_kept() {
+        let raw =
+            "unknown, GET https://chatgpt.com/backend-api/wham/usage failed: 401; body={\"e\":1}";
+        assert_eq!(
+            plain_note(raw.to_owned()),
+            "unknown, the usage could not be read; the details are in Hashi's log"
+        );
+        let fine = "unknown, the Codex usage endpoint is down, trying again shortly";
+        assert_eq!(plain_note(fine.to_owned()), fine);
+    }
+
+    #[test]
+    fn account_load_errors_never_show_a_path() {
+        let e = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "/Users/someone/.hashi/accounts/codex/work: No such file (os error 2)",
+        );
+        let note = account_note(&e, "work");
+        assert!(note.contains("`hashi account login codex work`"), "{note}");
+        assert!(!note.contains("os error"), "{note}");
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            account_note(&denied, "work"),
+            "unknown, Hashi is not allowed to read the account's files"
+        );
+    }
 }

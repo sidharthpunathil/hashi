@@ -197,13 +197,13 @@ pub fn fetch_latest(api_url: &str) -> Result<Release> {
         .get(api_url)
         .header("Accept", "application/vnd.github+json")
         .call()
-        .context("asking GitHub for the latest release")?;
+        .map_err(|e| plain_http("asking GitHub for the latest release", &e))?;
     let body: LatestJson = resp
         .body_mut()
         .with_config()
         .limit(1024 * 1024)
         .read_json()
-        .context("reading the latest release")?;
+        .map_err(|e| plain_http("reading the latest release", &e))?;
     release_from(body.tag_name, body.html_url)
 }
 
@@ -459,12 +459,18 @@ fn download(url: &str, https_only: bool) -> Result<Vec<u8>> {
     let mut resp = agent_with(DOWNLOAD_TIMEOUT, https_only)
         .get(url)
         .call()
-        .with_context(|| format!("downloading {url}"))?;
+        .map_err(|e| plain_http(&format!("downloading {url}"), &e))?;
     resp.body_mut()
         .with_config()
         .limit(MAX_DOWNLOAD)
         .read_to_vec()
-        .with_context(|| format!("downloading {url}"))
+        .map_err(|e| plain_http(&format!("downloading {url}"), &e))
+}
+
+/// `doing` failed over HTTP, said plainly; the raw error goes to the log.
+fn plain_http(doing: &str, e: &ureq::Error) -> anyhow::Error {
+    tracing::info!(error = %e, "{doing} failed");
+    anyhow!("{doing} failed: {}", crate::util::http_failure(e))
 }
 
 fn tar_program() -> PathBuf {
