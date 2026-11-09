@@ -312,7 +312,7 @@ impl Store {
     /// Fails on database errors.
     pub fn list_pool_members(&self) -> Result<Vec<PoolMember>> {
         let conn = self.conn()?;
-        let sql = format!("SELECT {MEMBER_COLUMNS} FROM pool_members ORDER BY joined_at");
+        let sql = format!("SELECT {MEMBER_COLUMNS} FROM pool_members ORDER BY joined_at, rowid");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_member)?;
         rows.map(|r| r.map_err(StoreError::from)).collect()
