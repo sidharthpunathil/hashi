@@ -26,6 +26,9 @@ pub fn check_new(
     acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))?;
     let kind = match kind {
         Some(AccountKind::Default) => bail!("the default account is always there"),
+        Some(AccountKind::Pool) => {
+            bail!("pool accounts are added when someone joins your pool (hashi pool open)")
+        }
         Some(AccountKind::Login) if keyed => {
             bail!("a login account has no key; drop --key-stdin and --key-env")
         }
@@ -374,6 +377,8 @@ pub fn signed_in(
         AccountKind::Default => "-".to_owned(),
         // Signed in on the friend's bridge; its state comes from runs and polls.
         AccountKind::Remote => "remote".to_owned(),
+        // Signed in on the member's own machine.
+        AccountKind::Pool => "pool".to_owned(),
         AccountKind::ApiKey | AccountKind::OauthToken => {
             if acct::read_key(home, agent, name).is_ok() {
                 "key set".to_owned()

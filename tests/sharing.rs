@@ -39,11 +39,15 @@ struct Server {
 }
 
 async fn server() -> Server {
+    server_with(CLAUDE).await
+}
+
+async fn server_with(claude_script: &str) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let script = bin.join("claude");
-    std::fs::write(&script, CLAUDE).unwrap();
+    std::fs::write(&script, claude_script).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut claude = AgentConfig::default_for(AgentKind::Claude);
     claude.bin = script;
@@ -462,5 +466,126 @@ fn an_ended_share_switches_the_copy_off_with_a_way_back() {
         hashi::share::end_expired_shares(&store, now_ms())
             .unwrap()
             .is_empty()
+    );
+}
+
+const MEMBER_CLAUDE: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "9.9.9 (Fake Claude)"; exit 0; fi
+for last; do :; done
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"member ran %s","session_id":"sess","total_cost_usd":0.5,"usage":{"input_tokens":5,"output_tokens":6}}\n' "$last"
+"#;
+
+async fn wait_for(mut check: impl FnMut() -> bool, what: &str) {
+    for _ in 0..150 {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pool_member_serves_prompts_from_its_own_machine_under_its_own_limits() {
+    let host = server().await;
+    let member = server_with(MEMBER_CLAUDE).await;
+    let (_, code) = host.store().open_pool_link(2, 10).unwrap();
+    let link = format!("{}/pool/{code}", host.base);
+
+    // The member joins, offering Claude Code and stopping at 70%.
+    let joined = {
+        let store = Arc::clone(&member.running.state.store);
+        let home = member.home();
+        let link = link.clone();
+        tokio::task::spawn_blocking(move || {
+            hashi::pool_client::join(
+                &store,
+                &home,
+                &hashi::pool_client::JoinOptions {
+                    link,
+                    name: "sid".to_owned(),
+                    agents: vec![AgentKind::Claude],
+                    accounts: Default::default(),
+                    stop_at: Some(70),
+                    hours: Some(3),
+                },
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(joined.name, "sid");
+    let local = member
+        .store()
+        .get_token(&joined.local_token_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(local.limits.stop_at_percent, Some(70));
+    assert!(local.expires_at.is_some());
+
+    // Its worker comes online, with its usage at one endpoint.
+    member.used(40.0, now_ms() + 3_600_000);
+    let hub = Arc::clone(host.running.state.dispatcher.pool());
+    let id = host.store().list_pool_members().unwrap()[0].id.clone();
+    wait_for(|| hub.online(&id), "the member's worker").await;
+    let (status, pool) = host.get("/v1/pool", &joined.token).await;
+    assert_eq!(status, StatusCode::OK, "{pool}");
+    assert_eq!(pool["members"][0]["name"], "sid");
+    assert_eq!(pool["members"][0]["online"], true);
+    // The usage arrives with the next poll.
+    let (status, _) = host.get("/v1/pool", "hashi_not_a_token").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A prompt through the pool runs on the member's machine.
+    let (status, v) = host
+        .post(
+            "/v1/ask",
+            &joined.token,
+            json!({"message": "hello pool", "agent": "claude", "wait": 30}),
+        )
+        .await;
+    assert!(status.is_success(), "{v}");
+    assert_eq!(v["response"], "member ran hello pool", "{v}");
+    assert_eq!(v["usage"]["outputTokens"], 6, "{v}");
+    // It went through the member's own queue, with its pool token.
+    let ran = member
+        .store()
+        .recent_requests(10)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.token_id == joined.local_token_id)
+        .count();
+    assert_eq!(ran, 1);
+
+    // Past the member's own stop, the member says limited and nothing runs.
+    member.used(80.0, now_ms() + 3_600_000);
+    let (_, v) = host
+        .post(
+            "/v1/ask",
+            &joined.token,
+            json!({"message": "again", "agent": "claude", "wait": 30}),
+        )
+        .await;
+    assert_eq!(v["status"], "failed", "{v}");
+    assert!(v["error"].as_str().unwrap().contains("at its limit"), "{v}");
+
+    // Leaving takes the member and its accounts out.
+    {
+        let store = Arc::clone(&member.running.state.store);
+        let home = member.home();
+        tokio::task::spawn_blocking(move || hashi::pool_client::leave(&store, &home, None))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(host.store().list_pool_members().unwrap().is_empty());
+    assert!(
+        member
+            .store()
+            .get_token(&joined.local_token_id)
+            .unwrap()
+            .is_none()
     );
 }

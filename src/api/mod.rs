@@ -50,6 +50,7 @@ mod ask;
 mod cancel;
 mod invites;
 mod openai;
+pub mod pool;
 mod projects;
 mod tokens;
 
@@ -289,6 +290,11 @@ pub fn router(state: AppState, net: &crate::net::NetLimits) -> Router {
         .route("/v1/invites/{id}", delete(invites::cancel))
         .route("/v1/claim/preview", post(invites::preview))
         .route("/v1/claim/redeem", post(invites::redeem))
+        .route("/v1/pool", get(pool::status))
+        .route("/v1/pool/join", post(pool::join))
+        .route("/v1/pool/poll", post(pool::poll))
+        .route("/v1/pool/result", post(pool::result))
+        .route("/v1/pool/leave", post(pool::leave))
         .route(
             "/v1/request-link",
             get(access::link_state)
@@ -973,6 +979,7 @@ pub fn accounts_with_usage(store: &Store) -> ApiResult<Vec<crate::store::Account
                 shared_by: None,
                 remind_at: None,
                 share_until: None,
+                pool_member: None,
             });
         }
     }
@@ -1082,6 +1089,7 @@ async fn refresh_account(
             shared_by: None,
             remind_at: None,
             share_until: None,
+            pool_member: None,
         });
     let rotate_at = state.dispatcher.usage().policy().rotate_at;
     let mut v = account_json_with(&state.store, &a, now, rotate_at)?;

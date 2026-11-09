@@ -62,6 +62,43 @@ pub const TABLE: &[(&str, Entry)] = &[
     ),
     ("share", Entry::Row(Action::NewInvite)),
     ("share-login", Entry::Row(Action::ShareLogin)),
+    ("pool status", Entry::Row(Action::Pool)),
+    ("pool list", Entry::Row(Action::Pool)),
+    (
+        "pool open",
+        Entry::InPopup {
+            row: Action::Pool,
+            key: "o",
+        },
+    ),
+    (
+        "pool close",
+        Entry::InPopup {
+            row: Action::Pool,
+            key: "c",
+        },
+    ),
+    (
+        "pool kick",
+        Entry::InPopup {
+            row: Action::Pool,
+            key: "x",
+        },
+    ),
+    (
+        "pool join",
+        Entry::InPopup {
+            row: Action::Pool,
+            key: "a",
+        },
+    ),
+    (
+        "pool leave",
+        Entry::InPopup {
+            row: Action::Pool,
+            key: "l",
+        },
+    ),
     ("requests list", Entry::Row(Action::AccessRequests)),
     (
         "requests accept",

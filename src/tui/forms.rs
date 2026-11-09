@@ -924,13 +924,17 @@ pub struct ShareLoginForm {
     pub days: usize,
     /// Index into [`crate::share::LINK_HOURS`].
     pub link: usize,
+    /// How the link reaches people.
+    pub via: crate::links::Via,
     /// The field that failed and why.
     pub error: Option<FieldError>,
 }
 
 impl ShareLoginForm {
     /// Number of fields.
-    pub const FIELDS: usize = 6;
+    pub const FIELDS: usize = 7;
+    /// Index of the route choice.
+    pub const VIA: usize = 6;
     /// Labels, in field order.
     pub const LABELS: [&'static str; Self::FIELDS] = [
         "label",
@@ -939,6 +943,7 @@ impl ShareLoginForm {
         "remind at",
         "share for",
         "link valid",
+        "link via",
     ];
 
     /// The form, with the key accounts that can be handed over.
@@ -954,6 +959,7 @@ impl ShareLoginForm {
             remind: 2,
             days: 2,
             link: 1,
+            via: crate::links::Via::Auto,
             error: None,
         }
     }
@@ -1026,6 +1032,7 @@ impl ShareLoginForm {
             3 => self.remind = cycle(self.remind, REMIND_AT.len(), by),
             4 => self.days = cycle(self.days, SHARE_DAYS.len(), by),
             5 => self.link = cycle(self.link, crate::share::LINK_HOURS.len(), by),
+            Self::VIA => self.via = super::app::next_via(self.via, by),
             _ => {}
         }
         false
@@ -1061,6 +1068,174 @@ impl ShareLoginForm {
             remind_at: REMIND_AT.get(self.remind).copied().flatten(),
             days: SHARE_DAYS.get(self.days).copied().flatten(),
             link_hours: self.link_hours(),
+        })
+    }
+}
+
+// ── pools ──────────────────────────────────────────────────────────────────
+
+/// How long a pool link lets people join, in hours.
+pub const POOL_HOURS: [u32; 4] = [2, 6, 24, 72];
+/// How many people a pool link lets in.
+pub const POOL_MAX: [u32; 3] = [10, 20, 50];
+/// How long a member stays, in hours; `None` until they leave.
+pub const STAY_HOURS: [Option<u32>; 4] = [None, Some(2), Some(6), Some(24)];
+
+/// The "open the pool link" form.
+#[derive(Debug, Clone, Default)]
+pub struct PoolOpenForm {
+    /// Focused field: hours, people, route.
+    pub field: usize,
+    /// Index into [`POOL_HOURS`].
+    pub hours: usize,
+    /// Index into [`POOL_MAX`].
+    pub max: usize,
+    /// How the link reaches people.
+    pub via: crate::links::Via,
+    /// Why it could not open.
+    pub error: Option<FieldError>,
+}
+
+impl PoolOpenForm {
+    /// Number of fields.
+    pub const FIELDS: usize = 3;
+
+    /// A form with a 6-hour, 20-person link.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            hours: 1,
+            max: 1,
+            ..Self::default()
+        }
+    }
+
+    /// Moves the focused choice by `by`.
+    pub fn step(&mut self, by: isize) {
+        match self.field {
+            0 => self.hours = cycle(self.hours, POOL_HOURS.len(), by),
+            1 => self.max = cycle(self.max, POOL_MAX.len(), by),
+            _ => self.via = super::app::next_via(self.via, by),
+        }
+    }
+
+    /// Hours the link lets people join.
+    #[must_use]
+    pub fn hours(&self) -> u32 {
+        POOL_HOURS.get(self.hours).copied().unwrap_or(6)
+    }
+
+    /// How many people may join.
+    #[must_use]
+    pub fn max(&self) -> u32 {
+        POOL_MAX.get(self.max).copied().unwrap_or(20)
+    }
+}
+
+/// The "join a pool" form.
+#[derive(Debug, Clone, Default)]
+pub struct PoolJoinForm {
+    /// Focused field: link, name, agents, stop at, stay.
+    pub field: usize,
+    /// The pool link.
+    pub link: String,
+    /// This Hashi's name in the pool.
+    pub name: String,
+    /// The agents to offer, comma separated.
+    pub agents: String,
+    /// Index into [`REMIND_AT`], as the stop on this machine's quota.
+    pub stop: usize,
+    /// Index into [`STAY_HOURS`].
+    pub stay: usize,
+    /// Waiting for the host.
+    pub busy: bool,
+    /// The field that failed and why.
+    pub error: Option<FieldError>,
+}
+
+impl PoolJoinForm {
+    /// Number of fields.
+    pub const FIELDS: usize = 5;
+    /// Labels, in field order.
+    pub const LABELS: [&'static str; Self::FIELDS] =
+        ["link", "your name", "agents", "stop at", "stay for"];
+
+    /// A form offering Claude Code, stopping at 70%.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            agents: "claude".to_owned(),
+            stop: 2,
+            ..Self::default()
+        }
+    }
+
+    /// The text of the focused field, when it is a text field.
+    pub fn text_mut(&mut self) -> Option<&mut String> {
+        match self.field {
+            0 => Some(&mut self.link),
+            1 => Some(&mut self.name),
+            2 => Some(&mut self.agents),
+            _ => None,
+        }
+    }
+
+    /// Moves the focused choice by `by`.
+    pub fn step(&mut self, by: isize) {
+        match self.field {
+            3 => self.stop = cycle(self.stop, REMIND_AT.len(), by),
+            4 => self.stay = cycle(self.stay, STAY_HOURS.len(), by),
+            _ => {}
+        }
+    }
+
+    /// The stop, as shown.
+    #[must_use]
+    pub fn stop_label(&self) -> String {
+        REMIND_AT
+            .get(self.stop)
+            .copied()
+            .flatten()
+            .map_or_else(|| "none".to_owned(), |p| format!("{p}% of my quota"))
+    }
+
+    /// The stay, as shown.
+    #[must_use]
+    pub fn stay_label(&self) -> String {
+        match STAY_HOURS.get(self.stay).copied().flatten() {
+            None => "until I leave".to_owned(),
+            Some(h) => format!("{h} hours"),
+        }
+    }
+
+    /// What to join with.
+    ///
+    /// # Errors
+    ///
+    /// The field that does not parse.
+    pub fn options(&self) -> Result<crate::pool_client::JoinOptions, FieldError> {
+        crate::pool_client::parse_link(&self.link).map_err(|e| (0, format!("{e:#}")))?;
+        let name = self.name.trim().to_ascii_lowercase();
+        acct::check_name(&name, false).map_err(|e| (1, e))?;
+        let mut agents = Vec::new();
+        for a in self
+            .agents
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            agents.push(a.parse::<AgentKind>().map_err(|e| (2, e.to_string()))?);
+        }
+        if agents.is_empty() {
+            return Err((2, "offer at least one agent, for example claude".to_owned()));
+        }
+        Ok(crate::pool_client::JoinOptions {
+            link: self.link.trim().to_owned(),
+            name,
+            agents,
+            accounts: acct::AccountMap::new(),
+            stop_at: REMIND_AT.get(self.stop).copied().flatten(),
+            hours: STAY_HOURS.get(self.stay).copied().flatten(),
         })
     }
 }

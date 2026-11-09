@@ -72,6 +72,9 @@ enum Command {
     /// List or remove the bridges saved by `hashi connect`.
     #[command(subcommand)]
     Remote(RemoteCommand),
+    /// Host a pool that people lend their agents to, or join one.
+    #[command(subcommand, after_help = POOL_EXAMPLES)]
+    Pool(admin_cli::PoolCommand),
     /// Ask someone's Hashi for access with their ask-access link, or check
     /// your requests with `hashi request status`.
     Request(RequestArgs),
@@ -124,6 +127,17 @@ They send prompts to this Hashi, so your login never leaves this machine and
 every limit holds. --stop-at 70 refuses their prompts once your account has
 used 70% of its 5-hour or weekly quota. To hand over a key instead, see
 `hashi share-login`.";
+
+const POOL_EXAMPLES: &str = "Examples:
+  hashi pool open --via lan          # on the host: a link for everyone on this wifi
+  hashi pool open --via cloudflare   # or anyone, through the tunnel
+  hashi pool join <link> --name sid --agents claude,codex --stop-at 70 --hours 4
+  hashi pool status
+
+Members never need a public URL: their Hashi asks the host for work, runs it
+with their own accounts and limits, and sends the answer back. Pausing their
+local \"pool\" token takes them out of rotation. Everyone in the pool sees
+GET /v1/pool, and each member's own pool token uses every member's agents.";
 
 const SHARE_LOGIN_EXAMPLES: &str = "Examples:
   claude setup-token            # makes a long-lived token for your plan
@@ -610,6 +624,12 @@ async fn main() -> Result<()> {
         Some(Command::Ask(args)) => ask(&home, args).await,
         Some(Command::Connect(args)) => connect(home, args).await,
         Some(Command::Remote(RemoteCommand::List)) => hashi::remote::list(&home),
+        Some(Command::Pool(cmd)) => {
+            let store = server::open_store(&home)?;
+            tokio::task::spawn_blocking(move || admin_cli::pool(&store, &home, cmd))
+                .await
+                .context("the pool command stopped")?
+        }
         Some(Command::Remote(RemoteCommand::Remove { name })) => {
             hashi::remote::remove(&home, &name)
         }

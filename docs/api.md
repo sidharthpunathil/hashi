@@ -168,6 +168,22 @@ With `loginAccount` (`"<agent>:<name>"` of an `api-key` or `oauth-token` account
 
 The preview has `login: {agent, remindAt}` and never the key. The redeem answer adds `login: {agent, kind, key, remindAt, until}`. The key is read before the code is used: when it cannot be read the answer is `409 login_unavailable` and the link keeps working. `hashi connect` saves the key as an account named after the remote, marks it shared, reads its usage through the remote, logs a reminder when it crosses `remindAt`, and switches it off (with a way back) after `until`. The owner's dashboard logs a reminder too.
 
+## Pools
+
+A host opens one join link (`hashi pool open`, or the dashboard's Pool): `<base>/pool/hashi_pool_<hex>`, valid for a number of hours and people. Members join from their own Hashi; their prompts are pulled, never pushed, so members need no public URL.
+
+| Method | Path | Auth | What |
+|---|---|---|---|
+| `POST` | `/v1/pool/join` | join code in the body | `{code, name, agents, hours?}`. Adds a `pool` account named `name` per agent, and answers `201` with the member's worker `secret` (`hashi_mem_...`) and their pool `token`, once |
+| `POST` | `/v1/pool/poll` | member secret | `{usage}` (as `/v1/me`'s `agentUsage`): records it as the member's headroom and waits up to 25 seconds for `{job: {id, agent, model, message}}`, or `{job: null}` |
+| `POST` | `/v1/pool/result` | member secret | `{jobId, kind: done\|limited\|busy\|failed, text?, message?, resetAt?, inputTokens?, outputTokens?, costUsd?}` |
+| `POST` | `/v1/pool/leave` | member secret | Takes the member and their accounts out |
+| `GET` | `/v1/pool` | a pool token, or admin | `{server, open, joinClosesAt, members: [{name, online, joinedAt, until, agents: {<agent>: {headroom, nextReset, state}}}]}` |
+
+A pool token (every member's) uses every member's accounts, each served only while its member polled in the last 75 seconds. A member that is limited (by its own `stopAtPercent`, its end time, or its accounts) answers `limited`, and the run fails over like a remote bridge's. A join link that is closed or expired answers `410 pool_closed`; a full pool or a taken name `409 pool_full_or_taken`; an unknown or removed member `401 not_in_pool`.
+
+Links on a private network (`192.168.x.x`, `10.x.x.x`, `172.16-31.x.x`, `.local`) may use plain `http://`, for a party on one wifi; anyone on that network can read what they carry.
+
 ## Access requests
 
 Off by default. `POST /v1/request-link` (admin) opens the ask-access link and closes any open one. It accepts `project` (new requests are for it, and people pick from its agents), `note` (up to 200 characters, shown on the page) and `hours` (1 to 720, default 168, after which it closes by itself). It answers `201` with the `url`, `<base>/ask-access/hashi_ask_<32 hex>`, once: only a hash of the code is kept. `GET /v1/request-link` shows whether it is open, and `DELETE /v1/request-link` closes it.

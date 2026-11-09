@@ -224,6 +224,10 @@ pub struct ShareArgs {
     /// (headroom, next reset and state only). The claim page says so.
     #[arg(long)]
     pub share_usage: bool,
+    /// How the link reaches people: auto (whatever is public now),
+    /// cloudflare, tailscale, lan (this wifi) or local.
+    #[arg(long, default_value = "auto", value_parser = clap::value_parser!(hashi::links::Via))]
+    pub via: hashi::links::Via,
     #[command(flatten)]
     pub limits: LimitArgs,
 }
@@ -263,6 +267,10 @@ pub struct ShareLoginArgs {
     /// Port of the local server, used for a local-only link.
     #[arg(long, env = "HASHI_PORT")]
     pub port: Option<u16>,
+    /// How the link reaches people: auto (whatever is public now),
+    /// cloudflare, tailscale, lan (this wifi) or local.
+    #[arg(long, default_value = "auto", value_parser = clap::value_parser!(hashi::links::Via))]
+    pub via: hashi::links::Via,
 }
 
 /// `hashi share-login`: creates a login share and prints its link.
@@ -282,9 +290,9 @@ pub fn share_login(store: &Store, home: &Path, args: ShareLoginArgs) -> Result<(
         days: args.days,
         link_hours: args.link_hours,
     };
+    let (base, local) = link_base(store, args.via, args.public_url.as_deref(), args.port)?;
     let (invite, code) = hashi::share::create_login_share(store, home, &new, "cli")
         .map_err(|e| anyhow::anyhow!(e))?;
-    let (base, local) = link_base(store, args.public_url.as_deref(), args.port);
     eprintln!(
         "login share of {agent}:{} for {} (works once, expires {}):",
         new.account,
@@ -305,26 +313,21 @@ pub fn share_login(store: &Store, home: &Path, args: ShareLoginArgs) -> Result<(
     Ok(())
 }
 
-/// The base URL for a link, and whether it only works on this machine.
-fn link_base(store: &Store, public_url: Option<&str>, port: Option<u16>) -> (String, bool) {
-    // A running server records its public URL (configured or tunnel) for us.
-    let public = public_url.map_or_else(
-        || {
-            store
-                .data_dir()
-                .and_then(|home| hashi::server::read_public_url(&home))
-        },
-        |u| Some(u.trim_end_matches('/').to_owned()),
-    );
-    // The flag or variable, else the port saved from the dashboard.
-    let saved = store
-        .data_dir()
-        .and_then(|home| hashi::settings::load(&home).ok())
-        .and_then(|s| s.port);
-    let (port, _) = hashi::settings::resolve(port, saved, hashi::settings::DEFAULT_PORT);
-    let local = public.is_none();
-    let base = public.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
-    (base, local)
+/// The base URL for a link over `via`, and whether it only works on this
+/// machine. A note about the route goes to standard error.
+fn link_base(
+    store: &Store,
+    via: hashi::links::Via,
+    public_url: Option<&str>,
+    port: Option<u16>,
+) -> Result<(String, bool)> {
+    let home = store.data_dir().unwrap_or_default();
+    let (base, local) =
+        hashi::links::cli_base(&home, via, public_url, port).map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(note) = hashi::links::note(via).filter(|_| via != hashi::links::Via::Local) {
+        eprintln!("note: {note}");
+    }
+    Ok((base, local))
 }
 
 /// `hashi invite ...`
@@ -696,6 +699,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
 ///
 /// Fails on invalid input or database errors.
 pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
+    let (base, local) = link_base(store, args.via, args.public_url.as_deref(), args.port)?;
     let mut limits = args.limits.apply(Limits::default());
     limits.max_pending = limits.max_pending.or(Some(3));
     let accounts = bindings(store, AccountMap::new(), args.accounts)?;
@@ -724,7 +728,6 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
         &invite.label,
         &format!("link valid {}h", args.link_hours),
     )?;
-    let (base, local) = link_base(store, args.public_url.as_deref(), args.port);
     eprintln!(
         "invite for {}{} (works once, expires {}):",
         invite.label,
@@ -2169,6 +2172,236 @@ pub fn requests(store: &Store, cmd: RequestsCommand) -> Result<()> {
                 println!("closed the ask-access link");
             } else {
                 println!("no ask-access link was open");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `hashi pool ...`: host a pool, or lend this machine's agents to one.
+#[derive(Debug, Subcommand)]
+pub enum PoolCommand {
+    /// Open the join link for your pool (closes any open one).
+    Open {
+        /// Hours the link lets people join.
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u32).range(1..=720))]
+        hours: u32,
+        /// How many people may join.
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=50))]
+        max_members: u32,
+        /// How the link reaches people: auto, cloudflare, tailscale, lan
+        /// (this wifi) or local.
+        #[arg(long, default_value = "auto", value_parser = clap::value_parser!(hashi::links::Via))]
+        via: hashi::links::Via,
+        /// Base URL for the link, as for `hashi share`.
+        #[arg(long, env = "HASHI_PUBLIC_URL")]
+        public_url: Option<String>,
+        /// Port of the local server.
+        #[arg(long, env = "HASHI_PORT")]
+        port: Option<u16>,
+    },
+    /// Stop letting people join. Those in the pool stay.
+    Close,
+    /// Who is in your pool, online or not, and each agent's headroom.
+    Status {
+        /// Print JSON, as `GET /v1/pool` shows it.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take someone out of your pool.
+    Kick {
+        /// Their name.
+        name: String,
+    },
+    /// Lend this machine's agents to someone's pool. `hashi serve` must run
+    /// for the prompts to be served.
+    Join {
+        /// The pool link, https://<host>/pool/hashi_pool_<code>.
+        link: String,
+        /// Your name in the pool.
+        #[arg(long)]
+        name: String,
+        /// The agents to offer (comma separated). Default: claude.
+        #[arg(long, value_delimiter = ',', default_value = "claude")]
+        agents: Vec<AgentKind>,
+        /// The accounts to run them on, for example claude=work
+        /// (repeatable). Default: each agent's default account.
+        #[arg(long = "account", value_name = "AGENT=NAMES", value_parser = parse_account)]
+        accounts: Vec<Binding>,
+        /// Stop serving once your account has used this percent of its
+        /// 5-hour or weekly quota.
+        #[arg(long, value_name = "PCT", value_parser = clap::value_parser!(u8).range(1..=100))]
+        stop_at: Option<u8>,
+        /// Leave by yourself after this many hours.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=720))]
+        hours: Option<u32>,
+    },
+    /// Leave a pool you joined.
+    Leave {
+        /// The host's name (default: the only pool joined).
+        host: Option<String>,
+    },
+    /// The pools this machine joined.
+    List,
+}
+
+/// Runs a `hashi pool` command.
+///
+/// # Errors
+///
+/// Fails on a bad link or name, a refusal from the host, or database errors.
+pub fn pool(store: &Store, home: &Path, cmd: PoolCommand) -> Result<()> {
+    match cmd {
+        PoolCommand::Open {
+            hours,
+            max_members,
+            via,
+            public_url,
+            port,
+        } => {
+            let (base, local) = link_base(store, via, public_url.as_deref(), port)?;
+            let (link, code) = store.open_pool_link(hours, max_members)?;
+            store.audit("cli", "pool.open", "pool", &format!("{hours}h"))?;
+            eprintln!(
+                "pool link (up to {} people, joins close {}):",
+                link.max_members,
+                rfc3339(link.expires_at).unwrap_or_default()
+            );
+            println!("{base}/pool/{code}");
+            eprintln!(
+                "people join with: hashi pool join <link> --name <their name> --stop-at 70\n\
+                 they keep `hashi serve` running; everyone in the pool sees `hashi pool status`."
+            );
+            if local {
+                eprintln!(
+                    "note: this link only works on this machine; pass --via lan, cloudflare or tailscale."
+                );
+            }
+        }
+        PoolCommand::Close => {
+            if store.close_pool_link()? {
+                store.audit("cli", "pool.close", "pool", "")?;
+                println!("the pool link is closed; members stay until they leave or you kick them");
+            } else {
+                println!("no pool link is open");
+            }
+        }
+        PoolCommand::Status { json } => {
+            let rotate_at = cli_rotate_at();
+            let online = |m: &hashi::store::PoolMember| {
+                m.last_seen.is_some_and(|s| {
+                    now_ms().saturating_sub(s)
+                        < i64::try_from(hashi::pool::ONLINE_FOR.as_millis()).unwrap_or(i64::MAX)
+                })
+            };
+            let v = hashi::api::pool::view_with(store, rotate_at, "this Hashi", online)?;
+            if json {
+                return print_json(&v);
+            }
+            println!(
+                "pool link: {}",
+                match v["joinClosesAt"].as_str() {
+                    Some(t) => format!("open until {t}"),
+                    None => "closed (hashi pool open)".to_owned(),
+                }
+            );
+            let members = v["members"].as_array().cloned().unwrap_or_default();
+            if members.is_empty() {
+                println!("nobody has joined yet");
+            }
+            for m in members {
+                let agents: Vec<String> = m["agents"]
+                    .as_object()
+                    .map(|o| {
+                        o.iter()
+                            .map(|(a, u)| match u["headroom"].as_u64() {
+                                Some(h) => format!("{a} {h}% left"),
+                                None => format!("{a} {}", u["state"].as_str().unwrap_or("unknown")),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "{}  {}  {}",
+                    terminal_safe(m["name"].as_str().unwrap_or_default()),
+                    if m["online"] == true {
+                        "online"
+                    } else {
+                        "offline"
+                    },
+                    agents.join(", ")
+                );
+            }
+        }
+        PoolCommand::Kick { name } => match store.remove_pool_member(&name)? {
+            Some(m) => {
+                store.audit("cli", "pool.kick", &m.name, "")?;
+                println!("{} is out of the pool", terminal_safe(&m.name));
+            }
+            None => bail!("nobody called {} is in the pool", terminal_safe(&name)),
+        },
+        PoolCommand::Join {
+            link,
+            name,
+            agents,
+            accounts,
+            stop_at,
+            hours,
+        } => {
+            let accounts = bindings(store, AccountMap::new(), accounts)?;
+            let joined = hashi::pool_client::join(
+                store,
+                home,
+                &hashi::pool_client::JoinOptions {
+                    link,
+                    name,
+                    agents,
+                    accounts,
+                    stop_at,
+                    hours,
+                },
+            )?;
+            println!(
+                "joined {}'s pool as {}, offering {}",
+                terminal_safe(&joined.host),
+                joined.name,
+                agents_cell(&joined.agents)
+            );
+            println!(
+                "  prompts from everyone in the pool run here, with a local token \"pool {}\":",
+                hashi::remote::slug(&joined.host)
+            );
+            println!("  pause it to stop serving for a while, edit it to change limits");
+            println!("  keep `hashi serve` running; leave with `hashi pool leave`");
+            if let Some(remote) = &joined.remote {
+                println!("  use the pool yourself: hashi ask --remote {remote} \"hello\"");
+                println!(
+                    "  everyone's agents and headroom: {}/v1/pool",
+                    joined.base_url
+                );
+            }
+        }
+        PoolCommand::Leave { host } => {
+            let p = hashi::pool_client::leave(store, home, host.as_deref())?;
+            println!("left {}'s pool", terminal_safe(&p.host));
+        }
+        PoolCommand::List => {
+            let pools = hashi::pool_client::load(home)?;
+            if pools.is_empty() {
+                println!("this machine is in no pool; join one with `hashi pool join <link>`");
+            }
+            for p in pools {
+                println!(
+                    "{}  as {}  {}  {}{}",
+                    terminal_safe(&p.host),
+                    p.name,
+                    p.base_url,
+                    agents_cell(&p.agents),
+                    p.until
+                        .and_then(rfc3339)
+                        .map(|t| format!("  until {t}"))
+                        .unwrap_or_default()
+                );
             }
         }
     }

@@ -149,6 +149,9 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
         Popup::Remotes { selected } => remotes(app, frame, *selected),
         Popup::Connect(form) => connect(frame, form, app.tick),
         Popup::ShareLogin(form) => share_login(frame, form, app.tick),
+        Popup::Pool { selected } => pool(app, frame, *selected),
+        Popup::PoolOpen(form) => pool_open(frame, form),
+        Popup::PoolJoin(form) => pool_join(frame, form, app.tick),
         Popup::ConfirmRemoveRemote { name } => fitted(
             frame,
             64,
@@ -1012,6 +1015,183 @@ fn request_status_lines(app: &App) -> Vec<Line<'static>> {
     out
 }
 
+fn pool(app: &App, frame: &mut Frame, selected: usize) {
+    let view = crate::api::pool::view(&app.state).unwrap_or_default();
+    let rows: Vec<Vec<Cell<'static>>> = view["members"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| {
+            let agents: Vec<String> = m["agents"]
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .map(|(a, u)| match u["headroom"].as_u64() {
+                            Some(h) => format!("{a} {h}%"),
+                            None => format!("{a} {}", u["state"].as_str().unwrap_or("?")),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let online = m["online"] == true;
+            vec![
+                Cell::from(Span::styled(
+                    m["name"].as_str().unwrap_or_default().to_owned(),
+                    strong(),
+                )),
+                Cell::from(Span::styled(
+                    if online { "online" } else { "offline" },
+                    if online { t::fg(t::MINT) } else { t::muted() },
+                )),
+                Cell::from(Span::styled(agents.join("  "), plain())),
+                Cell::from(Span::styled(
+                    m["until"]
+                        .as_str()
+                        .map_or_else(|| "-".to_owned(), str::to_owned),
+                    t::muted(),
+                )),
+            ]
+        })
+        .collect();
+    let mut foot = vec![Line::from(vec![
+        Span::styled("join link  ", t::muted()),
+        Span::styled(
+            match view["joinClosesAt"].as_str() {
+                Some(at) => format!("open until {at}"),
+                None => "closed: press o to open one".to_owned(),
+            },
+            plain(),
+        ),
+    ])];
+    if rows.is_empty() {
+        foot.push(muted_line(
+            "Nobody is in your pool yet. Open the link and send it to the party.",
+        ));
+    }
+    let joined = app
+        .home()
+        .map(|h| crate::pool_client::load(&h).unwrap_or_default())
+        .unwrap_or_default();
+    for p in &joined {
+        foot.push(Line::from(vec![
+            Span::styled("you lend  ", t::muted()),
+            Span::styled(
+                format!(
+                    "{} to {}'s pool as {}",
+                    crate::token::encode_agents(&p.agents),
+                    p.host,
+                    p.name
+                ),
+                plain(),
+            ),
+        ]));
+    }
+    foot.push(Line::raw(""));
+    list_popup(
+        frame,
+        "pool",
+        &[
+            ("name", 14),
+            ("state", 8),
+            ("agents and headroom", 0),
+            ("leaves", 22),
+        ],
+        &[3],
+        rows,
+        selected,
+        foot,
+        &[
+            ("o", "open link"),
+            ("c", "close link"),
+            ("x", "remove member"),
+            ("a", "join a pool"),
+            ("l", "leave"),
+            ("esc", "close"),
+        ],
+    );
+}
+
+fn pool_open(frame: &mut Frame, form: &forms::PoolOpenForm) {
+    const W: usize = 12;
+    let f = |i: usize| form.field == i;
+    let fields = vec![
+        form_field(
+            f(0),
+            "joins for",
+            W,
+            form_toggle(&format!("{} hours", form.hours()), f(0)),
+        ),
+        form_field(
+            f(1),
+            "people",
+            W,
+            form_toggle(&format!("up to {}", form.max()), f(1)),
+        ),
+        form_field(f(2), "link via", W, form_toggle(form.via.label(), f(2))),
+    ];
+    let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
+    lines.push(Line::raw(""));
+    lines.push(muted_line(
+        "  Members need no public URL: their Hashi asks yours for work.",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(key_hint(&[
+        ("↑↓", "field"),
+        ("←→", "change"),
+        ("enter", "open link"),
+        ("esc", "back"),
+    ]));
+    fitted(frame, 76, "open the pool link", lines);
+}
+
+fn pool_join(frame: &mut Frame, form: &forms::PoolJoinForm, tick: u64) {
+    const W: usize = 10;
+    let f = |i: usize| form.field == i;
+    let label = |i: usize| forms::PoolJoinForm::LABELS[i];
+    let fields = vec![
+        form_field(
+            f(0),
+            label(0),
+            W,
+            form_text(
+                &truncate(&form.link, 60),
+                f(0),
+                "https://<host>/pool/hashi_pool_...",
+                tick,
+            ),
+        ),
+        form_field(f(1), label(1), W, form_text(&form.name, f(1), "sid", tick)),
+        form_field(
+            f(2),
+            label(2),
+            W,
+            form_text(&form.agents, f(2), "claude,codex", tick),
+        ),
+        form_field(f(3), label(3), W, form_toggle(&form.stop_label(), f(3))),
+        form_field(f(4), label(4), W, form_toggle(&form.stay_label(), f(4))),
+    ];
+    let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
+    lines.push(Line::raw(""));
+    if form.busy {
+        lines.push(Line::from(Span::styled(
+            format!("  {} joining…", t::spinner(tick)),
+            t::fg(t::AMBER),
+        )));
+    } else {
+        lines.push(muted_line(
+            "  Everyone's prompts run here, on your accounts and within your stop.",
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(key_hint(&[
+        ("↑↓", "field"),
+        ("enter", "join"),
+        ("esc", "back"),
+    ]));
+    fitted(frame, 84, "join a pool", lines);
+}
+
 fn share_login(frame: &mut Frame, form: &forms::ShareLoginForm, tick: u64) {
     const W: usize = 11;
     let f = |i: usize| form.field == i;
@@ -1029,6 +1209,7 @@ fn share_login(frame: &mut Frame, form: &forms::ShareLoginForm, tick: u64) {
         choice(3, form.remind_label()),
         choice(4, form.days_label()),
         choice(5, crate::tui::app::link_short(form.link_hours())),
+        choice(6, form.via.label().to_owned()),
     ];
     let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
     lines.push(Line::raw(""));

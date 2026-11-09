@@ -70,7 +70,7 @@ fn invite_code(code: &str) -> bool {
 ///
 /// Explains what is wrong with the link.
 pub fn parse_invite_url(input: &str) -> Result<InviteLink> {
-    let (base_url, host, code) = parse_bridge_url(input, "/claim/", "an invite link")?;
+    let (base_url, host, code) = parse_link_url(input, "/claim/", "an invite link")?;
     if !invite_code(&code) {
         bail!("this is not an invite link: the code must be {INVITE_PREFIX} and hex digits");
     }
@@ -79,6 +79,32 @@ pub fn parse_invite_url(input: &str) -> Result<InviteLink> {
         host,
         code,
     })
+}
+
+/// [`parse_bridge_url`] for a link someone shares: it may also use plain
+/// `http://` on a private network (192.168.x.x, 10.x.x.x, `.local`), for
+/// sharing on one wifi.
+///
+/// # Errors
+///
+/// Explains what is wrong with the link.
+pub fn parse_link_url(input: &str, path: &str, what: &str) -> Result<(String, String, String)> {
+    let input = input.trim();
+    let lan = input.strip_prefix("http://").and_then(|rest| {
+        let authority = rest.split('/').next().unwrap_or_default();
+        let host = match authority.rsplit_once(':') {
+            Some((h, p)) if p.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => authority,
+        };
+        crate::pool::is_lan_host(host).then(|| format!("https://{rest}"))
+    });
+    match lan {
+        Some(as_https) => {
+            let (b, h, c) = parse_bridge_url(&as_https, path, what)?;
+            Ok((b.replacen("https://", "http://", 1), h, c))
+        }
+        None => parse_bridge_url(input, path, what),
+    }
 }
 
 /// Splits `scheme://host[:port]<path><code>` into its base URL, host and
@@ -303,7 +329,14 @@ fn read(
     res: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     url: &str,
 ) -> Result<(u16, Value)> {
-    let mut res = res.with_context(|| format!("could not reach {}", terminal_safe(url)))?;
+    let mut res = res.map_err(|e| {
+        tracing::info!(error = %e, "could not reach the bridge");
+        anyhow::anyhow!(
+            "could not reach {}: {}",
+            terminal_safe(url),
+            crate::util::http_failure(&e)
+        )
+    })?;
     let status = res.status().as_u16();
     let body = res.body_mut().read_json::<Value>().unwrap_or(Value::Null);
     Ok((status, body))
@@ -879,10 +912,28 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_is_accepted_only_on_a_private_network() {
+        for (url, base) in [
+            (
+                format!("http://192.168.1.2:7878/claim/{CODE}"),
+                "http://192.168.1.2:7878",
+            ),
+            (format!("http://10.0.0.9/claim/{CODE}"), "http://10.0.0.9"),
+            (
+                format!("http://studio.local:7878/claim/{CODE}"),
+                "http://studio.local:7878",
+            ),
+        ] {
+            assert_eq!(parse_invite_url(&url).unwrap().base_url, base, "{url}");
+        }
+    }
+
+    #[test]
     fn rejects_unsafe_or_malformed_links() {
         for url in [
             format!("http://h.example/claim/{CODE}"),
-            format!("http://192.168.1.2/claim/{CODE}"),
+            format!("http://8.8.8.8/claim/{CODE}"),
+            format!("http://172.32.0.1/claim/{CODE}"),
             format!("ftp://h.example/claim/{CODE}"),
             format!("https://user@h.example/claim/{CODE}"),
             format!("https://h.example/claim/{CODE}?x=1"),

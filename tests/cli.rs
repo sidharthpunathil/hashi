@@ -294,7 +294,7 @@ fn llm_prints_the_guide_with_the_command_reference() {
     assert!(guide.contains("### `hashi llm`"));
     assert!(!has_secret(&guide));
     let lines = guide.lines().count();
-    assert!((300..=700).contains(&lines), "{lines} lines");
+    assert!((300..=800).contains(&lines), "{lines} lines");
 
     let path = cli.dir.path().join("guide.md");
     let out = cli.run(&["llm", "--output", path.to_str().unwrap()]);

@@ -255,8 +255,13 @@ pub fn fetch(base: &str, token: &AccessToken) -> Reply {
         .call();
     let mut res = match res {
         Ok(r) => r,
-        // The error names the host at most, never the header.
-        Err(e) => return Reply::Failed(format!("the usage endpoint could not be reached: {e}")),
+        Err(e) => {
+            tracing::info!(error = %e, "could not reach the Claude usage endpoint");
+            return Reply::Failed(format!(
+                "the Claude usage endpoint could not be reached: {}",
+                crate::util::http_failure(&e)
+            ));
+        }
     };
     let status = res.status().as_u16();
     match status {
@@ -271,16 +276,46 @@ pub fn fetch(base: &str, token: &AccessToken) -> Reply {
                 .map_or(DEFAULT_RETRY, Duration::from_secs);
             return Reply::Busy(after.min(MAX_RETRY));
         }
-        other => return Reply::Failed(format!("the usage endpoint answered HTTP {other}")),
+        other => return Reply::Failed(status_note(other)),
     }
     match res.body_mut().read_to_string() {
         Ok(text) => match parse_usage(&text) {
             Some(windows) => Reply::Usage(windows),
-            None => Reply::Failed("the usage endpoint answered something unreadable".to_owned()),
+            None => Reply::Failed(
+                "the Claude usage endpoint answered something Hashi cannot read".to_owned(),
+            ),
         },
-        Err(e) => Reply::Failed(format!(
-            "the usage endpoint's answer could not be read: {e}"
-        )),
+        Err(e) => {
+            tracing::info!(error = %e, "could not read the Claude usage answer");
+            Reply::Failed(format!(
+                "the Claude usage endpoint's answer could not be read: {}",
+                crate::util::http_failure(&e)
+            ))
+        }
+    }
+}
+
+/// A plain reason for an HTTP status the usage endpoint should not send.
+#[must_use]
+pub fn status_note(status: u16) -> String {
+    match status {
+        500..=599 => "the Claude usage endpoint is down, trying again shortly".to_owned(),
+        408 => "the Claude usage endpoint did not answer in time".to_owned(),
+        404 | 410 => "the Claude usage endpoint has moved; a newer Hashi may be needed".to_owned(),
+        other => format!("the Claude usage endpoint refused the request (HTTP {other})"),
+    }
+}
+
+/// How long `after` is, in words: "30s", "5 min", "1 h".
+#[must_use]
+pub fn wait_words(after: Duration) -> String {
+    let s = after.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3_600 {
+        format!("{} min", s.div_ceil(60))
+    } else {
+        format!("{} h", s.div_ceil(3_600))
     }
 }
 

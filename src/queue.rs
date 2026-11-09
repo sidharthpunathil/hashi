@@ -168,6 +168,8 @@ pub struct Dispatcher {
     /// Remote accounts sitting out a short back-off (see
     /// [`remote_backoff`]). In memory only: a restart forgets them.
     backoffs: Backoffs,
+    /// Prompts in flight to pool members.
+    pool: Arc<crate::pool::Hub>,
 }
 
 /// Registration of one run. Dropping it marks the run as finished.
@@ -203,7 +205,14 @@ impl Dispatcher {
             usage: Arc::default(),
             pins: Arc::default(),
             backoffs: Arc::default(),
+            pool: Arc::default(),
         }
+    }
+
+    /// Prompts in flight to pool members.
+    #[must_use]
+    pub fn pool(&self) -> &Arc<crate::pool::Hub> {
+        &self.pool
     }
 
     /// Backs `account` off after a transient failure on its bridge, for
@@ -714,12 +723,14 @@ impl Worker {
                 listed: false,
                 fresh: false,
                 remote: None,
+                member: None,
             }));
         };
         let policy = self.policy(eff);
         let mut names: Vec<&String> = Vec::new();
         let mut kinds = Vec::new();
         let mut remotes = Vec::new();
+        let mut members = Vec::new();
         let mut candidates = Vec::new();
         for name in list {
             let state = self
@@ -742,6 +753,10 @@ impl Worker {
                         s.remote_agent.unwrap_or(self.agent),
                     )
                 });
+            let member = state
+                .as_ref()
+                .filter(|s| s.kind == AccountKind::Pool)
+                .map(|s| s.pool_member.clone().unwrap_or_default());
             // A prompt that already came through the most bridges allowed
             // is never forwarded again.
             let ready = !tried.contains(name)
@@ -751,6 +766,10 @@ impl Worker {
                 && (remote.is_none()
                     || (req.hops < crate::forward::MAX_HOPS
                         && !self.dispatcher.backed_off(self.agent, name)))
+                && member.as_ref().is_none_or(|m| {
+                    self.dispatcher.pool().online(m)
+                        && !self.dispatcher.backed_off(self.agent, name)
+                })
                 && !past_stop(name)?;
             let summary = self
                 .store
@@ -759,6 +778,7 @@ impl Worker {
             names.push(name);
             kinds.push(kind);
             remotes.push(remote);
+            members.push(member);
             candidates.push(crate::usage::Candidate {
                 available: ready,
                 summary,
@@ -770,6 +790,7 @@ impl Worker {
             listed: true,
             fresh,
             remote: remotes[i].clone(),
+            member: members[i].clone(),
         };
         let current = if req.stateful {
             let owned: Vec<String> = names.iter().map(|n| (*n).clone()).collect();
@@ -950,6 +971,12 @@ impl Worker {
                 .set_request_account(&req.id, &account.name)
                 .map_err(|e| e.to_string())?;
             return self.run_remote(req, &eff, &account).await;
+        }
+        if account.kind == AccountKind::Pool {
+            self.store
+                .set_request_account(&req.id, &account.name)
+                .map_err(|e| e.to_string())?;
+            return self.run_pool(req, &eff, &account).await;
         }
         let cfg = self
             .cfg
@@ -1249,6 +1276,82 @@ impl Worker {
         })
     }
 
+    /// Runs the request on a pool account: hands it to the member's worker
+    /// (see [`crate::pool`]) and waits for the answer. Failures move on
+    /// like a remote bridge's; the holder never learns who ran it.
+    async fn run_pool(
+        &self,
+        req: &Request,
+        eff: &Effective,
+        account: &Picked,
+    ) -> Result<agent::AgentOutput, Halt> {
+        use crate::forward::Failure;
+        use crate::pool::{Job, Outcome};
+        let member = account.member.clone().unwrap_or_default();
+        let hub = Arc::clone(self.dispatcher.pool());
+        let job = Job {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent: self.agent,
+            model: req.model.clone(),
+            message: req.message.clone(),
+        };
+        let job_id = job.id.clone();
+        let timeout = self.cfg.limits.timeout;
+        let outcome = match hub.submit(&member, job) {
+            None => Err(Failure::Retryable(
+                "too many prompts wait for this member".to_owned(),
+            )),
+            Some(rx) => match tokio::time::timeout(timeout + Duration::from_secs(20), rx).await {
+                Ok(Ok(o)) => Ok(o),
+                Ok(Err(_)) => Err(Failure::Retryable("the pool forgot the run".to_owned())),
+                Err(_) => {
+                    hub.withdraw(&job_id);
+                    Err(Failure::TimedOut)
+                }
+            },
+        };
+        let result = match outcome {
+            Ok(Outcome::Done {
+                text,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            }) => Ok(agent::AgentOutput {
+                text,
+                session_id: None,
+                usage: match (input_tokens, output_tokens) {
+                    (None, None) => None,
+                    (i, o) => Some(agent::Usage {
+                        input_tokens: i.unwrap_or(0),
+                        output_tokens: o.unwrap_or(0),
+                        cost_usd,
+                    }),
+                },
+                rate_limits: Vec::new(),
+            }),
+            Ok(Outcome::Limited { reset_at, message }) => {
+                Err(Failure::Limited { reset_at, message })
+            }
+            Ok(Outcome::Busy(why)) => Err(Failure::Retryable(why)),
+            Ok(Outcome::Failed(why)) => Err(Failure::Failed(why)),
+            Err(f) => Err(f),
+        };
+        match result {
+            Ok(out) => {
+                self.used(&account.name, true);
+                self.dispatcher.clear_backoff(self.agent, &account.name);
+                self.after_run(&account.name);
+                info!(agent = %self.agent, account = %account.name, "prompt answered by a pool member");
+                Ok(out)
+            }
+            Err(failure) => {
+                let halt = self.remote_failed(req, eff, account, "the pool", failure, timeout);
+                self.after_run(&account.name);
+                Err(halt)
+            }
+        }
+    }
+
     /// What a failed forward means for the request and the account.
     fn remote_failed(
         &self,
@@ -1369,6 +1472,8 @@ struct Picked {
     fresh: bool,
     /// For a remote account: the saved remote and the agent asked for there.
     remote: Option<(String, AgentKind)>,
+    /// For a pool account: the member who runs it.
+    member: Option<String>,
 }
 
 /// Who asked for a cancel.

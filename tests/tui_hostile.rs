@@ -262,11 +262,15 @@ fn popups(app: &App) -> Vec<Popup> {
             label: evil_long(),
             code: "a".repeat(10_000),
             link_hours: u32::MAX,
+            via: hashi::links::Via::Auto,
+            pool: false,
         },
         Popup::InviteReveal {
             label: EVIL.into(),
             code: "abc".into(),
             link_hours: 1,
+            via: hashi::links::Via::Auto,
+            pool: false,
         },
         Popup::ConfirmCancelRequest {
             id: "x".into(),

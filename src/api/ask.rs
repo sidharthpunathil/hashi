@@ -246,7 +246,12 @@ fn has_remote_account(
                 .get_account(agent, n)
                 .ok()
                 .flatten()
-                .is_some_and(|a| a.kind == crate::accounts::AccountKind::Remote && !a.disabled)
+                .is_some_and(|a| {
+                    matches!(
+                        a.kind,
+                        crate::accounts::AccountKind::Remote | crate::accounts::AccountKind::Pool
+                    ) && !a.disabled
+                })
         })
     })
 }

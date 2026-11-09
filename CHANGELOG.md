@@ -4,12 +4,22 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-09
+
 ### Added
 
 - Two ways to share, both through a one-time link and both in the dashboard:
   - **Bridge share** (`hashi share`, New invite): the person sends prompts to your Hashi and your login never leaves your machine. New `--stop-at PCT` (`stopAtPercent`, "stop at" in the share and token forms) refuses their prompts once your account has used that share of its 5-hour or weekly quota, with when it opens again; a friend's Hashi fails over on it like any other limit.
   - **Login share** (`hashi share-login`, Share a login): for someone you trust, the link hands over the key of an API-key or OAuth-token account, so they run the agent on their own machine. Nothing is enforced; instead their Hashi reads your usage through the link, both of you get a reminder at `--remind-at` percent, and their copy is switched off when `--days` ends. `hashi connect` and the dashboard's Connect add it as an account.
 - `hashi account usage` and the Accounts popup show who shared a login, the agreed percent and when the share ends.
+- **Pools** (`hashi pool`, Pool in the dashboard): host a party where people lend their agents and everyone uses them. The host opens one join link; each member's Hashi pulls prompts from the host and runs them with its own accounts, stop and end time, so members need no public URL and their keys never leave their machine. `GET /v1/pool` (and `hashi pool status`) shows everyone, online or not, and each agent's headroom. Each member gets a pool token, saved as a remote so `hashi ask --remote <host>-pool` works.
+- Every share (`hashi share`, `share-login`, `pool open` and their dashboard forms) takes a route: `--via auto|cloudflare|tailscale|lan|local` ("link via" in the forms). The dashboard starts the Cloudflare tunnel or Tailscale when the route is not up; `lan` makes an `http://<wifi address>:<port>` link when the server listens on the network.
+- `hashi connect` and pool links accept plain `http://` on a private network (192.168.x.x, 10.x.x.x, 172.16-31.x.x, `.local`), for sharing on one wifi.
+
+### Fixed
+
+- `hashi account usage` and the dashboard show a plain reason when Codex usage cannot be read (sign-in rejected, busy, down or unreachable) instead of the raw error, and a rejected sign-in says to run `hashi account login codex <name>`.
+- When the Claude usage endpoint, a friend's bridge, the GitHub release check or a download cannot be reached, Hashi says what went wrong in plain words; the URL, response body and OS error go to the log.
 
 ## [0.3.2] - 2026-11-06
 

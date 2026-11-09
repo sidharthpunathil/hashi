@@ -136,6 +136,22 @@ impl App {
                         self.popup = Some(Popup::Remotes { selected });
                     }
                 }
+                Done::PoolJoined(Ok(host)) => {
+                    self.state.bus.log(format!("joined {host}'s pool"));
+                    self.notify(format!(
+                        "joined {host}'s pool; prompts are served while Hashi runs"
+                    ));
+                    if matches!(self.popup, Some(Popup::PoolJoin(_))) {
+                        self.popup = Some(Popup::Pool { selected: 0 });
+                    }
+                }
+                Done::PoolJoined(Err(e)) => match &mut self.popup {
+                    Some(Popup::PoolJoin(form)) => {
+                        form.busy = false;
+                        form.error = Some((0, e));
+                    }
+                    _ => self.notify(format!("joining the pool failed: {e}")),
+                },
                 Done::Connected(Err(e)) => match &mut self.popup {
                     Some(Popup::Connect(form)) => {
                         form.busy = false;
@@ -328,6 +344,7 @@ impl App {
             Action::Projects => Some(Popup::Projects { selected: 0 }),
             Action::Bridges => Some(Popup::Remotes { selected: 0 }),
             Action::Connect => Some(Popup::Connect(Box::default())),
+            Action::Pool => Some(Popup::Pool { selected: 0 }),
             Action::ShareLogin => {
                 let mut form =
                     ShareLoginForm::new(crate::share::shareable_logins(&self.state.store));
@@ -409,6 +426,9 @@ impl App {
             Popup::Remotes { selected } => self.remotes_key(selected, code),
             Popup::Connect(form) => self.connect_key(form, code),
             Popup::ShareLogin(form) => self.share_login_key(form, code),
+            Popup::Pool { selected } => self.pool_key(selected, code),
+            Popup::PoolOpen(form) => self.pool_open_key(form, code),
+            Popup::PoolJoin(form) => self.pool_join_key(form, code),
             Popup::ConfirmRemoveRemote { name } => match code {
                 KeyCode::Char('y' | 'Y') => {
                     match self.home().map(|h| crate::remote::forget(&h, &name)) {
@@ -1531,6 +1551,174 @@ impl App {
         Some(Popup::Remotes { selected })
     }
 
+    fn pool_key(&mut self, mut selected: usize, code: KeyCode) -> Option<Popup> {
+        let members = self.state.store.list_pool_members().unwrap_or_default();
+        if closes(code) {
+            return None;
+        }
+        if list_nav(&mut selected, members.len(), code) {
+            return Some(Popup::Pool { selected });
+        }
+        match code {
+            KeyCode::Char('o') => {
+                return Some(Popup::PoolOpen(Box::new(
+                    crate::tui::forms::PoolOpenForm::new(),
+                )));
+            }
+            KeyCode::Char('c') => match self.state.store.close_pool_link() {
+                Ok(true) => {
+                    self.audit("pool.close", "pool", "");
+                    self.notify("the pool link is closed; members stay");
+                }
+                Ok(false) => self.notify("no pool link is open"),
+                Err(e) => self.notify(format!("{e}")),
+            },
+            KeyCode::Char('x') => {
+                if let Some(m) = members.get(selected) {
+                    match self.state.store.remove_pool_member(&m.id) {
+                        Ok(Some(m)) => {
+                            self.state.dispatcher.pool().forget(&m.id);
+                            self.audit("pool.kick", &m.name, "");
+                            self.state.bus.log(format!("{} is out of the pool", m.name));
+                            self.notify(format!("{} is out of the pool", m.name));
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.notify(format!("{e}")),
+                    }
+                }
+            }
+            KeyCode::Char('a') => {
+                return Some(Popup::PoolJoin(Box::new(
+                    crate::tui::forms::PoolJoinForm::new(),
+                )));
+            }
+            KeyCode::Char('l') => {
+                let Some(home) = self.home() else {
+                    return Some(Popup::Pool { selected });
+                };
+                let joined = crate::pool_client::load(&home).unwrap_or_default();
+                match joined.first() {
+                    None => self.notify("this Hashi is in no pool; press j to join one"),
+                    Some(p) => {
+                        let host = p.host.clone();
+                        match crate::pool_client::leave(&self.state.store, &home, Some(&host)) {
+                            Ok(_) => {
+                                self.state.bus.log(format!("left {host}'s pool"));
+                                self.notify(format!("left {host}'s pool"));
+                            }
+                            Err(e) => self.notify(format!("{e:#}")),
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Some(Popup::Pool { selected })
+    }
+
+    fn pool_open_key(
+        &mut self,
+        mut form: Box<crate::tui::forms::PoolOpenForm>,
+        code: KeyCode,
+    ) -> Option<Popup> {
+        let fields = crate::tui::forms::PoolOpenForm::FIELDS;
+        match code {
+            KeyCode::Esc => return Some(Popup::Pool { selected: 0 }),
+            KeyCode::Enter => {
+                if let Err(e) = self.prepare_via(form.via) {
+                    form.field = 2;
+                    form.error = Some((2, e));
+                    return Some(Popup::PoolOpen(form));
+                }
+                return match self.state.store.open_pool_link(form.hours(), form.max()) {
+                    Ok((_, code)) => {
+                        self.audit("pool.open", "pool", &format!("{}h", form.hours()));
+                        self.state.bus.log("the pool link is open");
+                        Some(Popup::InviteReveal {
+                            label: "your pool".to_owned(),
+                            code,
+                            link_hours: form.hours(),
+                            via: form.via,
+                            pool: true,
+                        })
+                    }
+                    Err(e) => {
+                        form.error = Some((0, e.to_string()));
+                        Some(Popup::PoolOpen(form))
+                    }
+                };
+            }
+            _ if nav(&mut form.field, fields, code, |_| false) => {}
+            KeyCode::Left => form.step(-1),
+            KeyCode::Right | KeyCode::Char(' ') => form.step(1),
+            _ => {}
+        }
+        form.error = None;
+        Some(Popup::PoolOpen(form))
+    }
+
+    fn pool_join_key(
+        &mut self,
+        mut form: Box<crate::tui::forms::PoolJoinForm>,
+        code: KeyCode,
+    ) -> Option<Popup> {
+        if form.busy {
+            return if code == KeyCode::Esc {
+                None
+            } else {
+                Some(Popup::PoolJoin(form))
+            };
+        }
+        let fields = crate::tui::forms::PoolJoinForm::FIELDS;
+        match code {
+            KeyCode::Esc => return Some(Popup::Pool { selected: 0 }),
+            KeyCode::Enter => return self.join_pool(form),
+            _ if nav(&mut form.field, fields, code, |_| false) => {}
+            KeyCode::Left if form.field >= 3 => form.step(-1),
+            KeyCode::Right | KeyCode::Char(' ') if form.field >= 3 => form.step(1),
+            _ => {
+                let max = if form.field == 0 { 600 } else { 60 };
+                if let Some(text) = form.text_mut()
+                    && edit(text, code, max)
+                {
+                    form.error = None;
+                }
+            }
+        }
+        Some(Popup::PoolJoin(form))
+    }
+
+    fn join_pool(&mut self, mut form: Box<crate::tui::forms::PoolJoinForm>) -> Option<Popup> {
+        let opts = match form.options() {
+            Ok(o) => o,
+            Err((field, e)) => {
+                form.field = field;
+                form.error = Some((field, e));
+                return Some(Popup::PoolJoin(form));
+            }
+        };
+        let Some(home) = self.home() else {
+            form.error = Some((0, "no Hashi home here".to_owned()));
+            return Some(Popup::PoolJoin(form));
+        };
+        let store = std::sync::Arc::clone(&self.state.store);
+        let slot = std::sync::Arc::clone(&self.done);
+        let spawned = std::thread::Builder::new()
+            .name("hashi-pool-join".to_owned())
+            .spawn(move || {
+                let result = crate::pool_client::join(&store, &home, &opts)
+                    .map(|j| j.host)
+                    .map_err(|e| format!("{e:#}"));
+                Self::finish(&slot, Done::PoolJoined(result));
+            });
+        if spawned.is_err() {
+            form.error = Some((0, "could not start joining".to_owned()));
+        } else {
+            form.busy = true;
+        }
+        Some(Popup::PoolJoin(form))
+    }
+
     /// Refills where a login share's usage can be read from, for the
     /// login the form has chosen.
     fn fill_sources(&self, form: &mut ShareLoginForm) {
@@ -1571,6 +1759,11 @@ impl App {
             form.error = Some((0, "no Hashi home here".to_owned()));
             return Some(Popup::ShareLogin(form));
         };
+        if let Err(e) = self.prepare_via(form.via) {
+            form.field = ShareLoginForm::VIA;
+            form.error = Some((ShareLoginForm::VIA, e));
+            return Some(Popup::ShareLogin(form));
+        }
         match crate::share::create_login_share(&self.state.store, &home, &new, "dashboard") {
             Ok((invite, code)) => {
                 self.state
@@ -1581,6 +1774,8 @@ impl App {
                     label: invite.label,
                     code,
                     link_hours: new.link_hours,
+                    via: form.via,
+                    pool: false,
                 })
             }
             Err(e) => {

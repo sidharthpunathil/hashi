@@ -88,6 +88,8 @@ pub enum Action {
     NewInvite,
     /// Hand over a key account through a link.
     ShareLogin,
+    /// Host a pool, or join or leave one.
+    Pool,
     /// Create a token.
     NewToken,
     /// See and decide requests for access, and open or close the link.
@@ -130,13 +132,14 @@ pub enum Action {
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
         Self::StopPublic,
         Self::NewInvite,
         Self::ShareLogin,
+        Self::Pool,
         Self::NewToken,
         Self::AccessRequests,
         Self::Ask,
@@ -165,7 +168,11 @@ impl Action {
             Self::Cloudflare | Self::TailscaleServe | Self::TailscaleFunnel | Self::StopPublic => {
                 "Go public"
             }
-            Self::NewInvite | Self::ShareLogin | Self::NewToken | Self::AccessRequests => "Share",
+            Self::NewInvite
+            | Self::ShareLogin
+            | Self::Pool
+            | Self::NewToken
+            | Self::AccessRequests => "Share",
             Self::Ask => "Ask",
             Self::Accounts | Self::Projects | Self::Bridges | Self::Connect => "Manage",
             Self::Listen | Self::CopyUrl => "Server",
@@ -201,6 +208,7 @@ impl Action {
             Self::StopPublic => "Stop going public",
             Self::NewInvite => "New invite",
             Self::ShareLogin => "Share a login",
+            Self::Pool => "Pool",
             Self::NewToken => "New token",
             Self::AccessRequests => "Access requests",
             Self::Ask => "Ask an agent",
@@ -233,6 +241,7 @@ impl Action {
             Self::StopPublic => "turn off the active route; links go back to local",
             Self::NewInvite => "a link: they send prompts here, your limits hold",
             Self::ShareLogin => "a link that hands over a key: for someone you trust",
+            Self::Pool => "a party: people lend their agents, everyone uses them",
             Self::NewToken => "an API token for a script or app",
             Self::AccessRequests => "people asking for access or for more, and the link",
             Self::Ask => "a prompt through the queue, or to a bridge you use",
@@ -484,6 +493,8 @@ pub struct ShareForm {
     stop: usize,
     lifetime: usize,
     link: usize,
+    /// How the link reaches people.
+    pub via: crate::links::Via,
     /// Accounts per agent, typed as `claude=work,personal codex=team`.
     /// Empty means every agent uses its default account.
     pub accounts: String,
@@ -498,15 +509,17 @@ pub struct ShareForm {
 
 impl ShareForm {
     /// Number of fields.
-    pub const FIELDS: usize = 11;
+    pub const FIELDS: usize = 12;
     /// Index of the stop-at choice.
     pub const STOP_AT: usize = 5;
+    /// Index of the route choice.
+    pub const VIA: usize = 8;
     /// Index of the accounts text field.
-    pub const ACCOUNTS: usize = 8;
+    pub const ACCOUNTS: usize = 9;
     /// Index of the project selector, the last field.
-    pub const PROJECT: usize = 10;
+    pub const PROJECT: usize = 11;
     /// Index of the share usage toggle.
-    pub const SHARE_USAGE: usize = 9;
+    pub const SHARE_USAGE: usize = 10;
 
     fn new(projects: Vec<String>) -> Self {
         Self {
@@ -519,6 +532,7 @@ impl ShareForm {
             stop: 0,
             lifetime: 0,
             link: 1,
+            via: crate::links::Via::Auto,
             accounts: String::new(),
             project: ProjectChoice::new(projects),
             share_usage: false,
@@ -540,6 +554,7 @@ impl ShareForm {
             Self::STOP_AT => self.stop = cycle(self.stop, STOP_AT.len(), by),
             6 => self.lifetime = cycle(self.lifetime, LIFETIME_DAYS.len(), by),
             7 => self.link = cycle(self.link, LINK_HOURS.len(), by),
+            Self::VIA => self.via = next_via(self.via, by),
             Self::PROJECT => self.project.shift(by),
             Self::SHARE_USAGE => self.share_usage = !self.share_usage,
             _ => {}
@@ -617,6 +632,14 @@ impl ShareForm {
     }
 }
 
+/// The route after `via` in direction `by`, wrapping.
+#[must_use]
+pub fn next_via(via: crate::links::Via, by: isize) -> crate::links::Via {
+    let all = crate::links::Via::ALL;
+    let i = all.iter().position(|v| *v == via).unwrap_or(0);
+    all[cycle(i, all.len(), by)]
+}
+
 /// Longest accounts text a form accepts.
 const ACCOUNTS_CHARS: usize = 200;
 
@@ -690,6 +713,10 @@ pub enum Popup {
         code: String,
         /// How long the link stays valid.
         link_hours: u32,
+        /// How the link reaches people.
+        via: crate::links::Via,
+        /// A pool join link rather than an invite.
+        pool: bool,
     },
     /// Request cancellation confirmation.
     ConfirmCancelRequest {
@@ -771,6 +798,15 @@ pub enum Popup {
     Connect(Box<ConnectForm>),
     /// "Share a login" form.
     ShareLogin(Box<ShareLoginForm>),
+    /// The pool: its link, who is in it, and the pools this Hashi joined.
+    Pool {
+        /// Selected member.
+        selected: usize,
+    },
+    /// "Open the pool link" form.
+    PoolOpen(Box<crate::tui::forms::PoolOpenForm>),
+    /// "Join a pool" form.
+    PoolJoin(Box<crate::tui::forms::PoolJoinForm>),
     /// Bridge removal confirmation.
     ConfirmRemoveRemote {
         /// The bridge's name.
@@ -834,6 +870,8 @@ pub enum Popup {
 pub enum Done {
     /// `hashi connect`: the name saved under, or why it failed.
     Connected(Result<(String, Option<String>), String>),
+    /// `hashi pool join`: the host joined, or why it failed.
+    PoolJoined(Result<String, String>),
     /// `hashi ask --remote`: the bridge asked and its answer or error.
     Answer {
         /// The bridge.
@@ -1400,6 +1438,9 @@ impl App {
             | Popup::Remotes { .. }
             | Popup::Connect(_)
             | Popup::ShareLogin(_)
+            | Popup::Pool { .. }
+            | Popup::PoolOpen(_)
+            | Popup::PoolJoin(_)
             | Popup::ConfirmRemoveRemote { .. }
             | Popup::Audit { .. }
             | Popup::Doctor
@@ -1456,11 +1497,13 @@ impl App {
                 label,
                 code,
                 link_hours,
+                via,
+                pool,
             } => {
                 match key.code {
                     KeyCode::Char('c') => {
-                        let url = self.invite_url(&code);
-                        self.copy(&url, "invite link copied to clipboard");
+                        let url = self.share_link(&code, via, pool);
+                        self.copy(&url, "link copied to clipboard");
                     }
                     // No popups from here: they would replace the link.
                     KeyCode::Char('t') => self.start_route(PublicRoute::Cloudflare, false),
@@ -1471,6 +1514,8 @@ impl App {
                     label,
                     code,
                     link_hours,
+                    via,
+                    pool,
                 })
             }
             Popup::Install(plan) => match key.code {
@@ -1655,6 +1700,11 @@ impl App {
                 return Some(Popup::Share(form));
             }
         };
+        if let Err(e) = self.prepare_via(form.via) {
+            form.field = ShareForm::VIA;
+            form.error = Some(e);
+            return Some(Popup::Share(form));
+        }
         let new = form.to_new_invite(label, accounts);
         if let Err(e) = crate::api::check_binding(
             &self.state.store,
@@ -1682,6 +1732,8 @@ impl App {
                     label: invite.label,
                     code,
                     link_hours: new.link_hours,
+                    via: form.via,
+                    pool: false,
                 })
             }
             Err(e) => {
@@ -1875,6 +1927,39 @@ impl App {
         format!("{}/claim/{code}", self.state.runtime.base_url())
     }
 
+    /// The link for `code` over `via`: `/pool/` for a pool link, else
+    /// `/claim/`. Until the route is up it is this machine's.
+    #[must_use]
+    pub fn share_link(&self, code: &str, via: crate::links::Via, pool: bool) -> String {
+        let path = if pool { "pool" } else { "claim" };
+        let base = crate::links::base(&self.state.runtime, via)
+            .unwrap_or_else(|_| self.state.runtime.local_url());
+        format!("{base}/{path}/{code}")
+    }
+
+    /// Checks `via` before a link is made: starts its route when it needs
+    /// one, or says what to do first.
+    ///
+    /// # Errors
+    ///
+    /// What the owner must change, for the form to show.
+    pub fn prepare_via(&mut self, via: crate::links::Via) -> Result<(), String> {
+        use crate::links::NotReady;
+        match crate::links::base(&self.state.runtime, via) {
+            Ok(_) => Ok(()),
+            Err(NotReady::Start(route)) => {
+                // Only one public route runs at a time: switching stops the
+                // other one first.
+                if crate::server::active_route(&self.state.runtime).is_some() {
+                    crate::server::stop_public(&self.state.runtime);
+                }
+                self.start_route(route, false);
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// Whether links made now only work on this machine.
     #[must_use]
     pub fn local_only(&self) -> bool {
@@ -2032,6 +2117,7 @@ impl App {
             | Action::Bridges
             | Action::Connect
             | Action::ShareLogin
+            | Action::Pool
             | Action::Listen
             | Action::InstallUpdate
             | Action::Doctor

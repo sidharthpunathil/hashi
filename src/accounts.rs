@@ -70,6 +70,8 @@ pub enum AccountKind {
     OauthToken,
     /// A friend's bridge, through a saved remote.
     Remote,
+    /// Someone in this host's pool, whose own Hashi asks for the work.
+    Pool,
 }
 
 impl AccountKind {
@@ -82,6 +84,7 @@ impl AccountKind {
             Self::ApiKey => "api-key",
             Self::OauthToken => "oauth-token",
             Self::Remote => "remote",
+            Self::Pool => "pool",
         }
     }
 
@@ -108,6 +111,7 @@ impl FromStr for AccountKind {
             "api-key" | "key" => Ok(Self::ApiKey),
             "oauth-token" => Ok(Self::OauthToken),
             "remote" => Ok(Self::Remote),
+            "pool" => Ok(Self::Pool),
             other => Err(format!(
                 "unknown account kind `{other}` (expected login, api-key, oauth-token or remote)"
             )),
@@ -146,7 +150,7 @@ pub const fn supports(agent: AgentKind, kind: AccountKind) -> bool {
         AccountKind::Default => true,
         AccountKind::Login => dir_var(agent).is_some(),
         AccountKind::ApiKey | AccountKind::OauthToken => key_var(agent, kind).is_some(),
-        AccountKind::Remote => true,
+        AccountKind::Remote | AccountKind::Pool => true,
     }
 }
 
@@ -583,8 +587,8 @@ pub fn run_env(
             set.push((var.to_owned(), key));
             set
         }
-        // A remote account never starts a process.
-        AccountKind::Remote => return Err(unsupported(agent, kind)),
+        // A remote or pool account never starts a process here.
+        AccountKind::Remote | AccountKind::Pool => return Err(unsupported(agent, kind)),
     };
     let mut remove = credential_vars(agent).to_vec();
     remove.extend_from_slice(always_removed(agent));

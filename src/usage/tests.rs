@@ -751,6 +751,59 @@ mod poller_tests {
     }
 
     #[tokio::test]
+    async fn every_kind_of_claude_failure_reads_as_a_plain_note() {
+        let r = rig();
+        let (base, ep) = endpoint().await;
+        r.login(AgentKind::Claude, "work");
+        let security = fake_security(r.dir.path(), "tok", NOW * 10);
+        let cases = [
+            (502, None, "", "the Claude usage endpoint is down"),
+            (404, None, "", "has moved"),
+            (400, None, "", "refused the request (HTTP 400)"),
+            (429, Some("120"), "", "busy, trying again in 2 min"),
+            (
+                200,
+                None,
+                "<html>nope</html>",
+                "answered something Hashi cannot read",
+            ),
+        ];
+        for (status, after, body, want) in cases {
+            let p = r.poller(r.claude_settings(&base, security.clone()), None);
+            ep.answer(status, after, body);
+            let _ = p.poll(AgentKind::Claude, "work").await;
+            let note = r
+                .store
+                .poll_status(AgentKind::Claude, "work")
+                .unwrap()
+                .unwrap()
+                .note
+                .unwrap();
+            assert!(note.contains(want), "HTTP {status}: {note}");
+            assert!(!crate::util::looks_raw(&note), "HTTP {status}: {note}");
+        }
+
+        // Nothing listens on port 1: the connection is refused, said plainly.
+        let p = r.poller(r.claude_settings("http://127.0.0.1:1", security), None);
+        let _ = p.poll(AgentKind::Claude, "work").await;
+        let note = r
+            .store
+            .poll_status(AgentKind::Claude, "work")
+            .unwrap()
+            .unwrap()
+            .note
+            .unwrap();
+        assert!(
+            note.starts_with("unknown, the Claude usage endpoint could not be reached: "),
+            "{note}"
+        );
+        assert!(
+            !note.contains("127.0.0.1") && !note.contains("os error"),
+            "{note}"
+        );
+    }
+
+    #[tokio::test]
     async fn one_account_is_read_at_most_once_a_minute() {
         let r = rig();
         let (base, ep) = endpoint().await;

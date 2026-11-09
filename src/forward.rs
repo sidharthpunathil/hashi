@@ -221,9 +221,10 @@ fn read(
     remote: &str,
 ) -> Result<(u16, Value), Failure> {
     let mut res = res.map_err(|e| {
+        tracing::info!(remote = %remote, error = %e, "could not reach the bridge");
         Failure::Retryable(format!(
             "could not reach the bridge of remote {remote}: {}",
-            crate::diagnostics::terminal_safe(&e.to_string())
+            crate::util::http_failure(&e)
         ))
     })?;
     let status = res.status().as_u16();
@@ -483,14 +484,21 @@ pub fn check_instance(
 /// Fails when the bridge cannot be reached or answers badly.
 pub fn instance_id(base_url: &str) -> Result<Option<String>, String> {
     let url = format!("{}/v1/status", base_url.trim_end_matches('/'));
+    let plain = |e: ureq::Error| {
+        tracing::info!(error = %e, "could not ask the bridge for its instance id");
+        crate::util::http_failure(&e).to_owned()
+    };
     let mut res = http(Duration::from_secs(10))
         .get(&url)
         .call()
-        .map_err(|e| e.to_string())?;
+        .map_err(plain)?;
     if !res.status().is_success() {
-        return Err(format!("the bridge answered {}", res.status().as_u16()));
+        return Err(format!(
+            "the bridge answered HTTP {}",
+            res.status().as_u16()
+        ));
     }
-    let v: Value = res.body_mut().read_json().map_err(|e| e.to_string())?;
+    let v: Value = res.body_mut().read_json().map_err(plain)?;
     Ok(v["instance"].as_str().map(str::to_owned))
 }
 

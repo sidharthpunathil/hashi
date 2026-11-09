@@ -18,6 +18,7 @@ mod accounts;
 mod audit;
 mod cancel;
 mod invites;
+pub(crate) mod pool;
 mod projects;
 mod usage;
 
@@ -31,6 +32,7 @@ pub use audit::AuditEntry;
 pub use invites::{
     INVITE_PREFIX, Invite, InviteState, LoginShare, MAX_PENDING_INVITES, NewInvite, Redeemed,
 };
+pub use pool::{MEMBER_PREFIX, POOL_LINK_PREFIX, PoolLink, PoolMember};
 pub use projects::{ProjectStats, RemovedProject};
 pub use usage::{Conversation, PollStatus, Spend};
 
@@ -634,9 +636,37 @@ ALTER TABLE accounts ADD COLUMN remind_at INTEGER;
 ALTER TABLE accounts ADD COLUMN share_until INTEGER;
 ";
 
-const MIGRATIONS: [&str; 10] = [
+/// Version 11: pools. A host opens one join link (`pool_links`, the code
+/// kept as a hash); each person who joins is a `pool_members` row (their
+/// worker secret kept as a hash, and the token they use the pool with),
+/// and offers one `pool` account per agent (`accounts.pool_member`).
+/// Tokens with `pool` set use every pool account.
+const SCHEMA_V11: &str = r"
+CREATE TABLE IF NOT EXISTS pool_links (
+    id          TEXT PRIMARY KEY,
+    hash        TEXT NOT NULL UNIQUE,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    closed_at   INTEGER,
+    max_members INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pool_members (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    secret_hash TEXT NOT NULL UNIQUE,
+    token_id    TEXT,
+    agents      TEXT NOT NULL,
+    joined_at   INTEGER NOT NULL,
+    last_seen   INTEGER,
+    until       INTEGER
+);
+ALTER TABLE accounts ADD COLUMN pool_member TEXT;
+ALTER TABLE tokens ADD COLUMN pool INTEGER NOT NULL DEFAULT 0;
+";
+
+const MIGRATIONS: [&str; 11] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
 ];
 
 /// Prepared statements kept per connection. The hot paths cache about 40.
