@@ -2847,3 +2847,95 @@ fn a_pool_link_is_opened_from_the_dashboard_and_members_show_up() {
     app.on_key(key(KeyCode::Char('x')));
     assert!(app.state.store.list_pool_members().unwrap().is_empty());
 }
+
+#[test]
+fn d_explains_the_selected_command_at_length() {
+    let mut app = App::new(without_helpers(), None, false);
+    select_action(&mut app, Action::NewInvite);
+    app.on_key(key(KeyCode::Char('d')));
+    assert!(matches!(
+        app.popup,
+        Some(Popup::Details {
+            action: Action::NewInvite,
+            scroll: 0
+        })
+    ));
+    let out = draw(&mut app, 140, 60);
+    for text in [
+        "New invite",
+        "What it is",
+        "How it works",
+        "Good to know",
+        "one-time link",
+        "Stop at",
+        "hashi share <label>",
+    ] {
+        assert!(out.contains(text), "missing {text:?}:\n{out}");
+    }
+
+    // → and ← step through the rows, and the Commands selection follows.
+    app.on_key(key(KeyCode::Right));
+    assert!(matches!(
+        app.popup,
+        Some(Popup::Details {
+            action: Action::ShareLogin,
+            ..
+        })
+    ));
+    assert_eq!(app.selected_action(), Action::ShareLogin);
+    assert!(draw(&mut app, 140, 60).contains("someone you trust"));
+    app.on_key(key(KeyCode::Left));
+    app.on_key(key(KeyCode::Left));
+    assert_eq!(app.selected_action(), Action::StopPublic);
+
+    // enter runs it; esc closes.
+    select_action(&mut app, Action::Help);
+    app.on_key(key(KeyCode::Char('d')));
+    app.on_key(key(KeyCode::Enter));
+    assert!(matches!(app.popup, Some(Popup::Help)));
+    app.on_key(key(KeyCode::Esc));
+    app.on_key(key(KeyCode::Char('d')));
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.popup.is_none());
+}
+
+#[test]
+fn details_scroll_stops_at_the_end() {
+    let mut app = App::new(without_helpers(), None, false);
+    select_action(&mut app, Action::Pool);
+    app.on_key(key(KeyCode::Char('d')));
+    let first = draw(&mut app, 80, 24);
+    assert!(first.contains("↓ more"), "{first}");
+    for _ in 0..200 {
+        app.on_key(key(KeyCode::Down));
+    }
+    let Some(Popup::Details { scroll, .. }) = app.popup else {
+        panic!("closed")
+    };
+    let last = draw(&mut app, 80, 24);
+    assert!(!last.contains("↓ more"), "{last}");
+    assert!(last.contains("hashi pool status"), "{last}");
+    // One up from the end moves at once.
+    app.on_key(key(KeyCode::Up));
+    let Some(Popup::Details { scroll: up, .. }) = app.popup else {
+        panic!("closed")
+    };
+    assert_eq!(up + 1, scroll);
+}
+
+#[test]
+fn every_command_has_details_without_banned_dashes() {
+    for action in Action::ALL {
+        let d = hashi::tui::details::details(action);
+        assert!(!d.about.is_empty() && !d.how.is_empty() && !d.know.is_empty());
+        for text in std::iter::once(d.about)
+            .chain(d.how.iter().copied())
+            .chain(d.know.iter().copied())
+        {
+            assert!(
+                !text.contains(['\u{2014}', '\u{2015}', '\u{2212}', '\u{2012}']),
+                "{action:?}: {text}"
+            );
+        }
+    }
+}

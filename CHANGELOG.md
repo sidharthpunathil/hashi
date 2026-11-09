@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-10
+
+### Added
+
+- `d` on the dashboard's Commands view opens the selected row's details: what it is, how it works, what to know before using it and the same command from a terminal. `←` `→` step through the other rows and `Enter` runs it.
+
 ## [0.3.3] - 2026-11-09
 
 ### Added

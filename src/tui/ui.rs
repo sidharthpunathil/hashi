@@ -381,6 +381,7 @@ pub fn footer_keys(app: &App) -> &'static [(&'static str, &'static str)] {
         Tab::Commands => &[
             ("↑↓", "select"),
             ("enter", "run"),
+            ("d", "details"),
             ("t", "go public"),
             ("a", "ask"),
             ("1-5", "views"),
@@ -1881,9 +1882,9 @@ fn render_commands(app: &App, frame: &mut Frame, area: Rect) {
     let action = app.selected_action();
     let (state_text, color) = action_state(app, action);
     let run = match action.key() {
-        "enter" => "press enter to run it".to_owned(),
-        key @ ("s" | "n") => format!("press enter, or {key} here and in Tokens"),
-        key => format!("press enter, or {key} from anywhere"),
+        "enter" => "press enter to run it, d for details".to_owned(),
+        key @ ("s" | "n") => format!("press enter, or {key} here and in Tokens; d for details"),
+        key => format!("press enter, or {key} from anywhere; d for details"),
     };
     let lines = vec![
         Line::from(vec![
@@ -2029,7 +2030,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 ("↑↓ / j k", "move selection"),
                 ("PgUp PgDn", "scroll request detail"),
                 ("enter", "run the selected command (Commands)"),
-                ("", "more there: accounts, projects, doctor"),
+                ("d", "what the selected command does (Commands)"),
                 ("c", "copy the API base URL"),
                 ("t", "go public with a Cloudflare quick tunnel"),
                 ("a", "ask an agent here or on a bridge you use"),
@@ -2359,6 +2360,7 @@ fn render_popup(app: &App, frame: &mut Frame, popup: &Popup) {
                 rect,
             );
         }
+        Popup::Details { action, scroll } => super::details::render(app, frame, *action, *scroll),
         other => super::panels::render(app, frame, other),
     }
 }

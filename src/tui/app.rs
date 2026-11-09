@@ -681,6 +681,13 @@ pub enum TokensFocus {
 pub enum Popup {
     /// Key binding reference.
     Help,
+    /// The long form of a Commands row: what it is and how it works.
+    Details {
+        /// The row.
+        action: Action,
+        /// Lines scrolled down.
+        scroll: u16,
+    },
     /// A secret shown exactly once.
     Reveal {
         /// Heading.
@@ -979,6 +986,8 @@ pub struct App {
     pub(crate) detail: Option<Request>,
     /// Selected row of the Commands view, an index into [`Action::ALL`].
     pub commands_selected: usize,
+    /// How far the open details popup can scroll, as last drawn.
+    pub(crate) details_max_scroll: std::cell::Cell<u16>,
     /// An install `enter` asked for, run by the event loop with the
     /// terminal attached.
     pub pending_command: Option<PendingCommand>,
@@ -1050,6 +1059,7 @@ impl App {
             last_refresh: None,
             detail: None,
             commands_selected: 0,
+            details_max_scroll: std::cell::Cell::new(0),
             pending_command: None,
             cloudflared: None,
             tailscale_bin: None,
@@ -1368,6 +1378,12 @@ impl App {
                 self.open_edit_token();
             }
             KeyCode::Enter if self.tab == Tab::Commands => self.run_action(self.selected_action()),
+            KeyCode::Char('d') if self.tab == Tab::Commands => {
+                self.popup = Some(Popup::Details {
+                    action: self.selected_action(),
+                    scroll: 0,
+                });
+            }
             KeyCode::Char('n') if matches!(self.tab, Tab::Tokens | Tab::Commands) => {
                 self.popup = Some(Popup::NewToken(TokenForm::new(self.project_names())));
             }
@@ -1426,6 +1442,7 @@ impl App {
     fn on_popup_key(&mut self, popup: Popup, key: KeyEvent) -> Option<Popup> {
         match popup {
             Popup::Help => None,
+            Popup::Details { action, scroll } => self.details_key(action, scroll, key.code),
             popup @ (Popup::EditToken(_)
             | Popup::Ask(_)
             | Popup::RemoteAnswer { .. }
@@ -2179,6 +2196,51 @@ impl App {
             return;
         }
         self.notify("checking for updates");
+    }
+
+    /// A key in the details popup: scroll, step to the next or previous
+    /// row, run it, or close.
+    fn details_key(&mut self, action: Action, scroll: u16, code: KeyCode) -> Option<Popup> {
+        let max = self.details_max_scroll.get();
+        let scroll = scroll.min(max);
+        let at = |action: Action| Some(Popup::Details { action, scroll: 0 });
+        let step = |by: isize| {
+            let n = Action::ALL.len().cast_signed();
+            let i = Action::ALL.iter().position(|a| *a == action).unwrap_or(0);
+            ((i.cast_signed() + by).rem_euclid(n)).cast_unsigned()
+        };
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => Some(Popup::Details {
+                action,
+                scroll: (scroll + 1).min(max),
+            }),
+            KeyCode::Up | KeyCode::Char('k') => Some(Popup::Details {
+                action,
+                scroll: scroll.saturating_sub(1),
+            }),
+            KeyCode::PageDown | KeyCode::Char(' ') => Some(Popup::Details {
+                action,
+                scroll: scroll.saturating_add(10).min(max),
+            }),
+            KeyCode::PageUp => Some(Popup::Details {
+                action,
+                scroll: scroll.saturating_sub(10),
+            }),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                self.commands_selected = step(1);
+                at(self.selected_action())
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                self.commands_selected = step(-1);
+                at(self.selected_action())
+            }
+            KeyCode::Enter => {
+                self.popup = None;
+                self.run_action(action);
+                self.popup.take()
+            }
+            _ => None,
+        }
     }
 
     /// The row selected in the Commands view.
