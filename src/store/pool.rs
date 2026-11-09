@@ -97,7 +97,7 @@ const LINK_COLUMNS: &str = "id, created_at, expires_at, closed_at, max_members";
 /// The account map every pool token gets: each agent's pool accounts.
 fn pool_map(conn: &rusqlite::Connection) -> Result<AccountMap> {
     let mut stmt = conn.prepare(
-        "SELECT agent, name FROM accounts WHERE kind = 'pool' ORDER BY created_at, name",
+        "SELECT agent, name FROM accounts WHERE kind = 'pool' ORDER BY created_at, rowid",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut map = AccountMap::new();
