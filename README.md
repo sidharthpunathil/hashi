@@ -137,6 +137,8 @@ hashi project add api ~/code/api --account claude=work,default --model claude=so
 hashi share alice --project api
 ```
 
+Every Claude Code and Codex account also gets shell commands that start the CLI signed in as it: `work-claude` and `work-dclaude` (with `--dangerously-skip-permissions`), or `work-codex` and `work-dcodex`. Hashi deletes them when the account is removed; `hashi account commands` lists them and renames them, as does `n` in the dashboard's Accounts popup.
+
 Alice's prompts now run in `~/code/api` instead of a private workspace, on your `work` Claude plan first and your own login once `work` hits its limit. She sees only the project's name, never its folder or your account names. Your normal login is never touched, and Hashi never changes, moves or deletes a project folder. A project changes where a run starts, not what an agent running as you can read, so share only folders you trust people with. See [accounts](docs/configuration.md#accounts) and [projects](docs/configuration.md#projects).
 
 ## Knowing what's left

@@ -157,6 +157,16 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     ("account list", Entry::Row(Action::Accounts)),
+    // The selected account's commands show in the Accounts popup, where n
+    // renames them; the server makes them when it starts and as accounts
+    // change.
+    (
+        "account commands",
+        Entry::InPopup {
+            row: Action::Accounts,
+            key: "n",
+        },
+    ),
     // Usage gauges show for the selected account in the Accounts popup,
     // and u reads them now (`--refresh`).
     (

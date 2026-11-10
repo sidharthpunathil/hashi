@@ -971,6 +971,25 @@ pub enum AccountCommand {
         #[command(flatten)]
         bins: BinArgs,
     },
+    /// Show the shell commands that start Claude Code or Codex on each
+    /// account (`<name>-claude` and `<name>-dclaude`, `<name>-codex` and
+    /// `<name>-dcodex`), making any that are missing, or rename them.
+    Commands {
+        /// The agent whose names --name, --skip-name and --reset change.
+        #[arg(long, default_value = "claude")]
+        agent: AgentKind,
+        /// Name pattern of the plain command, with {name} for the account
+        /// name, such as '{name}-claude'. Empty turns it off.
+        #[arg(long, value_name = "PATTERN")]
+        name: Option<String>,
+        /// Name pattern of the command that skips permission prompts, such
+        /// as '{name}-dclaude'. Empty turns it off.
+        #[arg(long, value_name = "PATTERN")]
+        skip_name: Option<String>,
+        /// Go back to the agent's default names.
+        #[arg(long, conflicts_with_all = ["name", "skip_name"])]
+        reset: bool,
+    },
     /// Stop using an account until it is enabled again.
     Disable {
         /// Agent the account is for.
@@ -1141,6 +1160,145 @@ fn add_remote_account(
     Ok(())
 }
 
+/// After an account is added or signed in: the commands that start the
+/// agent's CLI on it, or why there are none.
+fn print_account_commands(store: &Store, home: &Path, agent: AgentKind, name: &str) {
+    let Some(spec) = acct::commands::spec(agent) else {
+        return;
+    };
+    match acct::commands::sync(store, home) {
+        Ok(r) => {
+            let mine = r.for_account(agent, name);
+            if !mine.is_empty() {
+                println!(
+                    "start {} on it with: {}  (in {})",
+                    agent.display_name(),
+                    mine.join(" or "),
+                    r.dir.display()
+                );
+            }
+            let names = acct::commands::Names::load(home);
+            let own: Vec<String> = [false, true]
+                .into_iter()
+                .filter_map(|skip| names.command(spec, name, skip))
+                .collect();
+            for (command, why) in r.skipped.iter().filter(|(c, _)| own.contains(c)) {
+                eprintln!("warning: no {command} command: {}", terminal_safe(why));
+            }
+        }
+        Err(why) => println!("no account commands: {why}"),
+    }
+}
+
+/// `hashi account commands`: saves new patterns when given, then syncs
+/// and lists.
+fn account_commands(
+    store: &Store,
+    home: &Path,
+    agent: AgentKind,
+    name: Option<String>,
+    skip_name: Option<String>,
+    reset: bool,
+) -> Result<()> {
+    if name.is_some() || skip_name.is_some() || reset {
+        let Some(spec) = acct::commands::spec(agent) else {
+            bail!(
+                "{} has no account commands; they are for claude and codex",
+                agent.display_name()
+            );
+        };
+        let mut names = acct::commands::Names::load(home);
+        let mut pair = names.pair(spec);
+        if reset {
+            pair = acct::commands::Pair {
+                plain: spec.plain.to_owned(),
+                skip: spec.skip.to_owned(),
+            };
+        }
+        if let Some(p) = name {
+            pair.plain = p;
+        }
+        if let Some(p) = skip_name {
+            pair.skip = p;
+        }
+        names.set(agent, pair.clone());
+        names.save(home).map_err(|e| anyhow::anyhow!(e))?;
+        store.audit(
+            "cli",
+            "account.commands",
+            agent.as_str(),
+            &format!("{} | {}", pair.plain, pair.skip),
+        )?;
+        let shown = |p: &str| {
+            if p.is_empty() {
+                "off".to_owned()
+            } else {
+                p.to_owned()
+            }
+        };
+        println!(
+            "{} commands: {} and {} (skip permissions)",
+            agent.display_name(),
+            shown(&pair.plain),
+            shown(&pair.skip)
+        );
+    }
+    let r = match acct::commands::sync(store, home) {
+        Ok(r) => r,
+        Err(why) => {
+            println!("No account commands: {why}.");
+            println!(
+                "Hashi puts them next to the hashi command your PATH finds. Without them, start \
+                 Claude Code on an account with:"
+            );
+            println!(
+                "  CLAUDE_CONFIG_DIR=\"{}/claude/<name>\" claude",
+                acct::root(home).display()
+            );
+            return Ok(());
+        }
+    };
+    for c in &r.written {
+        println!("made {c}");
+    }
+    for c in &r.removed {
+        println!("deleted {c}");
+    }
+    if r.commands.is_empty() {
+        println!(
+            "No account commands yet: they are made for Claude Code and Codex accounts. Add one \
+             with `hashi account add claude <name>`."
+        );
+    } else {
+        let rows: Vec<Vec<String>> = r
+            .commands
+            .iter()
+            .map(|m| {
+                vec![
+                    m.command.clone(),
+                    format!("{}:{}", m.agent, m.name),
+                    m.runs(),
+                ]
+            })
+            .collect();
+        print_table(&["COMMAND", "ACCOUNT", "RUNS"], &rows);
+        println!();
+        println!(
+            "In {}. Arguments go on to the CLI, as in `{} --resume`.",
+            r.dir.display(),
+            r.commands[0].command
+        );
+    }
+    println!(
+        "Rename them with `hashi account commands --agent codex --name 'cx-{{name}}'` (an empty \
+         pattern turns one off), or n in the dashboard's Accounts popup."
+    );
+    for (c, why) in &r.skipped {
+        eprintln!("warning: no {c} command: {}", terminal_safe(why));
+    }
+    Ok(())
+}
+
 /// Runs a `hashi account` command.
 ///
 /// # Errors
@@ -1195,6 +1353,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             println!(
                 "use it with: hashi token update <id> --account {agent}={name}  (or --account on token create and share)"
             );
+            print_account_commands(store, home, agent, &name);
         }
         AccountCommand::Login {
             agent,
@@ -1206,7 +1365,14 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             // the owner's own Crush config never loads; sign it in here.
             acct::ops::prepare_login(store, home, agent, &name)?;
             sign_in(home, agent, &name, yes, &bins)?;
+            print_account_commands(store, home, agent, &name);
         }
+        AccountCommand::Commands {
+            agent,
+            name,
+            skip_name,
+            reset,
+        } => account_commands(store, home, agent, name, skip_name, reset)?,
         AccountCommand::List { json, bins } => {
             let now = now_ms();
             let rotate_at = cli_rotate_at();
@@ -1270,6 +1436,17 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                 ],
                 &rows,
             );
+            // Also makes the commands of accounts added before Hashi had them.
+            if let Ok(r) = acct::commands::sync(store, home)
+                && !r.commands.is_empty()
+            {
+                let list: Vec<&str> = r.commands.iter().map(|m| m.command.as_str()).collect();
+                println!();
+                println!(
+                    "Start an agent on an account with: {}  (see hashi account commands)",
+                    list.join(", ")
+                );
+            }
         }
         AccountCommand::Usage {
             agent,
@@ -1305,6 +1482,23 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     return Ok(());
                 }
             }
+            let had: Vec<(PathBuf, String)> = acct::commands::sync(store, home)
+                .map(|r| {
+                    r.commands
+                        .iter()
+                        .filter(|m| m.agent == agent && m.name == name)
+                        .map(|m| {
+                            let c = &m.command;
+                            let file = if cfg!(windows) {
+                                format!("{c}.cmd")
+                            } else {
+                                c.clone()
+                            };
+                            (r.dir.join(file), c.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let (removed, dir) = acct::ops::remove(store, home, agent, &name, "cli")?;
             println!(
                 "removed {agent}:{name}; taken off {} token(s) and {} invite(s)",
@@ -1312,6 +1506,23 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             );
             if let Err(e) = dir {
                 eprintln!("warning: could not delete its directory: {e}");
+            }
+            let deleted: Vec<&str> = had
+                .iter()
+                .filter(|(path, _)| std::fs::symlink_metadata(path).is_err())
+                .map(|(_, c)| c.as_str())
+                .collect();
+            if !deleted.is_empty() {
+                println!("deleted the commands {}", deleted.join(" and "));
+            }
+            for (path, c) in had
+                .iter()
+                .filter(|(p, _)| std::fs::symlink_metadata(p).is_ok())
+            {
+                eprintln!(
+                    "warning: could not delete {c}; remove {} by hand",
+                    path.display()
+                );
             }
         }
     }

@@ -55,6 +55,10 @@ cargo deny check          # cargo install --locked cargo-deny
 
 Never bump a version without doing steps 1 to 3.
 
+## Disk space
+
+Builds pile up in `target/` over time, tens of gigabytes after a few weeks. `scripts/clean.sh` shows what it would free: the build output of this checkout and its worktrees, the Docker volumes of the e2e run, and worktrees with nothing uncommitted or unpushed. `scripts/clean.sh --yes` removes it; `--no-docker` and `--no-worktrees` leave those alone. The next build starts from scratch.
+
 ## Commit messages
 
 Use the imperative mood and keep the subject under about 72 characters, for example `Add per-token workspace cleanup`.

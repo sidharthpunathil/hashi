@@ -1414,7 +1414,7 @@ mod tests {
             home.path(),
             &hashi::settings::Settings {
                 port: Some(8000),
-                bind: None,
+                ..Default::default()
             },
         )
         .unwrap();

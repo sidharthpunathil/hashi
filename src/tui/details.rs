@@ -234,6 +234,8 @@ pub const fn details(action: Action) -> Details {
                 "l signs an account in again, d disables, e enables, x removes, u reads its \
                  usage now.",
                 "Each row shows how much of its usage windows is used and when they reset.",
+                "Each Claude Code and Codex account gets terminal commands, such as \
+                 work-claude and work-dclaude; n changes their names.",
             ],
             know: &[
                 "When an account hits its limit, Hashi moves to the next one, as the account \

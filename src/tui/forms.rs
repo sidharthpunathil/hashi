@@ -1291,6 +1291,76 @@ pub const BINDS: [(IpAddr, &str); 3] = [
     (IpAddr::V6(Ipv6Addr::UNSPECIFIED), "all interfaces"),
 ];
 
+/// The "account commands" form: the name patterns of the commands that
+/// start Claude Code and Codex on an account (see
+/// [`crate::accounts::commands`]).
+#[derive(Debug, Clone)]
+pub struct CommandNamesForm {
+    /// Focused field, `0..FIELDS`: Claude's plain and skip patterns, then
+    /// Codex's.
+    pub field: usize,
+    /// The patterns being typed, in field order.
+    pub patterns: [String; 4],
+    /// The field that failed and why.
+    pub error: Option<FieldError>,
+}
+
+impl CommandNamesForm {
+    /// Number of fields.
+    pub const FIELDS: usize = 4;
+
+    /// The form showing `names`.
+    #[must_use]
+    pub fn new(names: &crate::accounts::commands::Names) -> Self {
+        let [claude, codex] = crate::accounts::commands::SPECS.map(|s| names.pair(&s));
+        Self {
+            field: 0,
+            patterns: [claude.plain, claude.skip, codex.plain, codex.skip],
+            error: None,
+        }
+    }
+
+    /// The agent and whether it is the skip command, for field `i`.
+    #[must_use]
+    pub const fn target(i: usize) -> (AgentKind, bool) {
+        (
+            if i < 2 {
+                AgentKind::Claude
+            } else {
+                AgentKind::Codex
+            },
+            i % 2 == 1,
+        )
+    }
+
+    /// The field of `(agent, skip)`.
+    #[must_use]
+    pub fn field_of(agent: AgentKind, skip: bool) -> usize {
+        usize::from(agent == AgentKind::Codex) * 2 + usize::from(skip)
+    }
+
+    /// The patterns as [`crate::accounts::commands::Names`].
+    #[must_use]
+    pub fn names(&self) -> crate::accounts::commands::Names {
+        let mut names = crate::accounts::commands::Names::default();
+        let pair = |i: usize| crate::accounts::commands::Pair {
+            plain: self.patterns[i].trim().to_owned(),
+            skip: self.patterns[i + 1].trim().to_owned(),
+        };
+        names.set(AgentKind::Claude, pair(0));
+        names.set(AgentKind::Codex, pair(2));
+        names
+    }
+
+    /// Puts every pattern back to its default.
+    pub fn reset(&mut self) {
+        *self = Self {
+            field: self.field,
+            ..Self::new(&crate::accounts::commands::Names::default())
+        };
+    }
+}
+
 /// The "port and bind address" form.
 #[derive(Debug, Clone)]
 pub struct ListenForm {

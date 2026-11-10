@@ -71,6 +71,12 @@ todo = "warn"
 redundant_clone = "warn"
 needless_collect = "warn"
 
+# Dependencies build without debug info. Backtraces and the debugger still
+# see Hashi's own code, and target/ stays far smaller (scripts/clean.sh frees
+# what has piled up).
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1

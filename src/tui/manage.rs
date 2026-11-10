@@ -11,8 +11,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::access::{AcceptForm, DeclineForm, FormAction};
 use super::app::{Action, App, Done, PendingCommand, Popup, Tab};
 use super::forms::{
-    self, AccountForm, AskForm, ConnectForm, EditTokenForm, FieldError, ListenForm, ProjectForm,
-    ReportForm, ShareLoginForm, Target, cycle, edit, edit_secret,
+    self, AccountForm, AskForm, CommandNamesForm, ConnectForm, EditTokenForm, FieldError,
+    ListenForm, ProjectForm, ReportForm, ShareLoginForm, Target, cycle, edit, edit_secret,
 };
 use crate::accounts::{self as acct, AccountKind};
 use crate::agent::{AgentConfig, AgentKind};
@@ -33,6 +33,7 @@ impl Popup {
                 | Self::EditToken(_)
                 | Self::Ask(_)
                 | Self::AddAccount(_)
+                | Self::CommandNames(_)
                 | Self::Project(_)
                 | Self::Connect(_)
                 | Self::Listen(_)
@@ -397,6 +398,7 @@ impl App {
             }
             Popup::Accounts { selected } => self.accounts_key(selected, code),
             Popup::AddAccount(form) => self.add_account_key(form, code),
+            Popup::CommandNames(form) => self.command_names_key(form, code),
             Popup::ConfirmRemoveAccount {
                 agent,
                 name,
@@ -1020,6 +1022,13 @@ impl App {
                     Err(e) => self.notify(format!("{e:#}")),
                 }
             }
+            (KeyCode::Char('n'), _) => {
+                let names = self
+                    .home()
+                    .map(|h| acct::commands::Names::load(&h))
+                    .unwrap_or_default();
+                return Some(Popup::CommandNames(Box::new(CommandNamesForm::new(&names))));
+            }
             (KeyCode::Char('u'), Some(a)) => self.refresh_usage(a.agent, &a.name),
             (KeyCode::Char('c'), Some(a)) => {
                 match acct::ops::clear_limit(&self.state.store, a.agent, &a.name, ACTOR) {
@@ -1048,6 +1057,79 @@ impl App {
             _ => {}
         }
         Some(Popup::Accounts { selected })
+    }
+
+    fn command_names_key(
+        &mut self,
+        mut form: Box<CommandNamesForm>,
+        code: KeyCode,
+    ) -> Option<Popup> {
+        match code {
+            KeyCode::Esc => return Some(Popup::Accounts { selected: 0 }),
+            KeyCode::Enter => return self.submit_command_names(form),
+            _ if nav(&mut form.field, CommandNamesForm::FIELDS, code, |_| false) => {}
+            // `{` and `}` are typed into the patterns, so reset is a key
+            // a pattern never holds.
+            KeyCode::Char('*') => {
+                form.reset();
+                form.error = None;
+            }
+            _ => {
+                if edit(
+                    &mut form.patterns[form.field],
+                    code,
+                    acct::commands::MAX_PATTERN,
+                ) {
+                    form.error = None;
+                }
+            }
+        }
+        Some(Popup::CommandNames(form))
+    }
+
+    /// Saves the patterns and renames the commands to match.
+    fn submit_command_names(&mut self, mut form: Box<CommandNamesForm>) -> Option<Popup> {
+        let Some(home) = self.home() else {
+            self.notify("no Hashi home here");
+            return None;
+        };
+        let names = form.names();
+        if let Err(((agent, skip), why)) = names.check() {
+            let field = CommandNamesForm::field_of(agent, skip);
+            form.field = field;
+            form.error = Some((field, why));
+            return Some(Popup::CommandNames(form));
+        }
+        if let Err(why) = names.save(&home) {
+            form.error = Some((form.field, why));
+            return Some(Popup::CommandNames(form));
+        }
+        let detail = form.patterns.join(" | ");
+        self.audit("account.commands", "claude,codex", &detail);
+        let msg = match acct::commands::sync(&self.state.store, &home) {
+            Ok(r) => {
+                for c in &r.written {
+                    self.state.bus.log(format!("made the command {c}"));
+                }
+                for c in &r.removed {
+                    self.state.bus.log(format!("deleted the command {c}"));
+                }
+                for (c, why) in &r.skipped {
+                    self.state.bus.log(format!("no {c} command: {why}"));
+                }
+                match r.skipped.len() {
+                    0 => format!("account commands saved; {} in place", r.commands.len()),
+                    n => format!(
+                        "account commands saved; {} in place, {n} skipped (see the log)",
+                        r.commands.len()
+                    ),
+                }
+            }
+            Err(why) => format!("saved, but no commands: {why}"),
+        };
+        self.cache.clear();
+        self.notify(msg);
+        Some(Popup::Accounts { selected: 0 })
     }
 
     /// Hands the account's sign-in command to the event loop, which runs it

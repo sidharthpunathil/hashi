@@ -169,6 +169,30 @@ Crush's `default` account is not your own Crush login: it is `~/.hashi/accounts/
 
 A login account is the directory `~/.hashi/accounts/<agent>/<name>/` (mode `0700`). `hashi account add` prints the sign-in command with that variable set and, on a terminal, runs it with the terminal attached once you confirm (`--yes` skips the question); without a terminal it only prints it. It then checks the result with `claude auth status --json` for Claude Code, and for the other CLIs that the CLI wrote something into the directory. Every run on the account sets the variable to the same absolute path, which matters to Claude Code on macOS, whose Keychain entry is tied to that exact string. Hashi never reads, copies or refreshes what the CLI keeps there.
 
+**Starting Claude Code or Codex on an account yourself.** Each local Claude Code account (login, API key or OAuth token) and each Codex login account gets two commands:
+
+| Agent | Command | Runs |
+|---|---|---|
+| Claude Code | `<name>-claude` | `claude` |
+| Claude Code | `<name>-dclaude` | `claude --dangerously-skip-permissions` |
+| Codex | `<name>-codex` | `codex` |
+| Codex | `<name>-dcodex` | `codex --dangerously-bypass-approvals-and-sandbox` |
+
+Any arguments pass through (`rajat-claude --resume`). Each is a short script in the folder that holds the `hashi` your PATH finds, usually `~/.local/bin`, so it works in every shell and no startup file changes. It sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` to the account's directory (the same string Hashi's runs use, so the macOS Keychain login matches), clears the variables that would pick another sign-in (for Claude Code the `ANTHROPIC_*` and `CLAUDE_*` ones in the list above, such as `ANTHROPIC_API_KEY` and `CLAUDE_CODE_USE_BEDROCK`, but not your `AWS_*` or Google Cloud variables; for Codex the `OPENAI_*` and `CODEX_*` ones), reads a Claude key account's key from its file at run time, and starts the CLI from PATH. Codex API-key accounts get no commands, since Codex reads a key from the environment only in `codex exec`. If the account's directory is gone the command says so and stops, instead of letting the CLI make a fresh signed-out one.
+
+```bash
+hashi account commands                                   # list them, making any that are missing
+rajat-dclaude -c                                         # Claude Code as claude:rajat, no permission prompts
+hashi account commands --agent codex --name 'cx-{name}' --skip-name ''   # cx-rajat, and no skip command
+hashi account commands --agent codex --reset             # back to <name>-codex and <name>-dcodex
+```
+
+**Names.** Each command's name is a pattern with `{name}` for the account's name, once, plus other text from letters, digits, `.`, `_` and `-` (so an account name is never a command by itself), not starting with `-` or `.`, at most 40 characters. An empty pattern turns that command off. No two patterns may be the same. Change them with `hashi account commands --agent <claude|codex> --name <pattern> --skip-name <pattern>` or `--reset`, or with `n` in the dashboard's Accounts popup, which shows what each pattern makes and `*` puts the defaults back. They are saved in `settings.json` as `accountCommands`, and renaming deletes the old commands and makes the new ones at once.
+
+**When they change.** Hashi makes them on `account add` and `account login`, deletes them on `account remove` or when the account's directory is gone, and catches up on `hashi account list`, `hashi account commands` and when the server starts, so it also fixes them after an upgrade or a change made by hand. A disabled, limited or signed-out account keeps its commands: disabling only stops Hashi's runs, and a signed-out one signs in again from the CLI itself. Remote and pool accounts get none, since nothing runs on this machine, and neither does a login someone shared with you, whose use is meant to go through Hashi.
+
+**What is never touched.** Each script carries a `hashi-account-command home=<home>` line, and Hashi only rewrites or deletes files with its own home's line: a file of the same name you wrote, or another Hashi home's command, is left alone. A command whose name is a program elsewhere on your PATH is not made, so a pattern can never hide one (an account `s` with the pattern `l{name}` does not get `ls`). Two accounts whose names would make the same command get neither. `hashi account commands` says why it skipped each. There are none when the running `hashi` is not the one on PATH (a development build), and `HASHI_NO_ACCOUNT_COMMANDS=1` turns them off. `hashi uninstall` deletes them with the home; `--keep-data` keeps them. On Windows they are `.cmd` files.
+
 A key account keeps its key in `~/.hashi/accounts/<agent>/<name>/key` (mode `0600`) and passes it in the variable above. Its runs also point the login directory variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`) at that same directory, so your own `~/.claude`, `~/.codex` or `~/.gemini` settings never decide which credentials the run uses. The key is never accepted as an argument and never printed, logged or returned by the API.
 
 **Failover.** A run uses the first account in the token's list that is enabled and not limited. When it fails with that agent's usage limit message, the account is marked limited until the reset time in the message, or for `--account-cooldown`, and the prompt goes back to the front of the queue to run on the next account. This is not counted as an interruption, and each account is tried at most once per prompt. With none left, the prompt fails with "every account for <agent> this token can use is at its limit until <time>". A successful run clears the account's limited mark. Messages recognised:

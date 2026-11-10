@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentKind, EnvOverride};
 
+pub mod commands;
 pub mod ops;
 
 /// Name of the implicit account that is the owner's own login.
