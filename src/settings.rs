@@ -1,5 +1,6 @@
 //! `<home>/settings.json`: choices made in the dashboard that last past a
-//! restart, so far the port and bind address.
+//! restart: the port and bind address, and the names of the account
+//! commands (see [`crate::accounts::commands`]).
 //!
 //! At startup each value comes from the first of: its flag, its
 //! environment variable, this file, the built-in default. The file is
@@ -18,7 +19,7 @@ pub const DEFAULT_PORT: u16 = 7878;
 pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// The saved choices. A missing field means "not saved".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     /// Port to listen on.
@@ -27,6 +28,9 @@ pub struct Settings {
     /// Address to listen on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<IpAddr>,
+    /// Name patterns of the `<name>-claude` style account commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_commands: Option<crate::accounts::commands::Names>,
 }
 
 /// Where a value in effect came from.
@@ -127,6 +131,7 @@ mod tests {
         let s = Settings {
             port: Some(8080),
             bind: Some("0.0.0.0".parse().unwrap()),
+            ..Settings::default()
         };
         save(dir.path(), &s).unwrap();
         assert_eq!(load(dir.path()).unwrap(), s);
@@ -144,7 +149,7 @@ mod tests {
             dir.path(),
             &Settings {
                 port: Some(9),
-                bind: None,
+                ..Settings::default()
             },
         )
         .unwrap();

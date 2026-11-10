@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Every local Claude Code and Codex account gets two shell commands that start the CLI signed in as that account: `<name>-claude` and `<name>-dclaude` (with `--dangerously-skip-permissions`), and `<name>-codex` and `<name>-dcodex` (with `--dangerously-bypass-approvals-and-sandbox`) for Codex logins. Arguments pass through, as in `rajat-claude --resume`. They are small scripts next to the `hashi` command your PATH finds (usually `~/.local/bin`), so no shell startup file is edited. Hashi makes them when an account is added or signed in again, deletes them when it is removed or its folder is gone, and catches up on `hashi account list`, `hashi account commands` and when the server starts, so accounts added before this release get theirs too. The names are patterns you can change, or empty to turn one off: `n` in the dashboard's Accounts popup, or `hashi account commands --agent codex --name 'cx-{name}' --skip-name ''`; renaming deletes the old commands. A command is never made over a file Hashi did not write or with the name of a program elsewhere on your PATH. `hashi uninstall` removes them, and `HASHI_NO_ACCOUNT_COMMANDS=1` turns them off.
+
 ## [0.3.4] - 2026-11-10
 
 ### Added

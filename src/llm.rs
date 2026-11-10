@@ -389,6 +389,7 @@ hashi account usage --refresh --json
 ```
 
 - A login account prints its sign-in command. The owner runs it in a terminal; then check with `hashi account list`.
+- Each Claude Code account gets the shell commands `<name>-claude` and `<name>-dclaude` (`claude --dangerously-skip-permissions`), and each Codex login `<name>-codex` and `<name>-dcodex` (`codex --dangerously-bypass-approvals-and-sandbox`), next to the `hashi` on PATH, made and deleted with the account. `hashi account commands` lists them; `--agent <claude|codex> --name <pattern> --skip-name <pattern>` renames them (`{name}` is the account name, empty turns one off) and `--reset` restores the defaults. For the owner to use an account in their own terminal, point them there.
 - Never ask the owner to paste a key into the chat. Use `--key-env <VAR>` with a variable they set, or `--key-stdin` in their own terminal.
 - Put an account on a token with `hashi token update <id> --account claude=work,personal`.
 - `hashi account disable`, `enable` and `clear-limit` take `<agent> <name>`. `hashi account remove` deletes the account and its key (ask first).

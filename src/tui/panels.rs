@@ -10,7 +10,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap};
 
 use super::app::{App, Popup};
-use super::forms::{self, AccountForm, AskForm, EditTokenForm, ListenForm, ProjectForm};
+use super::forms::{
+    self, AccountForm, AskForm, CommandNamesForm, EditTokenForm, ListenForm, ProjectForm,
+};
 use super::theme as t;
 use super::ui::{
     SELECT, centered, fit_columns, form_field, form_text, form_toggle, key_hint, key_hints, modal,
@@ -101,6 +103,7 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
         } => remote_answer(frame, remote, answer.as_ref(), *scroll, app.tick),
         Popup::Accounts { selected } => accounts(app, frame, *selected),
         Popup::AddAccount(form) => add_account(frame, form, app.tick),
+        Popup::CommandNames(form) => command_names(app, frame, form, app.tick),
         Popup::ConfirmRemoveAccount {
             agent,
             name,
@@ -663,6 +666,15 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ),
         ]));
     }
+    if let Some(sel) = list.get(selected)
+        && !sel.commands.is_empty()
+    {
+        foot.push(Line::from(vec![
+            Span::styled("start  ", t::muted()),
+            Span::styled(sel.commands.join(" or "), plain()),
+            Span::styled("  in your terminal: this account's CLI", t::muted()),
+        ]));
+    }
     match usage {
         Some(u) => foot.extend(super::usage::lines(&[u], rotate_at, 24)),
         None if list.is_empty() => {}
@@ -698,10 +710,66 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ("e", "enable"),
             ("c", "clear limit"),
             ("u", "read usage"),
+            ("n", "command names"),
             ("x", "remove"),
             ("esc", "close"),
         ],
     );
+}
+
+/// The account commands' name patterns, with what each makes for an
+/// example account.
+fn command_names(app: &App, frame: &mut Frame, form: &CommandNamesForm, tick: u64) {
+    const W: usize = 16;
+    let labels = ["claude", "claude, skip", "codex", "codex, skip"];
+    let example = app
+        .account_table()
+        .iter()
+        .map(|r| r.state.name.clone())
+        .next()
+        .unwrap_or_else(|| "work".to_owned());
+    let mut fields = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        let focused = form.field == i;
+        let mut spans = form_text(&form.patterns[i], focused, "off", tick);
+        let pattern = form.patterns[i].trim();
+        let preview = if pattern.is_empty() {
+            "  off".to_owned()
+        } else if crate::accounts::commands::check_pattern(pattern).is_ok() {
+            let (agent, skip) = CommandNamesForm::target(i);
+            let runs = crate::accounts::commands::spec(agent).map_or_else(String::new, |s| {
+                if skip {
+                    format!("{} {}", s.bin, s.skip_flag)
+                } else {
+                    s.bin.to_owned()
+                }
+            });
+            format!(
+                "  {} runs {runs}",
+                pattern.replace(crate::accounts::commands::PLACEHOLDER, &example)
+            )
+        } else {
+            String::new()
+        };
+        spans.push(Span::styled(preview, t::muted()));
+        fields.push(form_field(focused, label, W, spans));
+    }
+    let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
+    lines.push(Line::raw(""));
+    lines.push(muted_line(
+        "  {name} is the account's name. Leave a field empty to turn that command off.",
+    ));
+    lines.push(muted_line(
+        "  Commands go next to the hashi on your PATH; renaming deletes the old ones.",
+    ));
+    lines.push(Line::raw(""));
+    lines.push(key_hint(&[
+        ("↑↓", "field"),
+        ("*", "defaults"),
+        ("enter", "save"),
+        ("esc", "back"),
+    ]));
+    fitted(frame, 92, "account commands", lines);
 }
 
 fn add_account(frame: &mut Frame, form: &AccountForm, tick: u64) {

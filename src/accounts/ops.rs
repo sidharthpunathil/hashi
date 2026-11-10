@@ -98,7 +98,16 @@ pub fn create(
         &format!("{agent}:{name}"),
         kind.as_str(),
     )?;
+    sync_commands(store, home);
     Ok(dir)
+}
+
+/// Brings the `<name>-claude` commands up to date (see
+/// [`acct::commands`]). Best effort: an account change never fails on it.
+pub fn sync_commands(store: &Store, home: &Path) {
+    if let Err(e) = acct::commands::sync(store, home) {
+        tracing::debug!("account commands not synced: {e}");
+    }
 }
 
 /// Shown whenever a remote account is added, by `hashi account add
@@ -189,6 +198,7 @@ pub fn prepare_login(store: &Store, home: &Path, agent: AgentKind, name: &str) -
         _ => bail!("no {agent} account named {name}"),
     }
     acct::create_dir(home, agent, name).context("preparing the account directory")?;
+    sync_commands(store, home);
     Ok(())
 }
 
@@ -282,6 +292,7 @@ pub fn remove(
     let removed = store.remove_account(agent, name)?;
     let dir = acct::remove_dir(home, agent, name);
     store.audit(actor, "account.remove", &format!("{agent}:{name}"), "")?;
+    sync_commands(store, home);
     Ok((removed, dir))
 }
 

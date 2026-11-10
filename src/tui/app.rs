@@ -7,8 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
 
 use super::forms::{
-    AccountForm, AskForm, ConnectForm, EditTokenForm, ListenForm, ProjectForm, ReportForm,
-    ShareLoginForm,
+    AccountForm, AskForm, CommandNamesForm, ConnectForm, EditTokenForm, ListenForm, ProjectForm,
+    ReportForm, ShareLoginForm,
 };
 use super::one_line;
 use super::theme::{self, Rgb};
@@ -773,6 +773,8 @@ pub enum Popup {
     },
     /// "Add account" form.
     AddAccount(Box<AccountForm>),
+    /// The account commands' name patterns.
+    CommandNames(Box<CommandNamesForm>),
     /// Account removal confirmation.
     ConfirmRemoveAccount {
         /// The agent.
@@ -1448,6 +1450,7 @@ impl App {
             | Popup::RemoteAnswer { .. }
             | Popup::Accounts { .. }
             | Popup::AddAccount(_)
+            | Popup::CommandNames(_)
             | Popup::ConfirmRemoveAccount { .. }
             | Popup::Projects { .. }
             | Popup::Project(_)

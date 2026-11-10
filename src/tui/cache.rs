@@ -27,6 +27,8 @@ pub struct AccountRow {
     pub signed_in: String,
     /// Tokens that list it.
     pub tokens: usize,
+    /// Its `<name>-claude` shell commands (see [`crate::accounts::commands`]).
+    pub commands: Vec<String>,
 }
 
 /// Entries loaded for the frames between two refreshes.
@@ -178,6 +180,9 @@ impl App {
                             .is_some_and(|l| l.contains(&a.name))
                     })
                     .count(),
+                commands: self.home().map_or_else(Vec::new, |home| {
+                    crate::accounts::commands::existing_for(&home, a.agent, &a.name)
+                }),
                 state: a.clone(),
             })
             .collect();

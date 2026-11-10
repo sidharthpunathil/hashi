@@ -349,7 +349,11 @@ pub fn add_shared_login(
         Some(&grant.key),
         actor,
     )?;
-    store.set_account_share(grant.agent, &name, remote, grant.remind_at, grant.until)?;
+    let shared = store.set_account_share(grant.agent, &name, remote, grant.remind_at, grant.until);
+    // `create` synced before the share was recorded; a shared login gets
+    // no `<name>-claude` command, so its use goes through Hashi.
+    acct::ops::sync_commands(store, home);
+    shared?;
     Ok(name)
 }
 

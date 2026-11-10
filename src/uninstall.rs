@@ -293,6 +293,9 @@ pub struct Target {
     pub user_home: Option<PathBuf>,
     /// Windows: the user PATH and the installer's directory.
     pub user_path: Option<(String, PathBuf)>,
+    /// The folder holding the `<name>-claude` account commands, when the
+    /// running binary is on PATH.
+    pub commands_dir: Option<PathBuf>,
 }
 
 /// Everything `hashi uninstall` would remove.
@@ -312,6 +315,8 @@ pub struct Plan {
     pub remotes: Vec<(String, String)>,
     /// A problem reading `remotes.json`.
     pub remotes_error: Option<String>,
+    /// The `<name>-claude` account commands this home wrote.
+    pub commands: Vec<PathBuf>,
 }
 
 impl Plan {
@@ -324,6 +329,7 @@ impl Plan {
             && self.old_exe.is_none()
             && self.home.is_none()
             && self.path_entry.is_none()
+            && self.commands.is_empty()
     }
 }
 
@@ -361,6 +367,11 @@ pub fn plan(t: &Target, keep_data: bool) -> Result<Plan> {
         if holds_exe && let Some(rest) = without_path_entry(path, &dir_s) {
             plan.path_entry = Some((dir_s.into_owned(), rest));
         }
+    }
+    // They start Claude Code on the accounts in the home, so they go with
+    // it, and stay when --keep-data keeps it.
+    if !keep_data && let Some(dir) = &t.commands_dir {
+        plan.commands = crate::accounts::commands::owned_in(dir, &t.home, cfg!(windows));
     }
     if keep_data {
         if t.home.exists() {
@@ -417,6 +428,12 @@ pub fn describe(plan: &Plan) -> String {
     if let Some(path) = &plan.kept_home {
         out.push(format!("  data        {}  (kept: --keep-data)", p(path)));
     }
+    for path in &plan.commands {
+        out.push(format!(
+            "  command     {}  (starts Claude Code on an account)",
+            p(path)
+        ));
+    }
     if let Some((dir, _)) = &plan.path_entry {
         out.push(format!(
             "  PATH entry  {}  (your user PATH)",
@@ -469,6 +486,9 @@ pub fn remove_files(plan: &Plan, current_exe: Option<&Path>) -> Removed {
         Ok(()) => r.done.push(path.to_path_buf()),
         Err(e) => r.failed.push(format!("{}: {e}", path.display())),
     };
+    for path in &plan.commands {
+        record(path, std::fs::remove_file(path));
+    }
     if let Some((home, _)) = &plan.home {
         record(home, remove_home(home));
     }
@@ -624,6 +644,7 @@ fn current_target(home: &Path) -> Target {
         default_home: user_home.as_ref().map(|h| h.join(DEFAULT_HOME_NAME)),
         user_home,
         user_path,
+        commands_dir: crate::accounts::commands::found_on_path().ok(),
     }
 }
 
@@ -824,7 +845,52 @@ mod tests {
             default_home: None,
             user_home: Some(root.join("user")),
             user_path: None,
+            commands_dir: Some(root.join("bin")),
         }
+    }
+
+    #[test]
+    fn removes_the_homes_account_commands_and_nothing_else() {
+        use crate::accounts::{self as acct, AccountKind};
+        use crate::agent::AgentKind;
+        let tmp = tmp();
+        let t = fake_install(tmp.path());
+        let bin = tmp.path().join("bin");
+        acct::create_dir(&t.home, AgentKind::Claude, "rajat").unwrap();
+        let account = acct::commands::test_account("rajat", AccountKind::Login);
+        let windows = cfg!(windows);
+        let r = acct::commands::sync_in(
+            &bin,
+            &t.home,
+            &[account],
+            &acct::commands::Names::default(),
+            &[],
+            windows,
+        );
+        assert_eq!(r.commands.len(), 2);
+        let mine = if windows {
+            "mine-claude.cmd"
+        } else {
+            "mine-claude"
+        };
+        write(&bin.join(mine), "someone else's");
+
+        let kept = plan(&t, true).unwrap();
+        assert!(
+            kept.commands.is_empty(),
+            "--keep-data keeps them with the accounts"
+        );
+        let plan = plan(&t, false).unwrap();
+        assert_eq!(plan.commands.len(), 2);
+        assert!(describe(&plan).contains("rajat-dclaude"));
+        let removed = remove_files(&plan, None);
+        assert!(removed.failed.is_empty(), "{:?}", removed.failed);
+        let mut left: Vec<String> = std::fs::read_dir(&bin)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [mine.to_owned()]);
     }
 
     fn err_text<T: std::fmt::Debug>(r: Result<T>) -> String {
