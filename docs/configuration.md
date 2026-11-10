@@ -78,7 +78,7 @@ hashi request '<ask-access link>' --name Sam      # on a friend's machine: ask s
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
-hashi update                               # install the latest release (--check, --version v0.3.4, --allow-downgrade, --yes)
+hashi update                               # install the latest release (--check, --version v0.4.0, --allow-downgrade, --yes)
 hashi uninstall                            # remove the binary and ~/.hashi (--dry-run, --keep-data, --yes)
 hashi llm                                  # a Markdown guide for an LLM agent (alias: hashi guide)
 hashi llm --output hashi-guide.md          # write it to a file readable only by you
@@ -96,9 +96,9 @@ hashi token list --json | jq -r '.tokens[] | select(.status == "paused") | .name
 
 `hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
-The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.3.4`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
+The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.4.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
 
-- `--version v0.3.4` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
+- `--version v0.4.0` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
 - Downloads are HTTPS only, and only a regular file in the archive is installed (see [supply chain](security-model.md#supply-chain)).
 
 ### Invites and limits
@@ -441,17 +441,17 @@ Running requests count up their elapsed time, and every status pairs a symbol wi
 
 | Variable | Effect |
 |---|---|
-| `HASHI_VERSION=v0.3.4` | Install a specific release instead of the latest |
+| `HASHI_VERSION=v0.4.0` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
 | `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect -- <link>` instead of `hashi doctor`. Only a link of the shape the claim page builds (`https://<host>[:port]/claim/hashi_inv_<hex>`, or `http://` on loopback) is accepted; anything else stops the installer before it downloads. It fails with a clear message if the link is used up or expired |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.3.4 sh
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.4.0 sh
 ```
 
 ```powershell
-$env:HASHI_VERSION = "v0.3.4"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+$env:HASHI_VERSION = "v0.4.0"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
 The claim page builds the one-command setup for an invited person from its own link:
