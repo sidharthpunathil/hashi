@@ -42,7 +42,7 @@ pub fn check_new(
             agent.display_name(),
             match agent {
                 AgentKind::Cursor => "; add an API key with --kind api-key",
-                AgentKind::Opencode | AgentKind::Qwen | AgentKind::Crush => "; add a login account",
+                AgentKind::Opencode | AgentKind::Qwen => "; add a login account",
                 _ => "",
             }
         );
@@ -176,18 +176,13 @@ pub fn add_remote(
 }
 
 /// Gets a login account ready to sign in again: its directory exists and it
-/// is a login. Crush's default account counts, since Hashi owns its
-/// directory too.
+/// is a login.
 ///
 /// # Errors
 ///
 /// Fails when there is no such login account or the directory cannot be
 /// made.
 pub fn prepare_login(store: &Store, home: &Path, agent: AgentKind, name: &str) -> Result<()> {
-    if agent == AgentKind::Crush && name == acct::DEFAULT {
-        acct::crush_default_dir(home).context("preparing the account directory")?;
-        return Ok(());
-    }
     acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))?;
     match store.get_account(agent, name)? {
         Some(a) if a.kind == AccountKind::Login => {}
@@ -337,7 +332,6 @@ pub fn account_command(
         let upper = key.to_string_lossy().to_ascii_uppercase();
         let removed = acct::credential_vars(agent)
             .iter()
-            .chain(acct::always_removed(agent))
             .any(|p| crate::agent::runner::env_name_matches(p, &upper));
         if crate::agent::runner::is_hashi_secret(&key) || removed {
             cmd.env_remove(&key);
@@ -497,7 +491,7 @@ fn switch_ctx<'a>(
     }
 }
 
-/// `hashi account reset`: puts the plain `claude` and `codex` commands back
+/// `hashi account reset`: puts the plain `claude`, `codex`, `gemini` and `opencode` commands back
 /// on the owner's original logins, deletes Hashi's copies of them, clears
 /// the skip-permissions words and deletes every command Hashi wrote. The
 /// accounts themselves stay. Returns one line per thing done.
@@ -512,7 +506,7 @@ pub fn reset(store: &Store, home: &Path, actor: &str) -> Result<Vec<String>> {
     let keychain = acct::switch::Keychain::new();
     let ctx = switch_ctx(home, &live, &keychain);
     let mut done = Vec::new();
-    for agent in [AgentKind::Claude, AgentKind::Codex] {
+    for agent in acct::switch::AGENTS {
         match acct::switch::reset(&ctx, agent).map_err(|e| anyhow::anyhow!(e))? {
             Reset::AlreadyClean => {}
             Reset::Restored { from } => {
@@ -532,6 +526,6 @@ pub fn reset(store: &Store, home: &Path, actor: &str) -> Result<Vec<String>> {
         Ok(r) => done.extend(r.removed.iter().map(|c| format!("deleted the command {c}"))),
         Err(e) => tracing::debug!("commands not synced: {e}"),
     }
-    store.audit(actor, "account.reset", "claude,codex", &done.join("; "))?;
+    store.audit(actor, "account.reset", "all", &done.join("; "))?;
     Ok(done)
 }

@@ -1503,18 +1503,11 @@ impl App {
     }
 
     /// The agents a new project allows when none are typed: the installed
-    /// ones, Crush only when listed, or every agent when none is installed.
+    /// ones, or every agent when none is installed.
     fn project_agents(&self) -> Vec<AgentKind> {
-        let found: Vec<AgentKind> = self
-            .installed_agents()
-            .into_iter()
-            .filter(|a| *a != AgentKind::Crush)
-            .collect();
+        let found = self.installed_agents();
         if found.is_empty() {
-            AgentKind::ALL
-                .into_iter()
-                .filter(|a| *a != AgentKind::Crush)
-                .collect()
+            AgentKind::ALL.to_vec()
         } else {
             found
         }

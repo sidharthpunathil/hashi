@@ -112,8 +112,6 @@ pub enum Action {
     InstallCloudflared,
     /// Install tailscale.
     InstallTailscale,
-    /// Install Crush.
-    InstallCrush,
     /// Check for a newer release.
     CheckUpdate,
     /// Download and install the latest release.
@@ -132,7 +130,7 @@ pub enum Action {
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 25] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
@@ -151,7 +149,6 @@ impl Action {
         Self::CopyUrl,
         Self::InstallCloudflared,
         Self::InstallTailscale,
-        Self::InstallCrush,
         Self::CheckUpdate,
         Self::InstallUpdate,
         Self::Doctor,
@@ -176,7 +173,7 @@ impl Action {
             Self::Ask => "Ask",
             Self::Accounts | Self::Projects | Self::Bridges | Self::Connect => "Manage",
             Self::Listen | Self::CopyUrl => "Server",
-            Self::InstallCloudflared | Self::InstallTailscale | Self::InstallCrush => "Install",
+            Self::InstallCloudflared | Self::InstallTailscale => "Install",
             Self::CheckUpdate | Self::InstallUpdate | Self::Doctor | Self::Report | Self::Audit => {
                 "Maintenance"
             }
@@ -220,7 +217,6 @@ impl Action {
             Self::CopyUrl => "Copy the API URL",
             Self::InstallCloudflared => "Install cloudflared",
             Self::InstallTailscale => "Install tailscale",
-            Self::InstallCrush => "Install Crush",
             Self::CheckUpdate => "Check for updates",
             Self::InstallUpdate => "Install the update",
             Self::Doctor => "Doctor",
@@ -253,7 +249,6 @@ impl Action {
             Self::CopyUrl => "the base URL clients should use",
             Self::InstallCloudflared => "Cloudflare's own install command for this machine",
             Self::InstallTailscale => "Tailscale's own install command for this machine",
-            Self::InstallCrush => "Charm's own install command (Crush is opt-in)",
             Self::CheckUpdate => "ask GitHub for the latest release",
             Self::InstallUpdate => "download, verify and replace this binary",
             Self::Doctor => "agents, helpers, accounts, updates and the home",
@@ -986,7 +981,8 @@ pub struct App {
     /// The request detail pane, kept between frames.
     pub detail_cache: super::ui::DetailCache,
     pub(crate) last_refresh: Option<Instant>,
-    /// Who plain `claude` and `codex` sign in as, and when that was read.
+    /// Who each switchable agent's plain command signs in as, and when
+    /// that was read.
     pub(crate) plain_logins: (Option<Instant>, Vec<crate::accounts::switch::PlainLogin>),
     /// The selected request in full, for the detail pane.
     pub(crate) detail: Option<Request>,
@@ -1005,8 +1001,6 @@ pub struct App {
     tailscale_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// The whole answer of the last `tailscale status --json`, for the doctor.
     pub(crate) tailscale_self: Shared<Option<Result<crate::tailscale::SelfStatus, String>>>,
-    /// Where `crush` is, if installed.
-    pub crush: Option<std::path::PathBuf>,
     /// Background work that has finished, waiting for the next tick.
     pub(crate) done: Shared<Vec<Done>>,
     /// Requests for access waiting for the owner: the Commands tab's badge.
@@ -1072,7 +1066,6 @@ impl App {
             tailscale_bin: None,
             tailscale_state: std::sync::Arc::default(),
             tailscale_self: std::sync::Arc::default(),
-            crush: None,
             done: std::sync::Arc::default(),
             access_pending: 0,
             request_checks: None,
@@ -2047,8 +2040,6 @@ impl App {
         match helper {
             Helper::Cloudflared => self.cloudflared.as_deref(),
             Helper::Tailscale => self.tailscale_bin.as_deref(),
-            // An agent, not a helper of the dashboard.
-            Helper::Crush => self.crush.as_deref(),
         }
     }
 
@@ -2058,7 +2049,6 @@ impl App {
         let ts_custom = rt.tailscale.settings().and_then(|s| s.bin.clone());
         self.cloudflared = crate::install::locate(Helper::Cloudflared, cf_custom.as_deref());
         self.tailscale_bin = crate::install::locate(Helper::Tailscale, ts_custom.as_deref());
-        self.crush = crate::install::locate(Helper::Crush, None);
     }
 
     /// Asks `tailscale status --json` in the background whether this device
@@ -2111,11 +2101,11 @@ impl App {
             Action::NewToken => {
                 self.popup = Some(Popup::NewToken(TokenForm::new(self.project_names())));
             }
-            Action::InstallCloudflared | Action::InstallTailscale | Action::InstallCrush => {
-                let helper = match action {
-                    Action::InstallCloudflared => Helper::Cloudflared,
-                    Action::InstallTailscale => Helper::Tailscale,
-                    _ => Helper::Crush,
+            Action::InstallCloudflared | Action::InstallTailscale => {
+                let helper = if action == Action::InstallCloudflared {
+                    Helper::Cloudflared
+                } else {
+                    Helper::Tailscale
                 };
                 match self.helper_path(helper) {
                     Some(path) => {

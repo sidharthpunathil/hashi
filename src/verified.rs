@@ -77,7 +77,7 @@ impl Version {
     /// Finds the first version-like token in `text`.
     ///
     /// Accepts `2.1.318 (Claude Code)`, `codex-cli 0.166.0`, `v0.67.0`,
-    /// `rust-v0.166.0`, `crush version v0.100.0` and
+    /// `rust-v0.166.0`, `opencode version v0.100.0` and
     /// `2026.11.05-86047df`. Pre-release and build suffixes are ignored.
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
@@ -189,7 +189,7 @@ mod tests {
             );
             assert_eq!(e.verified.len(), 10, "{kind}: {}", e.verified);
         }
-        assert!(all().contains_key("crush"));
+        assert_eq!(all().len(), AgentKind::ALL.len());
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(v("0.67.0"), Version::Semver(0, 67, 0));
         assert_eq!(v("v2.2.5"), Version::Semver(2, 2, 5));
         assert_eq!(v("0.26.8"), Version::Semver(0, 26, 8));
-        assert_eq!(v("crush version v0.100.0"), Version::Semver(0, 100, 0));
+        assert_eq!(v("opencode version v0.100.0"), Version::Semver(0, 100, 0));
         assert_eq!(v("2026.11.05-86047df"), Version::Date(2026, 11, 5));
         assert_eq!(v("1.4"), Version::Semver(1, 4, 0));
         assert_eq!(v("0.170.0-alpha.2"), Version::Semver(0, 170, 0));

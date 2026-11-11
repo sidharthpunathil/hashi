@@ -127,7 +127,6 @@ research_anchor() {
         gemini) echo "2-gemini-cli" ;;
         qwen) echo "3-qwen-code" ;;
         cursor) echo "4-cursor-cli" ;;
-        crush) echo "7-crush" ;;
         *) echo "flags-hashi-pins-for-shared-tokens" ;;
     esac
 }

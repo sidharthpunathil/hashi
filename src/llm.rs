@@ -275,7 +275,7 @@ This guide is for an LLM agent (Claude Code, Codex, Cursor or similar) that runs
 
 ## What Hashi is
 
-Hashi is a single binary that runs next to the coding-agent CLIs the owner already installed and signed in to (Claude Code, Codex, Gemini CLI, opencode, Qwen Code, Cursor CLI and, opt-in, Crush). It puts them behind one authenticated HTTP API, so scripts, apps and other people can send a prompt and get the answer as JSON. Each person or app gets its own token, which can be limited to some agents, capped per day or month, bound to one project folder, paused and revoked. The owner can also connect to other people's Hashi bridges and use the access they were given.
+Hashi is a single binary that runs next to the coding-agent CLIs the owner already installed and signed in to (Claude Code, Codex, Gemini CLI, opencode, Qwen Code and Cursor CLI). It puts them behind one authenticated HTTP API, so scripts, apps and other people can send a prompt and get the answer as JSON. Each person or app gets its own token, which can be limited to some agents, capped per day or month, bound to one project folder, paused and revoked. The owner can also connect to other people's Hashi bridges and use the access they were given.
 
 On the owner's machine, `hashi` (or `hashi serve`) runs the server and a live terminal dashboard on `http://127.0.0.1:7878` by default. Everything Hashi stores lives in one data directory, `~/.hashi` unless `--home` or `HASHI_HOME` says otherwise: a SQLite database (`hashi.db`), each token's workspace, account login directories and logs. The other `hashi` commands work straight on that database, with or without the server running.
 
@@ -308,7 +308,7 @@ Each task gives the exact commands. Replace the values in angle brackets.
 hashi doctor
 ```
 
-It lists each agent (installed, version, signed in), Crush, cloudflared, Tailscale, the accounts and whether an update is available. It changes nothing. When something is missing it says what to run.
+It lists each agent (installed, version, signed in), cloudflared, Tailscale, the accounts and whether an update is available. It changes nothing. When something is missing it says what to run.
 
 ### Share with a person
 
@@ -389,7 +389,7 @@ hashi account usage --refresh --json
 ```
 
 - A login account prints its sign-in command. The owner runs it in a terminal; then check with `hashi account list`.
-- `hashi switch <claude|codex> <name|default>` points the owner's plain `claude` or `codex` command at a login account (the desktop app is not affected); without a name it shows who is signed in. `hashi account reset` undoes every switch and command. `hashi account commands --agent <claude|codex> --name <word>` makes a command with that name that runs the CLI without permission prompts; nothing is set by default, and an empty name removes it.
+- `hashi switch <claude|codex|gemini|opencode> <name|default>` points the owner's plain `claude` or `codex` command at a login account (the desktop app is not affected); without a name it shows who is signed in. `hashi account reset` undoes every switch and command. `hashi account commands --agent <claude|codex> --name <word>` makes a command with that name that runs the CLI without permission prompts; nothing is set by default, and an empty name removes it.
 - Never ask the owner to paste a key into the chat. Use `--key-env <VAR>` with a variable they set, or `--key-stdin` in their own terminal.
 - Put an account on a token with `hashi token update <id> --account claude=work,personal`.
 - `hashi account disable`, `enable` and `clear-limit` take `<agent> <name>`. `hashi account remove` deletes the account and its key (ask first).

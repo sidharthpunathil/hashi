@@ -54,7 +54,6 @@ const AGENT_NAMES = {
   opencode: "opencode",
   qwen: "Qwen Code",
   cursor: "Cursor CLI",
-  crush: "Crush",
 };
 const agentName = (a) => AGENT_NAMES[a] || a;
 
@@ -471,7 +470,7 @@ function mePage() {
       }
       meters.append(wrap);
     }
-    $("resets").textContent = `Daily limits reset ${when(m.resets.day)}. Spend is the agent's own estimate; Claude Code, opencode and Crush report one.`;
+    $("resets").textContent = `Daily limits reset ${when(m.resets.day)}. Spend is the agent's own estimate; Claude Code and opencode report one.`;
     // Admin tokens change their own access, so they have nobody to ask.
     show("more", m.role !== "admin");
     // Shown only when the bridge owner shares how much quota is left.

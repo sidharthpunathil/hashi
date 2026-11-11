@@ -131,7 +131,7 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
             "reset",
             vec![
                 Line::from(Span::styled(
-                    "Put plain claude and codex back on your own logins?",
+                    "Put plain claude, codex, gemini and opencode back on your own logins?",
                     plain(),
                 )),
                 muted_line(
@@ -708,7 +708,12 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ),
         ]));
     }
-    for who in app.plain_logins() {
+    // Agents with no login here and nothing switched in say nothing.
+    for who in app
+        .plain_logins()
+        .iter()
+        .filter(|w| w.switched() || w.email.is_some())
+    {
         let mut spans = vec![Span::styled(
             format!("plain {:<7}", who.agent.as_str()),
             t::muted(),
@@ -1457,15 +1462,6 @@ fn audit(app: &App, frame: &mut Frame, scroll: usize) {
 pub fn doctor_checks(app: &App) -> Vec<doctor::Check> {
     use crate::install::Helper;
     let (mut checks, _) = doctor::agents(&app.state.runtime.agents);
-    if !app
-        .state
-        .runtime
-        .agents
-        .iter()
-        .any(|a| a.agent == crate::agent::AgentKind::Crush)
-    {
-        checks.push(doctor::crush(None, app.helper_path(Helper::Crush)));
-    }
     checks.push(doctor::cloudflared(app.helper_path(Helper::Cloudflared)));
     let status = app.tailscale_self.lock().ok().and_then(|s| s.clone());
     checks.push(doctor::tailscale(

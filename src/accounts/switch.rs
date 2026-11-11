@@ -1,5 +1,5 @@
-//! Pointing the plain `claude` and `codex` commands at one of Hashi's
-//! accounts.
+//! Pointing the plain `claude`, `codex`, `gemini` and `opencode` commands
+//! at one of Hashi's accounts.
 //!
 //! `hashi switch claude work` makes every Claude Code that reads the
 //! owner's normal login (the `claude` command in any terminal, the IDE
@@ -10,7 +10,9 @@
 //! How: the CLI's normal login lives in one place (Claude Code: the
 //! `Claude Code-credentials` Keychain entry on macOS, or
 //! `~/.claude/.credentials.json`, plus the `oauthAccount` identity in
-//! `~/.claude.json`; Codex: `~/.codex/auth.json`). A switch
+//! `~/.claude.json`; Codex: `~/.codex/auth.json`; Gemini CLI:
+//! `~/.gemini/oauth_creds.json` and `google_accounts.json`; opencode:
+//! `~/.local/share/opencode/auth.json`). A switch
 //!
 //! 1. saves what is there now back to where it belongs (the account being
 //!    left, or a private copy of the owner's original login, kept as the
@@ -48,10 +50,42 @@ pub const STATE_FILE: &str = "active.json";
 /// holding the owner's original login while an account is switched in.
 pub const ORIGINAL_DIR: &str = ".original";
 
+/// The agents whose plain command can be switched, in display order.
+pub const AGENTS: [AgentKind; 4] = [
+    AgentKind::Claude,
+    AgentKind::Codex,
+    AgentKind::Gemini,
+    AgentKind::Opencode,
+];
+
 /// Whether `agent` can be switched.
 #[must_use]
-pub const fn supports(agent: AgentKind) -> bool {
-    matches!(agent, AgentKind::Claude | AgentKind::Codex)
+pub fn supports(agent: AgentKind) -> bool {
+    AGENTS.contains(&agent)
+}
+
+/// Why `agent` cannot be switched.
+#[must_use]
+pub fn why_not(agent: AgentKind) -> String {
+    match agent {
+        AgentKind::Qwen => "Qwen Code keeps its sign-in in its settings file together with all \
+                            your other settings, so it cannot be switched without changing those"
+            .to_owned(),
+        AgentKind::Cursor => {
+            "Cursor CLI has no separate login folder to switch; use an API-key account".to_owned()
+        }
+        _ => format!("{} cannot be switched", agent.display_name()),
+    }
+}
+
+/// The files that hold `agent`'s login, the first being the one that must
+/// exist for it to count as signed in.
+const fn cred_names(agent: AgentKind) -> &'static [&'static str] {
+    match agent {
+        AgentKind::Codex | AgentKind::Opencode => &["auth.json"],
+        AgentKind::Gemini => &["oauth_creds.json", "google_accounts.json"],
+        _ => &[".credentials.json"],
+    }
 }
 
 /// A place secrets are kept by name: the macOS Keychain, or a fake in tests.
@@ -208,6 +242,11 @@ pub struct Live {
     pub claude_json: PathBuf,
     /// Codex's folder, `~/.codex`.
     pub codex_home: PathBuf,
+    /// Gemini CLI's folder, `~/.gemini`.
+    pub gemini_dir: PathBuf,
+    /// opencode's data folder, `~/.local/share/opencode` (or under
+    /// `$XDG_DATA_HOME`).
+    pub opencode_dir: PathBuf,
     /// Set when the environment already points the CLI elsewhere, which
     /// makes the plain command impossible to switch.
     pub env_override: BTreeMap<AgentKind, String>,
@@ -225,6 +264,7 @@ impl Live {
         for (agent, var) in [
             (AgentKind::Claude, "CLAUDE_CONFIG_DIR"),
             (AgentKind::Codex, "CODEX_HOME"),
+            (AgentKind::Gemini, "GEMINI_CLI_HOME"),
         ] {
             if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
                 env_override.insert(agent, format!("{var}={}", v.to_string_lossy()));
@@ -234,6 +274,11 @@ impl Live {
             claude_dir: home.join(".claude"),
             claude_json: home.join(".claude.json"),
             codex_home: home.join(".codex"),
+            gemini_dir: home.join(".gemini"),
+            opencode_dir: std::env::var_os("XDG_DATA_HOME")
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| home.join(".local/share"), PathBuf::from)
+                .join("opencode"),
             env_override,
         })
     }
@@ -329,23 +374,28 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 fn slot_of(ctx: &Ctx<'_>, agent: AgentKind, name: &str) -> Slot {
-    if name == DEFAULT {
-        Slot {
-            dir: acct::root(ctx.home).join(agent.as_str()).join(ORIGINAL_DIR),
-            live: false,
-        }
+    let base = if name == DEFAULT {
+        acct::root(ctx.home).join(agent.as_str()).join(ORIGINAL_DIR)
     } else {
-        Slot {
-            dir: acct::account_dir(ctx.home, agent, name),
-            live: false,
-        }
-    }
+        acct::account_dir(ctx.home, agent, name)
+    };
+    // Where the CLI puts its files when its account variable points at
+    // `base`: `GEMINI_CLI_HOME` stands for the home folder, and
+    // `XDG_DATA_HOME` for the data folder that holds `opencode/`.
+    let dir = match agent {
+        AgentKind::Gemini => base.join(".gemini"),
+        AgentKind::Opencode => base.join("opencode"),
+        _ => base,
+    };
+    Slot { dir, live: false }
 }
 
 fn live_slot(ctx: &Ctx<'_>, agent: AgentKind) -> Slot {
     Slot {
         dir: match agent {
             AgentKind::Codex => ctx.live.codex_home.clone(),
+            AgentKind::Gemini => ctx.live.gemini_dir.clone(),
+            AgentKind::Opencode => ctx.live.opencode_dir.clone(),
             _ => ctx.live.claude_dir.clone(),
         },
         live: true,
@@ -363,20 +413,8 @@ pub fn claude_service(dir: &Path, live: bool) -> String {
     }
 }
 
-fn cred_file(agent: AgentKind, slot: &Slot) -> PathBuf {
-    match agent {
-        AgentKind::Codex => slot.dir.join("auth.json"),
-        _ => slot.dir.join(".credentials.json"),
-    }
-}
-
-fn read_creds(ctx: &Ctx<'_>, agent: AgentKind, slot: &Slot) -> std::io::Result<Option<String>> {
-    if agent == AgentKind::Claude
-        && let Some(vault) = ctx.vault
-    {
-        return vault.get(&claude_service(&slot.dir, slot.live));
-    }
-    match std::fs::read_to_string(cred_file(agent, slot)) {
+fn read_file(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
         Ok(t) if t.trim().is_empty() => Ok(None),
         Ok(t) => Ok(Some(t)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -384,6 +422,36 @@ fn read_creds(ctx: &Ctx<'_>, agent: AgentKind, slot: &Slot) -> std::io::Result<O
     }
 }
 
+/// The login in `slot`: the one file's text, or for an agent with several
+/// files a JSON object from file name to text (`null` when missing). `None`
+/// when its first file is missing.
+fn read_creds(ctx: &Ctx<'_>, agent: AgentKind, slot: &Slot) -> std::io::Result<Option<String>> {
+    if agent == AgentKind::Claude
+        && let Some(vault) = ctx.vault
+    {
+        return vault.get(&claude_service(&slot.dir, slot.live));
+    }
+    let names = cred_names(agent);
+    let Some(first) = read_file(&slot.dir.join(names[0]))? else {
+        return Ok(None);
+    };
+    if names.len() == 1 {
+        return Ok(Some(first));
+    }
+    let mut bundle = serde_json::Map::new();
+    bundle.insert(names[0].to_owned(), first.into());
+    for name in &names[1..] {
+        let text = read_file(&slot.dir.join(name))?;
+        bundle.insert(
+            (*name).to_owned(),
+            text.map_or(serde_json::Value::Null, Into::into),
+        );
+    }
+    Ok(Some(serde_json::Value::Object(bundle).to_string()))
+}
+
+/// Writes a login read by [`read_creds`] into `slot`. A file missing from
+/// the login is deleted there.
 fn write_creds(ctx: &Ctx<'_>, agent: AgentKind, slot: &Slot, secret: &str) -> std::io::Result<()> {
     if agent == AgentKind::Claude
         && let Some(vault) = ctx.vault
@@ -393,7 +461,39 @@ fn write_creds(ctx: &Ctx<'_>, agent: AgentKind, slot: &Slot, secret: &str) -> st
     if !slot.live {
         ensure_private_dir(&slot.dir)?;
     }
-    write_private(&cred_file(agent, slot), secret)
+    let names = cred_names(agent);
+    if names.len() == 1 {
+        return write_private(&slot.dir.join(names[0]), secret);
+    }
+    let bundle: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(secret).map_err(std::io::Error::other)?;
+    for name in names {
+        let path = slot.dir.join(name);
+        match bundle.get(*name).and_then(serde_json::Value::as_str) {
+            Some(text) => write_private(&path, text)?,
+            None => remove_file(&path)?,
+        }
+    }
+    Ok(())
+}
+
+fn remove_file(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// The text of `name` in a login read by [`read_creds`].
+fn creds_part(agent: AgentKind, creds: &str, name: &str) -> Option<String> {
+    if cred_names(agent).len() == 1 {
+        return Some(creds.to_owned());
+    }
+    serde_json::from_str::<serde_json::Value>(creds)
+        .ok()?
+        .get(name)?
+        .as_str()
+        .map(str::to_owned)
 }
 
 fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -424,6 +524,13 @@ fn saved_is_fresher(agent: AgentKind, saved: &str, live: &str) -> bool {
             .get("expiresAt")?
             .as_i64()
     }
+    fn gemini_expiry(s: &str) -> Option<i64> {
+        let creds = creds_part(AgentKind::Gemini, s, "oauth_creds.json")?;
+        serde_json::from_str::<serde_json::Value>(&creds)
+            .ok()?
+            .get("expiry_date")?
+            .as_i64()
+    }
     fn codex_refresh(s: &str) -> Option<String> {
         serde_json::from_str::<serde_json::Value>(s)
             .ok()?
@@ -436,6 +543,12 @@ fn saved_is_fresher(agent: AgentKind, saved: &str, live: &str) -> bool {
             (Some(a), Some(b)) => a > b,
             _ => false,
         },
+        AgentKind::Gemini => match (gemini_expiry(saved), gemini_expiry(live)) {
+            (Some(a), Some(b)) => a > b,
+            _ => false,
+        },
+        // opencode keeps API keys, which do not refresh.
+        AgentKind::Opencode => false,
         _ => match (claude_expiry(saved), claude_expiry(live)) {
             (Some(a), Some(b)) => a > b,
             _ => false,
@@ -530,10 +643,7 @@ fn write_identity(path: &Path, identity: Option<&str>) -> std::io::Result<()> {
 /// target's login has been read.
 pub fn switch(ctx: &Ctx<'_>, agent: AgentKind, target: &str) -> Result<Outcome, String> {
     if !supports(agent) {
-        return Err(format!(
-            "{} cannot be switched; only claude and codex can",
-            agent.display_name()
-        ));
+        return Err(why_not(agent));
     }
     if let Some(var) = ctx.live.env_override.get(&agent) {
         return Err(format!(
@@ -637,6 +747,20 @@ pub fn signed_in_as(live: &Live, agent: AgentKind) -> Option<String> {
             let payload = base64url(jwt.split('.').nth(1)?)?;
             let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
             claims.get("email")?.as_str().map(str::to_owned)
+        }
+        AgentKind::Gemini => {
+            let text =
+                std::fs::read_to_string(live.gemini_dir.join("google_accounts.json")).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+            v.get("active")?.as_str().map(str::to_owned)
+        }
+        // opencode's sign-ins are per provider and carry no email: name the
+        // providers instead.
+        AgentKind::Opencode => {
+            let text = std::fs::read_to_string(live.opencode_dir.join("auth.json")).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let names: Vec<&str> = v.as_object()?.keys().map(String::as_str).collect();
+            (!names.is_empty()).then(|| format!("providers: {}", names.join(", ")))
         }
         _ => None,
     }
@@ -767,10 +891,8 @@ pub fn reset(ctx: &Ctx<'_>, agent: AgentKind) -> Result<Reset, String> {
                 .delete(&claude_service(&live.dir, true))
                 .map_err(|e| io("signing out", e))?;
         } else {
-            match std::fs::remove_file(cred_file(agent, &live)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(io("signing out", e)),
+            for name in cred_names(agent) {
+                remove_file(&live.dir.join(name)).map_err(|e| io("signing out", e))?;
             }
         }
         if agent == AgentKind::Claude {
@@ -834,6 +956,8 @@ mod tests {
             claude_dir: root.join("u/.claude"),
             claude_json: root.join("u/.claude.json"),
             codex_home: root.join("u/.codex"),
+            gemini_dir: root.join("u/.gemini"),
+            opencode_dir: root.join("u/.local/share/opencode"),
             env_override: BTreeMap::new(),
         };
         std::fs::create_dir_all(&live.claude_dir).unwrap();
@@ -1142,6 +1266,105 @@ mod tests {
         assert_eq!(
             signed_in_as(&rig.live, AgentKind::Codex).as_deref(),
             Some("c@x")
+        );
+    }
+
+    #[test]
+    fn gemini_swaps_both_files_and_drops_one_the_account_lacks() {
+        let rig = rig();
+        let ctx = Ctx {
+            home: &rig.home,
+            live: &rig.live,
+            vault: None,
+        };
+        std::fs::create_dir_all(&rig.live.gemini_dir).unwrap();
+        std::fs::write(
+            rig.live.gemini_dir.join("oauth_creds.json"),
+            r#"{"t":"me","expiry_date":5}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            rig.live.gemini_dir.join("google_accounts.json"),
+            r#"{"active":"me@g"}"#,
+        )
+        .unwrap();
+        std::fs::write(rig.live.gemini_dir.join("settings.json"), "{}").unwrap();
+        let dir = acct::account_dir(&rig.home, AgentKind::Gemini, "alt").join(".gemini");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oauth_creds.json"),
+            r#"{"t":"alt","expiry_date":5}"#,
+        )
+        .unwrap();
+        switch(&ctx, AgentKind::Gemini, "alt").unwrap();
+        assert!(
+            std::fs::read_to_string(rig.live.gemini_dir.join("oauth_creds.json"))
+                .unwrap()
+                .contains("alt")
+        );
+        assert!(!rig.live.gemini_dir.join("google_accounts.json").exists());
+        assert!(
+            rig.live.gemini_dir.join("settings.json").exists(),
+            "settings untouched"
+        );
+        switch(&ctx, AgentKind::Gemini, "default").unwrap();
+        assert_eq!(
+            signed_in_as(&rig.live, AgentKind::Gemini).as_deref(),
+            Some("me@g")
+        );
+        assert!(
+            std::fs::read_to_string(rig.live.gemini_dir.join("oauth_creds.json"))
+                .unwrap()
+                .contains("me")
+        );
+    }
+
+    #[test]
+    fn opencode_swaps_auth_json_and_names_its_providers() {
+        let rig = rig();
+        let ctx = Ctx {
+            home: &rig.home,
+            live: &rig.live,
+            vault: None,
+        };
+        std::fs::create_dir_all(&rig.live.opencode_dir).unwrap();
+        std::fs::write(
+            rig.live.opencode_dir.join("auth.json"),
+            r#"{"zai":{"type":"api","key":"k"}}"#,
+        )
+        .unwrap();
+        let dir = acct::account_dir(&rig.home, AgentKind::Opencode, "work").join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("auth.json"), r#"{"anthropic":{"type":"oauth"}}"#).unwrap();
+        switch(&ctx, AgentKind::Opencode, "work").unwrap();
+        assert_eq!(
+            signed_in_as(&rig.live, AgentKind::Opencode).as_deref(),
+            Some("providers: anthropic")
+        );
+        reset(&ctx, AgentKind::Opencode).unwrap();
+        assert_eq!(
+            signed_in_as(&rig.live, AgentKind::Opencode).as_deref(),
+            Some("providers: zai")
+        );
+    }
+
+    #[test]
+    fn qwen_and_cursor_say_why_they_cannot_be_switched() {
+        let rig = rig();
+        let ctx = Ctx {
+            home: &rig.home,
+            live: &rig.live,
+            vault: None,
+        };
+        assert!(
+            switch(&ctx, AgentKind::Qwen, "x")
+                .unwrap_err()
+                .contains("settings")
+        );
+        assert!(
+            switch(&ctx, AgentKind::Cursor, "x")
+                .unwrap_err()
+                .contains("login folder")
         );
     }
 }

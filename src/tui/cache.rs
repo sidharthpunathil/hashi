@@ -97,13 +97,10 @@ impl App {
         {
             let live = crate::accounts::switch::Live::from_user().ok();
             let list = self.home().map_or_else(Vec::new, |home| {
-                [
-                    crate::agent::AgentKind::Claude,
-                    crate::agent::AgentKind::Codex,
-                ]
-                .into_iter()
-                .map(|a| crate::accounts::switch::PlainLogin::read(&home, live.as_ref(), a))
-                .collect()
+                crate::accounts::switch::AGENTS
+                    .into_iter()
+                    .map(|a| crate::accounts::switch::PlainLogin::read(&home, live.as_ref(), a))
+                    .collect()
             });
             self.plain_logins = (Some(std::time::Instant::now()), list);
         }
@@ -209,7 +206,7 @@ impl App {
         Cow::Owned(rows)
     }
 
-    /// Who plain `claude` and `codex` sign in as, for the Accounts popup.
+    /// Who each switchable agent's plain command signs in as.
     #[must_use]
     pub fn plain_logins(&self) -> &[crate::accounts::switch::PlainLogin] {
         &self.plain_logins.1
@@ -224,7 +221,7 @@ impl App {
         self.plain_logins.1.iter().find(|l| l.agent == agent)
     }
 
-    /// Reads who plain `claude` and `codex` sign in as on the next frame.
+    /// Reads who the plain commands sign in as on the next frame.
     pub fn forget_plain_logins(&mut self) {
         self.plain_logins.0 = None;
     }

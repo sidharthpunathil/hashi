@@ -1,4 +1,4 @@
-//! `hashi install cloudflared|tailscale|crush`: the vendor's own install
+//! `hashi install cloudflared|tailscale`: the vendor's own install
 //! command for this platform, run only after the owner says yes.
 //!
 //! Every command here is copied from the vendor's install documentation,
@@ -30,11 +30,6 @@
 //! - Tailscale on Windows: <https://tailscale.com/kb/1022/install-windows>
 //!   documents only the `.exe` and `.msi` installers and no `winget` id, so
 //!   the plan is <https://tailscale.com/download/windows>.
-//! - Crush, from its README (`README.md` in the Crush repository, read on
-//!   2026-11-05): `brew install charmbracelet/tap/crush` on macOS (line 30),
-//!   `winget install charmbracelet.crush` on Windows (line 49), and
-//!   `npm install -g @charmland/crush` (line 33) wherever npm is on `PATH`.
-//!   Otherwise the plan is the releases page the README links to.
 
 use std::path::PathBuf;
 
@@ -45,13 +40,11 @@ pub enum Helper {
     Cloudflared,
     /// The Tailscale client, for `--tailscale serve|funnel`.
     Tailscale,
-    /// Charmbracelet's Crush, the opt-in agent (`--enable-crush`).
-    Crush,
 }
 
 impl Helper {
     /// Every helper, in display order.
-    pub const ALL: [Self; 3] = [Self::Cloudflared, Self::Tailscale, Self::Crush];
+    pub const ALL: [Self; 2] = [Self::Cloudflared, Self::Tailscale];
 
     /// The executable name, which is also the `hashi install` argument.
     #[must_use]
@@ -59,7 +52,6 @@ impl Helper {
         match self {
             Self::Cloudflared => "cloudflared",
             Self::Tailscale => "tailscale",
-            Self::Crush => "crush",
         }
     }
 
@@ -209,11 +201,6 @@ pub const TAILSCALE_WINDOWS_DOWNLOAD: &str = "https://tailscale.com/download/win
 /// Tailscale's download page for everything else.
 pub const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download";
 
-/// Crush's source, which has the install commands in its README.
-pub const CRUSH_README: &str = "https://github.com/charmbracelet/crush#installation";
-/// Crush's releases page, for systems without a documented command.
-pub const CRUSH_RELEASES: &str = "https://github.com/charmbracelet/crush/releases";
-
 /// Chooses the install for `helper` on `platform`, given which programs are
 /// on `PATH` (`has("brew")` and so on). Pure, so every platform can be
 /// tested anywhere.
@@ -327,48 +314,8 @@ pub fn plan(helper: Helper, platform: Platform, has: impl Fn(&str) -> bool) -> P
             TAILSCALE_DOWNLOAD,
             "Tailscale documents no install command for this system",
         ),
-        (Helper::Crush, Platform::Mac) if has("brew") => Plan::Run {
-            helper,
-            via: "Homebrew",
-            steps: vec![Step::exec(&["brew", "install", "charmbracelet/tap/crush"])],
-            source: CRUSH_README,
-            note: Some(CRUSH_NOTE),
-        },
-        (Helper::Crush, Platform::Windows) if has("winget") => Plan::Run {
-            helper,
-            via: "winget",
-            steps: vec![Step::exec(&["winget", "install", "charmbracelet.crush"])],
-            source: CRUSH_README,
-            note: Some(CRUSH_NOTE),
-        },
-        (Helper::Crush, _) if has("npm") => Plan::Run {
-            helper,
-            via: "npm",
-            steps: vec![npm_install_crush(platform)],
-            source: CRUSH_README,
-            note: Some(CRUSH_NOTE),
-        },
-        (Helper::Crush, _) => download(
-            CRUSH_RELEASES,
-            "none of the package managers the Crush README names (brew on macOS, winget on \
-             Windows, npm anywhere) is on PATH",
-        ),
     }
 }
-
-/// `npm install -g @charmland/crush`. On Windows npm is a `.cmd` shim,
-/// which only `cmd.exe` can start.
-fn npm_install_crush(platform: Platform) -> Step {
-    let mut step = Step::exec(&["npm", "install", "-g", "@charmland/crush"]);
-    if platform == Platform::Windows {
-        step.argv.splice(0..0, ["cmd".to_owned(), "/C".to_owned()]);
-    }
-    step
-}
-
-/// Shown with every Crush install plan.
-const CRUSH_NOTE: &str = "Crush is opt-in: start Hashi with --enable-crush, then sign it in with \
-                          hashi account login crush default (or set a provider key)";
 
 /// The plan for this machine, looking programs up on `PATH` only.
 #[must_use]
@@ -559,36 +506,11 @@ mod tests {
     }
 
     #[test]
-    fn crush_uses_the_readme_commands() {
-        let p = plan(Helper::Crush, Platform::Mac, with(&["brew", "npm"]));
-        assert_eq!(p.text(), "brew install charmbracelet/tap/crush");
-        let p = plan(Helper::Crush, Platform::Windows, with(&["winget", "npm"]));
-        assert_eq!(p.text(), "winget install charmbracelet.crush");
-        for platform in [
-            Platform::Linux,
-            Platform::Mac,
-            Platform::Windows,
-            Platform::Other,
-        ] {
-            let p = plan(Helper::Crush, platform, with(&["npm"]));
-            assert_eq!(p.text(), "npm install -g @charmland/crush", "{platform:?}");
-            let p = plan(Helper::Crush, platform, with(&[]));
-            assert!(matches!(
-                p,
-                Plan::Download {
-                    url: CRUSH_RELEASES,
-                    ..
-                }
-            ));
-        }
-        assert_eq!(Helper::parse("crush"), Some(Helper::Crush));
-    }
-
-    #[test]
     fn helpers_parse_by_name() {
         assert_eq!(Helper::parse("tailscale"), Some(Helper::Tailscale));
         assert_eq!(Helper::parse("cloudflared"), Some(Helper::Cloudflared));
         assert_eq!(Helper::parse("ngrok"), None);
+        assert_eq!(Helper::parse("crush"), None);
     }
 
     #[test]

@@ -234,10 +234,10 @@ pub const fn details(action: Action) -> Details {
                 "l signs an account in again, d disables, e enables, x removes, u reads its \
                  usage now.",
                 "Each row shows how much of its usage windows is used and when they reset.",
-                "w makes the plain claude (or codex) command sign in as the selected login \
+                "w makes the plain claude (or codex, gemini, opencode) command sign in as the selected login \
                  account in any terminal or editor, and w again goes back to your own login. \
                  n picks the word for a skip-permissions command, such as dclaude. The now \
-                 lines say who plain claude and codex sign in as, and R puts everything back \
+                 lines say who plain claude, codex, gemini and opencode sign in as, and R puts everything back \
                  (own logins, no commands).",
             ],
             know: &[
@@ -356,19 +356,6 @@ pub const fn details(action: Action) -> Details {
                 "Doctor shows whether Tailscale is signed in.",
             ],
         },
-        Action::InstallCrush => Details {
-            about: "Installs Crush, Charm's coding agent, so Hashi can run prompts on it too.",
-            how: &[
-                "Shows Charm's own install command. enter runs it with the terminal attached; \
-                 c copies it.",
-                "Hashi uses Crush only when started with --enable-crush.",
-            ],
-            know: &[
-                "Crush approves its own tool use, so Hashi switches off every tool that can \
-                 write, run code or reach the network, and checks the Crush version first.",
-                "Crush can still read any file your user can read.",
-            ],
-        },
         Action::CheckUpdate => Details {
             about: "Asks GitHub whether a newer Hashi release is out.",
             how: &[
@@ -396,7 +383,7 @@ pub const fn details(action: Action) -> Details {
             about: "A health check of this machine for Hashi. Start here when something does \
                     not work.",
             how: &[
-                "Shows each agent found and its version, Crush, cloudflared, Tailscale and its \
+                "Shows each agent found and its version, cloudflared, Tailscale and its \
                  sign-in, the accounts, the update state, the home folder and the resource \
                  guard.",
                 "u checks for updates and r checks everything again.",

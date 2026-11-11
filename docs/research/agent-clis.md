@@ -29,7 +29,6 @@ A cross-cutting hazard: Qwen Code, Aider and (UNVERIFIED) others treat a prompt 
 | Cursor CLI | `agent` (legacy `cursor-agent`) | `-p` | `--output-format json`, `stream-json` | `--resume <id>` | none documented | `CURSOR_API_KEY` or `agent login` | without `--force` it proposes but does not apply | no | no |
 | GitHub Copilot CLI | `copilot` | `-p`/`--prompt=` | `--output-format=json` (JSONL, schema undocumented) | `--resume=<id>`, `--session-id=<uuid>` | premium requests only; tokens via side file | `COPILOT_GITHUB_TOKEN`/`GH_TOKEN` + Copilot plan | requests needing approval are denied | no (README only, 11.4k) | no |
 | Goose | `goose` | `run --text=` | `--output-format json`, `stream-json` | `-r -n <name>` or `-r --session-id <id>` | tokens + USD (session cumulative) | provider env vars, keyring, config | `GOOSE_MODE=auto` runs tools; `approve` errors headless | yes, Apache-2.0 (56.2k) | yes, 1.44.0 |
-| Crush | `crush` | `run` | none (plain text) | `-s <uuid>` | only via `crush session show --json` | provider env vars, config | `run` auto-approves every tool | source-available, FSL-1.1-MIT (29.0k) | no |
 | Amp | `amp` | `-x`/`--execute` | `--stream-json` (Claude Code shape) | `amp threads continue <T-id>` | tokens, no cost | `AMP_API_KEY` | no approvals by default: tools just run | no | no |
 | Factory Droid | `droid` | `exec` | `-o json`, `-o stream-json` | `-s <id>` | tokens + Factory credits | `FACTORY_API_KEY` | read-only unless `--auto low/medium/high` | no | no |
 | Aider | `aider` | `--message=` | none (rich text, scrape `Tokens:` line) | none (`--restore-chat-history` only) | scraped, abbreviated | provider env vars | confirms default to yes on EOF stdin | yes, Apache-2.0 (50.0k) | no |
@@ -290,48 +289,7 @@ Fixture `goose_failure.jsonl`:
 
 ---
 
-## 7. Crush
-
-Source: `github:charmbracelet/crush` (Go, cobra + pflag + fang).
-
-- **Install:** `brew install charmbracelet/tap/crush`, `npm install -g @charmland/crush`, `winget install charmbracelet.crush`, scoop, nix (README.md:25-55).
-- **Binary:** `crush`.
-- **Non-interactive:** `crush run [prompt...]` (internal/cmd/run.go:31-36). Flags: `-q`, `-v`, `-m model|provider/model`, `--small-model`, `-s/--session <id>`, `-C/--continue` (run.go:167-176); globals `-c/--cwd`, `-D/--data-dir`, `-y/--yolo` (root.go:57-62).
-- **Prompt passing:** pflag stops at `--` (pflag v1.0.9 flag.go:1144-1147), so `crush run -q -- "--help"` is safe. Args are joined with spaces (run.go:83). Stdin is read only if it is a pipe or regular file (root.go:960-977), so `/dev/null` is ignored.
-- **Output:** **plain text only.** All assistant text of every step goes to stdout (internal/app/app.go:335-538). Session id, tokens and cost are never printed by `run`. Afterwards, `crush session last --json` or `crush session show <uuid> --json` returns `{meta{id, uuid, title, cost, prompt_tokens, completion_tokens, total_tokens}, messages[]}` (internal/cmd/session.go:436-470, 571-625), session-cumulative. That is a second process per request and races under concurrency.
-- **Resume:** `-s <uuid|hash prefix>` (run.go:357-383).
-- **Permissions:** `crush run` **auto-approves every permission request** for its session (app.go:447-449, permission.go:319-330). The only restriction is `options.disabled_tools` in config. No sandbox.
-- **Auth:** provider env vars; config files including `./crush.json` in the workspace; **`godotenv/autoload` loads the workspace `.env`** into the process.
-- **Exit codes:** 1 on error, 130 on signals (root.go:233-241). **Windows:** yes. **Telemetry:** `CRUSH_DISABLE_METRICS=1`; an unconditional GitHub release check runs at startup.
-
-**argv, new run:** `["run", "-q", "-m", "anthropic/claude-sonnet-4-5", "--", "<prompt>"]`, then `["session", "last", "--json"]`
-**argv, resume:** `["run", "-q", "-s", "<uuid>", "--", "<prompt>"]`
-
-Fixture `crush_success.txt` (stdout): `I created hello.py with a main() that prints "hi".\n`
-Fixture `crush_session.json`:
-```json
-{"meta":{"id":"a41f09c2d7e3b5f1","uuid":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b","title":"Create hello.py","created":"2026-11-05T10:00:00Z","modified":"2026-11-05T10:00:07Z","cost":0.0123,"prompt_tokens":1834,"completion_tokens":212,"total_tokens":2046},"messages":[]}
-```
-
-### Crush as integrated (opt-in)
-
-Added 2026-11-06, re-read against `main` as fetched on 2026-11-05, a few hours after v0.100.0 was tagged. Hashi drives it from `src/agent/crush.rs`, only with `--enable-crush`. Corrections and additions to the notes above:
-
-- **Usage is not all cumulative.** `cost` is a running total, but `prompt_tokens` and `completion_tokens` are the last step's context size and output (`internal/agent/agent.go`, `updateSessionTokenCounters`). Hashi reports those tokens as they are, and for a resumed run the cost difference from `crush session show <id> --json` taken just before.
-- **Session lookup.** `session last` returns the most recently updated top-level session (`internal/db/sql/sessions.sql`, `ListSessions`). Hashi gives every account and workspace pair its own `--data-dir` (`<account>/data/<sha256 of the workspace path>`) and holds a lock per data directory across the run and the lookup. It stores `meta.uuid`, which `-s` resolves directly.
-- **Config layering.** `lookupConfigs` (`internal/config/load.go:1049-1090`) reads `/etc/crush/crush.json` (Unix), the global config and its sibling `crushrc`, the global data config, then `.crushrc`, `crushrc`, `.crush.json` and `crush.json` from the working directory up to `git rev-parse --show-toplevel` (or the working directory alone without one). The workspace config at `<data-dir>/crush.json` is merged last (`Load`, same file). A crushrc is executed as shell code.
-- **Tools.** `allToolNames` (`internal/config/config.go:1060-1096`) lists 33 built-ins. Hashi denies 23 through `options.disabled_tools` and keeps `view`, `ls`, `glob`, `grep`, `todos`, `lsp_diagnostics`, `lsp_references`, `lsp_symbols`, `lsp_definition` and `lsp_call_hierarchy`. No command prints the tool list (`crush schema` describes config, not tools), so the gate is the version: 0.100.x runs, anything newer needs `--crush-allow-newer`.
-- **Reads outside the workspace.** `view` (and the other read tools) ask permission for paths outside the working directory (`internal/agent/tools/view.go:115-153`); the headless auto-approval grants it.
-- **Environment.** `CRUSH_GLOBAL_CONFIG`, `CRUSH_GLOBAL_DATA` (`load.go:1325-1395`), `CRUSH_CACHE_DIR` and `CRUSH_SKILLS_DIR` (`load.go:1476-1485`) move every user-level path. `PushPopCrushEnv` (`load.go:406-430`) makes `CRUSH_<VAR>` stand in for `<VAR>` while providers are configured. The Copilot token import reads `$HOME/.config/github-copilot/apps.json`, or `%LOCALAPPDATA%` on Windows (`internal/oauth/copilot/disk.go:29-35`). `godotenv/autoload` in `main.go` loads `./.env` without overriding variables already set. `CRUSH_DISABLE_METRICS`/`DO_NOT_TRACK` (`internal/cmd/root.go:948-951`) and `CRUSH_DISABLE_PROVIDER_AUTO_UPDATE` (`load.go:787`) are honoured. `CRUSH_CLIENT_SERVER` switches `run` to a background server (`root.go:259-262`); Hashi never sets it and strips it.
-- **Sign-in.** `crush login [hyper|copilot|openai|grok]` (`internal/cmd/login.go:19-71`), Hyper by default, stores the credential in the global data config.
-- **Errors.** `agent processing failed: <error>` (`internal/app/app.go:502`) after Crush's own retries; a provider failure carries the provider's title and message, so limit detection matches generic wording only.
-- **Update check.** `app.checkForUpdates` (`internal/app/app.go:201, 1041-1050`) calls the GitHub releases API on every start, with no opt-out.
-
-**argv Hashi uses:** `["--data-dir", "<account>/data/<sha>", "run", "-q", ("-m", "<model>"), ("-s", "<uuid>"), "--", "<prompt>"]`, preceded by `["--version"]` and followed by `["--data-dir", "<same>", "session", "last", "--json"]`.
-
----
-
-## 8. Amp
+## 7. Amp
 
 Closed source; from ampcode.com docs (cli, execute-mode, streaming-json).
 
@@ -349,7 +307,7 @@ Fixture `amp_success.jsonl`:
 {"type":"result","subtype":"success","duration_ms":5400,"is_error":false,"num_turns":1,"result":"8","session_id":"T-5e2b8c41-0d9f-4a7e-b3c6-91f0e2d4a8b7","usage":{"input_tokens":1520,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
 ```
 
-## 9. Factory Droid
+## 8. Factory Droid
 
 Closed source; from docs.factory.com.
 
@@ -365,7 +323,7 @@ Fixture `droid_success.json`:
 {"type":"result","subtype":"success","is_error":false,"duration_ms":8123,"num_turns":3,"result":"A TypeScript monorepo with an API and a UI package.","session_id":"8af22e0a-d222-42c6-8c7e-7a059e391b0b","usage":{"input_tokens":11234,"output_tokens":187,"cache_read_input_tokens":8192,"cache_creation_input_tokens":0,"factory_credits":2}}
 ```
 
-## 10. Aider
+## 9. Aider
 
 Source: `github:Aider-AI/aider` (0.86.3.dev, Python).
 
@@ -388,7 +346,7 @@ Repo-map: disabled
 Tokens: 2.4k sent, 312 received. Cost: $0.0089 message, $0.0089 session.
 ```
 
-## 11. Kimi Code
+## 10. Kimi Code
 
 `MoonshotAI/kimi-cli` (Python) is **archived**; its successor is `MoonshotAI/kimi-code` (`@moonshot-ai/kimi-code` 2.5.0, TypeScript).
 
@@ -406,7 +364,7 @@ Fixture `kimi_success.jsonl`:
 {"role":"meta","type":"session.resume_hint","session_id":"0b8e6c2a-3f41-4d9a-a7c5-e21f9b04d6c3","command":"kimi -r 0b8e6c2a-3f41-4d9a-a7c5-e21f9b04d6c3","content":"To resume this session: kimi -r 0b8e6c2a-3f41-4d9a-a7c5-e21f9b04d6c3"}
 ```
 
-## 12. Cline CLI (v3)
+## 11. Cline CLI (v3)
 
 Source: `github:cline/cline`, `apps/cli` (`@cline/cli` 3.0.74, TypeScript). The older `cline task new`, `--oneshot` and `-o` flags no longer exist.
 
@@ -436,11 +394,11 @@ Criteria: headless maturity, JSON output that is stable and carries text, sessio
 
 Close runners-up: **Goose** (installed here, open source, tokens and USD in JSON) loses on safety and reliability: session ids are absent from output, setup errors go to stdout, mid-run provider failures exit 0 with `status:"completed"`, and the headless choice is "all tools" (`auto`) or "no tools" (`chat`). **Factory Droid** has the best permission model (read-only default, fail-fast) and a Claude-shaped `json` result but is closed source, lower profile and reports credits rather than USD. **Copilot CLI** has a good deny-by-default story but an undocumented event schema.
 
-Not recommended for now: **Crush** (no JSON, auto-approves everything, loads workspace `.env`; since added as an opt-in backend with the containment in section 7), **Aider** (no JSON, EOF confirms default to yes, `!` prompts run shell, errors exit 0), **Kimi Code** (print mode forces auto-approve, no usage), **Cline CLI** (no headless resume, auto-approves by default, self-updates), **Amp** (no approvals by default).
+Not recommended for now: **Crush** (no JSON, auto-approves everything, loads workspace `.env`; Hashi 0.4.0 shipped it as an opt-in backend and 0.4.1 removed it), **Aider** (no JSON, EOF confirms default to yes, `!` prompts run shell, errors exit 0), **Kimi Code** (print mode forces auto-approve, no usage), **Cline CLI** (no headless resume, auto-approves by default, self-updates), **Amp** (no approvals by default).
 
 ## Verification notes
 
-- Read from source via `opensrc`: opencode, Gemini CLI, Qwen Code, Crush, Goose, Aider, Kimi CLI and Kimi Code, Cline. One opencode claim (the `formatMessage` quoting) was re-checked directly at `packages/cli/src/run/run.ts:179-182`.
+- Read from source via `opensrc`: opencode, Gemini CLI, Qwen Code, Goose, Aider, Kimi CLI and Kimi Code, Cline. One opencode claim (the `formatMessage` quoting) was re-checked directly at `packages/cli/src/run/run.ts:179-182`.
 - From official docs only, not source: Cursor CLI, Copilot CLI, Amp, Factory Droid.
 - Nothing was executed except `--version`/`--help` on installed binaries: `goose` 1.44.0 (`goose run --help` lists `--output-format text|json|stream-json`, `--session-id`, `-n`, `--no-session`, `--max-turns`), `claude` 2.1.318, `codex` 0.166.0. `opencode --version` was killed with exit 137 before printing (ad-hoc signed 1.x binary), so its version is unknown.
 - Every `--` positional claim for yargs-based CLIs (Gemini, Qwen) is UNVERIFIED; the `--prompt=<text>` form is recommended instead. Before shipping any backend, record real fixtures from a pinned version with a harmless prompt and replace the derived fixtures above.
@@ -454,4 +412,3 @@ Added after the security audit. The runner skips each one when the agent's extra
 - **Codex**: no MCP flag. `-c` overrides are deep-merged, so `-c mcp_servers={}` does not remove configured servers; disabling one needs its name, `-c mcp_servers.<name>.enabled=false`.
 - **opencode**: the inline config starts with `"*": "deny"` and allows only `read` (without `.env` files), `glob`, `grep`, `list` and `lsp`. MCP tools are checked under `<server>_<tool>` and fall under the `*` deny.
 - **Cursor CLI**: `--approve-mcps` is stripped from extra arguments, like `--force` and `--yolo`.
-- **Crush** (opt-in, see [section 7](#crush-as-integrated-opt-in)): `-y`, `--yolo`, `-c`/`--cwd`, `-D`/`--data-dir` and `-H`/`--host` are stripped from extra arguments, `--data-dir` is always Hashi's, and the workspace config denies 23 of the 33 built-in tools.

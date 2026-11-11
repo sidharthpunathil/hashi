@@ -47,14 +47,6 @@
       "repo": null,
       "version": "2026.11.05-86047df",
       "verified": "2026-11-06"
-    },
-    "crush": {
-      "name": "Crush",
-      "source": "github:charmbracelet/crush",
-      "repo": "charmbracelet/crush",
-      "version": "0.100.0",
-      "tag": "v0.100.0",
-      "verified": "2026-11-06"
     }
   }
 }

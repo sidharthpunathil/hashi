@@ -24,7 +24,7 @@ pub struct LimitArgs {
     /// Prompts per UTC month.
     #[arg(long)]
     pub monthly_requests: Option<u32>,
-    /// Estimated spend per UTC day in USD (only Claude Code, opencode and Crush report cost).
+    /// Estimated spend per UTC day in USD (only Claude Code and opencode report cost).
     #[arg(long, value_parser = parse_budget)]
     pub daily_budget: Option<f64>,
     /// Estimated spend per UTC month in USD.
@@ -873,9 +873,6 @@ pub struct BinArgs {
     /// Path to the Qwen Code executable.
     #[arg(long, env = "HASHI_QWEN_BIN")]
     qwen_bin: Option<PathBuf>,
-    /// Path to the Crush executable.
-    #[arg(long, env = "HASHI_CRUSH_BIN")]
-    crush_bin: Option<PathBuf>,
     /// Path to the Cursor CLI executable.
     #[arg(long, env = "HASHI_CURSOR_BIN")]
     cursor_bin: Option<PathBuf>,
@@ -889,7 +886,6 @@ impl BinArgs {
             AgentKind::Gemini => self.gemini_bin.clone(),
             AgentKind::Opencode => self.opencode_bin.clone(),
             AgentKind::Qwen => self.qwen_bin.clone(),
-            AgentKind::Crush => self.crush_bin.clone(),
             AgentKind::Cursor => self.cursor_bin.clone(),
         };
         custom.unwrap_or_else(|| AgentConfig::default_for(agent).bin)
@@ -971,19 +967,20 @@ pub enum AccountCommand {
         #[command(flatten)]
         bins: BinArgs,
     },
-    /// Point the plain `claude` (or `codex`) command at an account, so it
+    /// Point the plain `claude` (or `codex`, `gemini`, `opencode`) command
+    /// at an account, so it
     /// signs in as that account in any terminal or editor, or back at your
     /// own login with `default`. Without a name, shows what it uses now.
     /// Running sessions pick the change up when they restart. The Claude
     /// desktop app keeps its own sign-in and is not affected.
     Switch {
-        /// claude or codex.
+        /// claude, codex, gemini or opencode.
         agent: AgentKind,
         /// A login account, or `default` for your original login.
         name: Option<String>,
     },
-    /// Undo every switch and command: plain `claude` and `codex` go back
-    /// to your own logins, Hashi's copies of them are deleted, and every
+    /// Undo every switch and command: plain `claude`, `codex`, `gemini`
+    /// and `opencode` go back to your own logins, Hashi's copies of them are deleted, and every
     /// command Hashi wrote (such as dclaude, or the `<name>-claude` scripts
     /// of 0.4.0) is removed. Your accounts stay.
     Reset {
@@ -1333,8 +1330,6 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             yes,
             bins,
         } => {
-            // Crush's default account has a Hashi-owned directory too, so
-            // the owner's own Crush config never loads; sign it in here.
             acct::ops::prepare_login(store, home, agent, &name)?;
             sign_in(home, agent, &name, yes, &bins)?;
             print_switch_hint(agent, &name);
@@ -1346,7 +1341,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                     bail!("pass --yes to reset without being asked");
                 }
                 if !confirm(
-                    "Put plain claude and codex back on your own logins and delete every command \
+                    "Put plain claude, codex, gemini and opencode back on your own logins and delete every command \
                      Hashi made?",
                 ) {
                     println!("nothing changed");
@@ -1360,7 +1355,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
                 for line in done {
                     println!("{line}");
                 }
-                println!("Restart running claude or codex sessions to pick it up.");
+                println!("Restart running agent sessions to pick it up.");
             }
         }
         AccountCommand::Commands { agent, name } => account_commands(home, store, agent, name)?,
@@ -1429,11 +1424,15 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             );
             println!();
             let live = acct::switch::Live::from_user().ok();
-            for agent in [AgentKind::Claude, AgentKind::Codex] {
-                println!(
-                    "{}  (hashi switch {agent} <name>)",
-                    acct::switch::describe(home, live.as_ref(), agent)
-                );
+            for agent in acct::switch::AGENTS {
+                let who = acct::switch::PlainLogin::read(home, live.as_ref(), agent);
+                // Agents with no login here and nothing switched in say nothing.
+                if who.switched() || who.email.is_some() {
+                    println!(
+                        "{}  (hashi switch {agent} <name>)",
+                        acct::switch::describe(home, live.as_ref(), agent)
+                    );
+                }
             }
             let _ = acct::commands::sync(home);
         }
@@ -1761,18 +1760,13 @@ pub enum ProjectCommand {
 }
 
 /// The agents whose executable is there, or every agent when none is.
-/// Crush is opt-in, so it is never part of a project's default agents; list
-/// it with `--agents` to allow it.
 fn installed_agents(bins: &BinArgs) -> Vec<AgentKind> {
-    let candidates = AgentKind::ALL
+    let found: Vec<AgentKind> = AgentKind::ALL
         .into_iter()
-        .filter(|a| *a != AgentKind::Crush);
-    let found: Vec<AgentKind> = candidates
-        .clone()
         .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
         .collect();
     if found.is_empty() {
-        candidates.collect()
+        AgentKind::ALL.to_vec()
     } else {
         found
     }

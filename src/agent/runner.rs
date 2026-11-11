@@ -39,7 +39,7 @@ pub fn is_hashi_secret(name: &OsStr) -> bool {
 }
 
 /// Whether the variable `name` matches `pattern`, without regard to case. A
-/// pattern ending in `*` matches every name with that prefix (`CRUSH_*`).
+/// pattern ending in `*` matches every name with that prefix (`OPENCODE_*`).
 #[must_use]
 pub fn env_name_matches(pattern: &str, name: &str) -> bool {
     match pattern.strip_suffix('*') {
@@ -1041,10 +1041,10 @@ exit 0;
     fn env_patterns_match_names_and_prefixes() {
         assert!(env_name_matches("OPENAI_API_KEY", "openai_api_key"));
         assert!(!env_name_matches("OPENAI_API_KEY", "OPENAI_API_KEY_2"));
-        assert!(env_name_matches("CRUSH_*", "CRUSH_HOME"));
-        assert!(env_name_matches("CRUSH_*", "crush_anthropic_api_key"));
-        assert!(!env_name_matches("CRUSH_*", "CRUSH"));
-        assert!(!env_name_matches("CRUSH_*", "XCRUSH_HOME"));
+        assert!(env_name_matches("OPENCODE_*", "OPENCODE_CONFIG"));
+        assert!(env_name_matches("OPENCODE_*", "opencode_api_key"));
+        assert!(!env_name_matches("OPENCODE_*", "OPENCODE"));
+        assert!(!env_name_matches("OPENCODE_*", "XOPENCODE_CONFIG"));
     }
 
     #[test]

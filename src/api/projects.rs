@@ -218,20 +218,16 @@ pub fn project_json(store: &Store, p: &Project, now: i64) -> ApiResult<Value> {
 }
 
 /// The agents installed on this server, or every agent when none is.
-/// Crush is opt-in and never part of the default; list it explicitly.
 fn installed(state: &AppState) -> Vec<AgentKind> {
     let found: Vec<AgentKind> = state
         .runtime
         .agents
         .iter()
-        .filter(|a| a.available && a.agent != AgentKind::Crush)
+        .filter(|a| a.available)
         .map(|a| a.agent)
         .collect();
     if found.is_empty() {
-        AgentKind::ALL
-            .into_iter()
-            .filter(|a| *a != AgentKind::Crush)
-            .collect()
+        AgentKind::ALL.to_vec()
     } else {
         found
     }

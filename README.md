@@ -137,7 +137,7 @@ hashi project add api ~/code/api --account claude=work,default --model claude=so
 hashi share alice --project api
 ```
 
-`hashi switch claude work` points your normal `claude` command at the `work` account, so typing `claude` in any terminal or editor signs in as it (the Claude desktop app keeps its own sign-in); `hashi switch claude default` goes back. If you want a command that skips permission prompts, choose its name yourself, for example `hashi account commands --agent claude --name dclaude`.
+`hashi switch claude work` (or `codex`, `gemini`, `opencode`) points your normal `claude` command at the `work` account, so typing `claude` in any terminal or editor signs in as it (the Claude desktop app keeps its own sign-in); `hashi switch claude default` goes back. If you want a command that skips permission prompts, choose its name yourself, for example `hashi account commands --agent claude --name dclaude`.
 
 Alice's prompts now run in `~/code/api` instead of a private workspace, on your `work` Claude plan first and your own login once `work` hits its limit. She sees only the project's name, never its folder or your account names. Your normal login is never touched, and Hashi never changes, moves or deletes a project folder. A project changes where a run starts, not what an agent running as you can read, so share only folders you trust people with. See [accounts](docs/configuration.md#accounts) and [projects](docs/configuration.md#projects).
 
@@ -191,11 +191,10 @@ Hashi drives whichever of these you have installed and signed in to. Each runs h
 | [opencode](https://opencode.ai) 2.2+ | `opencode` | every tool denied except read, glob, grep, list and lsp; `.env` files unreadable; project config ignored | tokens and cost | 2.2.5 (2026-11-06) |
 | [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen` | `--approval-mode default`, so shell and edits are denied; no MCP servers | tokens | 0.26.8 (2026-11-06) |
 | [Cursor CLI](https://docs.cursor.com/en/cli/overview) | `cursor` | print mode with the sandbox on, never `--force`, so changes are proposed and not applied | text only | 2026.11.05-86047df (2026-11-06) |
-| [Crush](https://github.com/charmbracelet/crush) 0.100 (opt-in: `--enable-crush`) | `crush` | every write, shell, network and sub-agent tool removed; project config refused; your own Crush config never loads | tokens and cost | 0.100.0 (2026-11-06) |
 
 "Verified with" is the upstream release whose headless flags, environment variables, account isolation and limit messages were last checked, recorded in [`verified-versions.json`](docs/research/verified-versions.json). A newer release usually works; `hashi doctor` says when yours is newer, and a weekly check opens an issue for each new release.
 
-Crush is off unless you pass `--enable-crush`, because a headless `crush run` approves every tool call itself: Hashi can only take tools away, and the read tools left can still read any file your user can ([details](docs/security-model.md#crush)). To loosen Claude Code or Codex, use `--claude-permission-mode` or `--codex-sandbox`; the other defaults are fixed in this release.
+To loosen Claude Code or Codex, use `--claude-permission-mode` or `--codex-sandbox`; the other defaults are fixed in this release.
 
 ## Remote access
 

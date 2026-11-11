@@ -1706,11 +1706,11 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             1 => ("1 token".to_owned(), TEXT),
             n => (format!("{n} tokens"), TEXT),
         },
-        Action::InstallCloudflared | Action::InstallTailscale | Action::InstallCrush => {
-            let helper = match action {
-                Action::InstallCloudflared => Helper::Cloudflared,
-                Action::InstallTailscale => Helper::Tailscale,
-                _ => Helper::Crush,
+        Action::InstallCloudflared | Action::InstallTailscale => {
+            let helper = if action == Action::InstallCloudflared {
+                Helper::Cloudflared
+            } else {
+                Helper::Tailscale
             };
             match app.helper_path(helper) {
                 Some(path) => (format!("installed: {}", path.display()), t::MINT),
@@ -1801,7 +1801,6 @@ pub fn action_cli(app: &App, action: Action) -> String {
         Action::CopyUrl => "printed by hashi serve".to_owned(),
         Action::InstallCloudflared => "hashi install cloudflared".to_owned(),
         Action::InstallTailscale => "hashi install tailscale".to_owned(),
-        Action::InstallCrush => "hashi install crush".to_owned(),
         Action::CheckUpdate if app.update.is_some() => "hashi update".to_owned(),
         Action::CheckUpdate => "hashi update --check".to_owned(),
         Action::InstallUpdate => "hashi update".to_owned(),
