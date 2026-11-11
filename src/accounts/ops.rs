@@ -42,7 +42,7 @@ pub fn check_new(
             agent.display_name(),
             match agent {
                 AgentKind::Cursor => "; add an API key with --kind api-key",
-                AgentKind::Opencode | AgentKind::Qwen | AgentKind::Crush => "; add a login account",
+                AgentKind::Opencode | AgentKind::Qwen => "; add a login account",
                 _ => "",
             }
         );
@@ -98,14 +98,13 @@ pub fn create(
         &format!("{agent}:{name}"),
         kind.as_str(),
     )?;
-    sync_commands(store, home);
     Ok(dir)
 }
 
-/// Brings the `<name>-claude` commands up to date (see
+/// Brings the skip-permissions command up to date (see
 /// [`acct::commands`]). Best effort: an account change never fails on it.
-pub fn sync_commands(store: &Store, home: &Path) {
-    if let Err(e) = acct::commands::sync(store, home) {
+pub fn sync_commands(home: &Path) {
+    if let Err(e) = acct::commands::sync(home) {
         tracing::debug!("account commands not synced: {e}");
     }
 }
@@ -177,18 +176,13 @@ pub fn add_remote(
 }
 
 /// Gets a login account ready to sign in again: its directory exists and it
-/// is a login. Crush's default account counts, since Hashi owns its
-/// directory too.
+/// is a login.
 ///
 /// # Errors
 ///
 /// Fails when there is no such login account or the directory cannot be
 /// made.
 pub fn prepare_login(store: &Store, home: &Path, agent: AgentKind, name: &str) -> Result<()> {
-    if agent == AgentKind::Crush && name == acct::DEFAULT {
-        acct::crush_default_dir(home).context("preparing the account directory")?;
-        return Ok(());
-    }
     acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))?;
     match store.get_account(agent, name)? {
         Some(a) if a.kind == AccountKind::Login => {}
@@ -198,7 +192,6 @@ pub fn prepare_login(store: &Store, home: &Path, agent: AgentKind, name: &str) -
         _ => bail!("no {agent} account named {name}"),
     }
     acct::create_dir(home, agent, name).context("preparing the account directory")?;
-    sync_commands(store, home);
     Ok(())
 }
 
@@ -262,15 +255,18 @@ pub fn clear_limit(store: &Store, agent: AgentKind, name: &str, actor: &str) -> 
 ///
 /// # Errors
 ///
-/// Fails when there is no such account (other than the default) or on
-/// database errors.
-pub fn check_removable(store: &Store, agent: AgentKind, name: &str) -> Result<usize> {
+/// Fails when there is no such account (other than the default), when it is
+/// the one the plain command is switched to, or on database errors.
+pub fn check_removable(store: &Store, home: &Path, agent: AgentKind, name: &str) -> Result<usize> {
     acct::check_name(name, false).map_err(|e| anyhow::anyhow!(e))?;
     if store
         .get_account(agent, name)?
         .is_none_or(|a| a.kind == AccountKind::Default)
     {
         bail!("no {agent} account named {name}");
+    }
+    if acct::switch::active(home, agent) == name {
+        bail!("plain {agent} is switched to {name}; run `hashi switch {agent} default` first");
     }
     Ok(store.tokens_using_account(agent, name)?)
 }
@@ -292,7 +288,6 @@ pub fn remove(
     let removed = store.remove_account(agent, name)?;
     let dir = acct::remove_dir(home, agent, name);
     store.audit(actor, "account.remove", &format!("{agent}:{name}"), "")?;
-    sync_commands(store, home);
     Ok((removed, dir))
 }
 
@@ -337,7 +332,6 @@ pub fn account_command(
         let upper = key.to_string_lossy().to_ascii_uppercase();
         let removed = acct::credential_vars(agent)
             .iter()
-            .chain(acct::always_removed(agent))
             .any(|p| crate::agent::runner::env_name_matches(p, &upper));
         if crate::agent::runner::is_hashi_secret(&key) || removed {
             cmd.env_remove(&key);
@@ -442,4 +436,96 @@ fn run_status(cmd: &mut std::process::Command) -> Option<bool> {
         .ok()
         .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool));
     Some(field.unwrap_or(out.status.success()))
+}
+
+/// `hashi switch <agent> <name>`: points the agent's plain command at the
+/// login account `name`, or at the owner's original login for `default`
+/// (see [`acct::switch`]).
+///
+/// # Errors
+///
+/// Fails when the agent cannot be switched, the account is unknown or not a
+/// login of this machine, or the login cannot be moved.
+pub fn switch(
+    store: &Store,
+    home: &Path,
+    agent: AgentKind,
+    name: &str,
+    actor: &str,
+) -> Result<acct::switch::Outcome> {
+    acct::check_name(name, true).map_err(|e| anyhow::anyhow!(e))?;
+    if name != acct::DEFAULT {
+        match store.get_account(agent, name)? {
+            Some(a) if a.kind == AccountKind::Login && a.shared_by.is_none() => {}
+            Some(a) => bail!(
+                "{agent}:{name} is a {} account; only a login account can be switched to",
+                a.kind
+            ),
+            None => bail!("no {agent} account named {name}"),
+        }
+    }
+    let live = acct::switch::Live::from_user().map_err(|e| anyhow::anyhow!(e))?;
+    let keychain = acct::switch::Keychain::new();
+    let ctx = switch_ctx(home, &live, &keychain);
+    let outcome = acct::switch::switch(&ctx, agent, name).map_err(|e| anyhow::anyhow!(e))?;
+    if !outcome.unchanged {
+        store.audit(
+            actor,
+            "account.switch",
+            &format!("{agent}:{name}"),
+            &format!("from {}", outcome.from),
+        )?;
+    }
+    Ok(outcome)
+}
+
+fn switch_ctx<'a>(
+    home: &'a Path,
+    live: &'a acct::switch::Live,
+    keychain: &'a acct::switch::Keychain,
+) -> acct::switch::Ctx<'a> {
+    acct::switch::Ctx {
+        home,
+        live,
+        vault: cfg!(target_os = "macos").then_some(keychain as &dyn acct::switch::Vault),
+    }
+}
+
+/// `hashi account reset`: puts the plain `claude`, `codex`, `gemini` and `opencode` commands back
+/// on the owner's original logins, deletes Hashi's copies of them, clears
+/// the skip-permissions words and deletes every command Hashi wrote. The
+/// accounts themselves stay. Returns one line per thing done.
+///
+/// # Errors
+///
+/// Fails when a login cannot be moved back or the settings cannot be saved;
+/// what was done before that stays done.
+pub fn reset(store: &Store, home: &Path, actor: &str) -> Result<Vec<String>> {
+    use acct::switch::Reset;
+    let live = acct::switch::Live::from_user().map_err(|e| anyhow::anyhow!(e))?;
+    let keychain = acct::switch::Keychain::new();
+    let ctx = switch_ctx(home, &live, &keychain);
+    let mut done = Vec::new();
+    for agent in acct::switch::AGENTS {
+        match acct::switch::reset(&ctx, agent).map_err(|e| anyhow::anyhow!(e))? {
+            Reset::AlreadyClean => {}
+            Reset::Restored { from } => {
+                done.push(format!(
+                    "plain {agent} is back on your own login (was {from})"
+                ));
+            }
+            Reset::SignedOut { from } => done.push(format!(
+                "plain {agent} is signed out again, as before the first switch (was {from})"
+            )),
+        }
+    }
+    acct::commands::Keywords::default()
+        .save(home)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    match acct::commands::sync(home) {
+        Ok(r) => done.extend(r.removed.iter().map(|c| format!("deleted the command {c}"))),
+        Err(e) => tracing::debug!("commands not synced: {e}"),
+    }
+    store.audit(actor, "account.reset", "all", &done.join("; "))?;
+    Ok(done)
 }

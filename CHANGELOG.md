@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-11
+
+### Added
+
+- `hashi switch claude work` (also `hashi account switch`, and `w` in the dashboard's Accounts popup) points the plain `claude` command at one of your login accounts, so typing `claude` in any terminal or editor signs in as it, with no alias and no variable. `hashi switch claude default` puts your original login back, and `hashi switch claude` shows which one is in use. It works the same for `codex`, `gemini` and `opencode` (Qwen Code and Cursor CLI cannot be switched and say why). `hashi switch claude` shows who plain `claude` signs in as, with the email, and so do `hashi account list` and the Accounts popup. Hashi swaps only the login (the Keychain entry or credentials file, and the signed-in identity in `~/.claude.json`), keeps the one it leaves where it belongs, and never loses a token a run refreshed. Running sessions pick the change up when they restart, and the Claude desktop app keeps its own sign-in and is not switched.
+
+- `hashi account reset` (`R` in the Accounts popup) puts everything back: plain `claude`, `codex`, `gemini` and `opencode` on your own logins, Hashi's copies of them deleted, the skip-permissions words cleared and every command Hashi wrote deleted. Your accounts stay.
+
+### Changed
+
+- The skip-permissions command is now one word that you choose, and nothing is set by default. `hashi account commands --agent claude --name dclaude` makes `dclaude` (`claude --dangerously-skip-permissions`); `--agent codex --name dcodex` does the same for Codex; an empty `--name` removes it. It runs the plain CLI, so it follows `hashi switch`. `n` in the Accounts popup sets the words, and they are saved as `dangerousCommands` in `settings.json`.
+
+### Removed
+
+- The per-account commands of 0.4.0 (`<name>-claude`, `<name>-dclaude`, `<name>-codex`, `<name>-dcodex`) and their name patterns. Hashi deletes the scripts it wrote when it starts or on `hashi account commands`; use `hashi switch` instead.
+- Crush support. Hashi no longer runs Charmbracelet's Crush: the `crush` agent, the `--enable-crush`, `--crush-bin` and `--crush-allow-newer` flags with their `HASHI_ENABLE_CRUSH`, `HASHI_CRUSH_BIN` and `HASHI_CRUSH_ALLOW_NEWER` variables, `hashi install crush`, the dashboard's Install Crush row and its doctor line are gone, and `crush` is no longer accepted as an agent name. A database from 0.4.0 that names `crush` still opens: its old requests and accounts are left out of lists, `crush` is dropped from token, invite and project agent and account lists, and any Crush prompt still queued is failed when the server starts. `~/.hashi/accounts/crush/` is left as it is; delete it if you no longer need it.
+
 ## [0.4.0] - 2026-11-11
 
 ### Added

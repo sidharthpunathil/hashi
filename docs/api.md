@@ -49,7 +49,7 @@ A request with an `Authorization` header and no `Content-Type`, or `curl -d`'s d
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `message` | string | required | Up to 32 KB |
-| `agent` | `claude`, `codex`, `gemini`, `opencode`, `qwen`, `cursor`, or `crush` when the server runs with `--enable-crush` | server default (`claude`), or the project's `defaultAgent` | Must be installed and allowed for the token |
+| `agent` | `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor` | server default (`claude`), or the project's `defaultAgent` | Must be installed and allowed for the token |
 | `model` | string | agent default | Passed to the agent's `--model` / `-m` |
 | `wait` | seconds | none | Hold the request open up to this long (max 120) |
 
@@ -82,7 +82,7 @@ A token can cancel its own requests; an admin token can cancel any. Another toke
 
 `POST /v1/chat/completions` and `GET /v1/models` speak enough of the OpenAI API for apps and libraries built for it. They take the same Hashi tokens, and every prompt goes through the same path as `POST /v1/ask`, so pause, agent scope, limits and the queue all apply.
 
-- **`model`** picks the agent: `claude`, `codex`, `gemini`, `opencode`, `qwen`, `cursor` or (when enabled) `crush`. Add the agent's own model after a slash, for example `claude/opus` or `gemini/gemini-2.5-pro`. Without `model` the server's default agent answers.
+- **`model`** picks the agent: `claude`, `codex`, `gemini`, `opencode`, `qwen` or `cursor`. Add the agent's own model after a slash, for example `claude/opus` or `gemini/gemini-2.5-pro`. Without `model` the server's default agent answers.
 - **`messages`.** System and developer messages go first as an instruction block, earlier user and assistant turns follow as a plain transcript, and the last message, which must be from the user, ends the prompt. Only text is accepted: a string, or parts with `type: "text"`. Images, audio and `tool` messages answer `400`.
 - **Response.** A standard `chat.completion`: `id` (`chatcmpl-` and the Hashi request id), `object`, `created` (Unix seconds), `model` (as sent, or the default agent's name), `system_fingerprint: null`, and one choice with `index: 0`, `message` (`role: "assistant"`, `content`, `refusal: null`), `logprobs: null` and `finish_reason: "stop"`. `usage` maps the tokens the agent reports (`prompt_tokens`, `completion_tokens`, `total_tokens`) and is left out when the agent reports none. The `X-Hashi-Request-Id` header carries the Hashi request id.
 - **`stream: true`** answers with server-sent events: a role chunk, then `: queued` or `: running` comment lines every second while the request waits or runs, then one chunk with the whole answer, a final chunk with `finish_reason`, and `data: [DONE]`. Every chunk is a `chat.completion.chunk` with the same `id`, `created` and `model`, and its choice has `index`, `delta`, `logprobs: null` and `finish_reason`. Agents do not stream token by token. With `stream_options.include_usage` every chunk has `usage: null` except a last one before `[DONE]`, which has empty `choices` and the `usage` (still `null` when the agent reports none). A failed run sends `data: {"error": {...}}` and closes the stream. A stream also ends, with an error chunk and `data: [DONE]`, when its token is paused (`token_paused`), revoked or expires (`unauthorized`), or when it has been open for twice the run timeout plus 10 seconds (`504 stream_timeout`). The request keeps its place in the queue: read it later with `GET /v1/ask/{id}`. A stream counts as one of the token's 4 open long polls; a fifth answers `429 too_many_waits`.
@@ -146,7 +146,7 @@ A token with a `project` runs in the project's folder. It may use the agents bot
 
 `accounts` looks like `{"claude": ["work", "personal"], "codex": ["ci"]}`. Each name must be an account added with `hashi account add`, or `default` for your own login; an unknown name is refused with `400`. A run uses the first listed account that is enabled and not at its limit, and fails over to the next one when it hits the agent's limit. Token listings and `PATCH` responses show `accounts` to admins; `/v1/me`, MCP and the claim page never do.
 
-`limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`, `maxPending` and `stopAtPercent`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code, opencode and Crush do, so budgets bound only those.
+`limits` takes `dailyRequests`, `monthlyRequests`, `dailyBudgetUsd`, `monthlyBudgetUsd`, `maxPending` and `stopAtPercent`. Days and months are UTC. Spend uses the cost the agent reports, which only Claude Code and opencode do, so budgets bound only those.
 
 `stopAtPercent` (1 to 100) keeps the rest of the owner's quota for the owner: once every account that could serve the token's prompt has used that share of any quota window (5 hours or week), the prompt is refused with `429 limit_reached`, `limit: "stopAtPercent"`, and `resetAt` and `retryAfter` saying when it opens again. Usage Hashi has not read yet never holds a token back.
 

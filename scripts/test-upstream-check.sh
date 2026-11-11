@@ -82,8 +82,8 @@ else ok; fi
 
 # The committed JSON has a known source type for every agent.
 real=$(run list)
-eq "real json lists seven agents" 7 "$(printf '%s\n' "$real" | grep -c .)"
-for a in claude codex gemini opencode qwen cursor crush; do
+eq "real json lists six agents" 6 "$(printf '%s\n' "$real" | grep -c .)"
+for a in claude codex gemini opencode qwen cursor; do
     has "real json has $a" "$a|" "$real"
 done
 eq "real json sources are known" "" \

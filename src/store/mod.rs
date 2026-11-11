@@ -68,6 +68,41 @@ pub enum StoreError {
     /// reached. The message says which.
     #[error("{0}")]
     LimitReached(&'static str),
+    /// A row names an agent this Hashi does not run, such as `crush`, whose
+    /// support was removed in 0.4.1. Lists skip such rows and lookups treat
+    /// them as missing, so an old row never breaks a listing.
+    #[error("record for unsupported agent `{0}`")]
+    UnsupportedAgent(String),
+}
+
+/// Collects `rows`, leaving out those that name an agent this Hashi does
+/// not run ([`StoreError::UnsupportedAgent`]). Any other error stops it.
+pub(crate) fn known_rows<T>(
+    rows: impl Iterator<Item = rusqlite::Result<Result<T>>>,
+) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for row in rows {
+        match row.map_err(StoreError::from).and_then(|r| r) {
+            Ok(v) => out.push(v),
+            Err(StoreError::UnsupportedAgent(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// One looked-up row, with a row for an unsupported agent read as missing.
+pub(crate) fn known_row<T>(row: Result<Option<T>>) -> Result<Option<T>> {
+    match row {
+        Err(StoreError::UnsupportedAgent(_)) => Ok(None),
+        other => other,
+    }
+}
+
+/// Parses a stored agent name, or [`StoreError::UnsupportedAgent`].
+pub(crate) fn stored_agent(name: &str) -> Result<AgentKind> {
+    name.parse()
+        .map_err(|_| StoreError::UnsupportedAgent(name.to_owned()))
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -1245,11 +1280,13 @@ impl Store {
     /// Fails on database errors.
     pub fn get_request(&self, id: &str) -> Result<Option<Request>> {
         let sql = format!("SELECT {REQUEST_COLUMNS} FROM requests WHERE id = ?1");
-        self.conn()?
+        let row = self
+            .conn()?
             .prepare_cached(&sql)?
             .query_row([id], row_to_request)
             .optional()?
-            .transpose()
+            .transpose();
+        known_row(row)
     }
 
     /// Most recent requests, newest first, with full bodies. The dashboard
@@ -1265,8 +1302,7 @@ impl Store {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([limit], row_to_request)?;
-        rows.map(|r| r.map_err(StoreError::from).and_then(|t| t))
-            .collect()
+        known_rows(rows)
     }
 
     /// Most recent requests, newest first, for a list view: the prompt and
@@ -1287,8 +1323,7 @@ impl Store {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([limit], row_to_request)?;
-        rows.map(|r| r.map_err(StoreError::from).and_then(|t| t))
-            .collect()
+        known_rows(rows)
     }
 
     /// Most recent failed requests, newest first.
@@ -1304,8 +1339,7 @@ impl Store {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([limit], row_to_request)?;
-        rows.map(|r| r.map_err(StoreError::from).and_then(|t| t))
-            .collect()
+        known_rows(rows)
     }
 
     /// The migration level the database is at.
@@ -1351,8 +1385,10 @@ impl Store {
     /// Re-queues requests that were running when the process last stopped,
     /// and counts the interruption. A request that has now interrupted the
     /// server [`MAX_INTERRUPTS`] times is failed instead, so a prompt that
-    /// crashes Hashi cannot run again on every start. Returns how many
-    /// requests were touched.
+    /// crashes Hashi cannot run again on every start. A queued or running
+    /// request for an agent this Hashi does not run (such as `crush`, whose
+    /// support was removed) is failed too, since nothing would ever claim
+    /// it. Returns how many requests were touched.
     ///
     /// # Errors
     ///
@@ -1360,6 +1396,19 @@ impl Store {
     pub fn recover_interrupted(&self) -> Result<usize> {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        let known = AgentKind::ALL
+            .iter()
+            .map(|a| format!("'{}'", a.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unsupported = tx.execute(
+            &format!(
+                "UPDATE requests SET status = 'failed', completed_at = ?1,
+                     error = 'this agent is no longer supported by Hashi'
+                 WHERE status IN ('queued', 'running') AND agent NOT IN ({known})"
+            ),
+            [now_ms()],
+        )?;
         let failed = tx.execute(
             "UPDATE requests SET status = 'failed', attempts = attempts + 1, completed_at = ?1,
                  error = ?2
@@ -1376,7 +1425,7 @@ impl Store {
             [],
         )?;
         tx.commit()?;
-        Ok(failed + requeued)
+        Ok(unsupported + failed + requeued)
     }
 
     /// Puts a running request back in the queue without counting an
@@ -1879,9 +1928,7 @@ fn row_to_request(r: &Row<'_>) -> rusqlite::Result<Result<Request>> {
             id: r.get(0)?,
             token_id: r.get(1)?,
             token_name: r.get(2)?,
-            agent: agent
-                .parse()
-                .map_err(|e: crate::agent::UnknownAgent| StoreError::Corrupt(e.to_string()))?,
+            agent: stored_agent(&agent)?,
             model: r.get(4)?,
             message: r.get(5)?,
             stateful: r.get(6)?,

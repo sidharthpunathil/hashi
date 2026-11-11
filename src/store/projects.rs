@@ -64,12 +64,9 @@ fn row_to_project(r: &Row<'_>) -> rusqlite::Result<Result<Project>> {
             path: r.get(1)?,
             agents: token::decode_agents(&agents),
             accounts: acct::decode(&accounts),
-            default_agent: default_agent
-                .map(|a| {
-                    a.parse()
-                        .map_err(|e: crate::agent::UnknownAgent| StoreError::Corrupt(e.to_string()))
-                })
-                .transpose()?,
+            // An agent this Hashi no longer runs (such as `crush`) is no
+            // default: the project falls back to its first agent.
+            default_agent: default_agent.and_then(|a| a.parse().ok()),
             models: proj::decode_models(&models),
             note: r.get(6)?,
             created_at: r.get(7)?,
@@ -351,6 +348,108 @@ mod tests {
         })
         .unwrap()
         .0
+    }
+
+    /// Hashi 0.4.0 could run Crush, so a database from it may name `crush`
+    /// in any agent column. Support is gone; such rows must not break a
+    /// listing, the dashboard or the API.
+    #[test]
+    fn rows_naming_the_removed_crush_agent_do_not_break_listings() {
+        let s = store();
+        let t = token(&s, None);
+        let kept = uuid::Uuid::new_v4().to_string();
+        let old = uuid::Uuid::new_v4().to_string();
+        let queued = uuid::Uuid::new_v4().to_string();
+        for id in [&kept, &old, &queued] {
+            s.insert_request(NewRequest {
+                id,
+                token: &t,
+                agent: AgentKind::Claude,
+                model: None,
+                message: "hi",
+            })
+            .unwrap();
+        }
+        s.add_account(AgentKind::Claude, "work", acct::AccountKind::Login)
+            .unwrap();
+        s.add_account(AgentKind::Codex, "old", acct::AccountKind::Login)
+            .unwrap();
+        s.add_project(&project("api")).unwrap();
+        {
+            let c = s.conn().unwrap();
+            c.execute(
+                "UPDATE requests SET agent = 'crush', status = 'failed' WHERE id = ?1",
+                [&old],
+            )
+            .unwrap();
+            c.execute(
+                "UPDATE requests SET agent = 'crush' WHERE id = ?1",
+                [&queued],
+            )
+            .unwrap();
+            c.execute(
+                "UPDATE accounts SET agent = 'crush' WHERE agent = 'codex'",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                r#"UPDATE tokens SET agents = 'claude,crush',
+                       accounts = '{"claude":["work"],"crush":["default"]}' WHERE id = ?1"#,
+                [&t.id],
+            )
+            .unwrap();
+            c.execute(
+                r#"UPDATE projects SET agents = 'claude,crush', default_agent = 'crush',
+                       accounts = '{"crush":["default"],"claude":["work"]}',
+                       models = '{"crush":"x","claude":"sonnet"}' WHERE name = 'api'"#,
+                [],
+            )
+            .unwrap();
+        }
+
+        let recent: Vec<String> = s
+            .recent_requests(10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(recent, std::slice::from_ref(&kept));
+        assert_eq!(s.recent_requests_brief(10).unwrap().len(), 1);
+        assert!(s.failed_requests(10).unwrap().is_empty());
+        assert!(s.get_request(&old).unwrap().is_none());
+        assert!(s.get_request(&kept).unwrap().is_some());
+
+        let accounts = s.list_accounts().unwrap();
+        assert!(accounts.iter().all(|a| a.agent == AgentKind::Claude));
+        assert!(accounts.iter().any(|a| a.name == "work"));
+
+        let tok = s.get_token(&t.id).unwrap().unwrap();
+        assert_eq!(tok.agents, [AgentKind::Claude]);
+        assert_eq!(acct::format_bindings(&tok.accounts), "claude=work");
+        assert_eq!(s.list_tokens().unwrap().len(), 1);
+
+        let p = s.get_project("api").unwrap().unwrap();
+        assert_eq!(p.agents, [AgentKind::Claude]);
+        assert_eq!(p.default_agent, None);
+        assert_eq!(
+            p.accounts.keys().copied().collect::<Vec<_>>(),
+            [AgentKind::Claude]
+        );
+        assert_eq!(proj::format_models(&p.models), "claude=sonnet");
+        assert_eq!(s.list_projects().unwrap().len(), 1);
+
+        // A queued Crush prompt can never run, so start-up fails it.
+        assert_eq!(s.recover_interrupted().unwrap(), 1);
+        let status: String = s
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM requests WHERE id = ?1",
+                [&queued],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
     }
 
     #[test]

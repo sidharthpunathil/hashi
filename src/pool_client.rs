@@ -50,6 +50,7 @@ pub struct Joined {
     /// The local token the pool's prompts run with.
     pub local_token_id: String,
     /// The agents offered.
+    #[serde(deserialize_with = "crate::agent::known_agents")]
     pub agents: Vec<AgentKind>,
     /// When this Hashi leaves, Unix ms.
     pub until: Option<i64>,

@@ -42,9 +42,6 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--claude-bin` | `HASHI_CLAUDE_BIN` | found on `PATH` |
 | `--codex-bin` | `HASHI_CODEX_BIN` | found on `PATH` |
 | `--gemini-bin`, `--opencode-bin`, `--qwen-bin`, `--cursor-bin` | `HASHI_GEMINI_BIN`, `HASHI_OPENCODE_BIN`, `HASHI_QWEN_BIN`, `HASHI_CURSOR_BIN` | found on `PATH` |
-| `--enable-crush` | `HASHI_ENABLE_CRUSH` | off. Offer Crush, which is opt-in: while off it is not probed, not listed and a request for it answers "Crush is not installed or not enabled". See [security model](security-model.md#crush) |
-| `--crush-bin` | `HASHI_CRUSH_BIN` | found on `PATH` |
-| `--crush-allow-newer` | `HASHI_CRUSH_ALLOW_NEWER` | off. Run a Crush release newer than 0.100.x, the newest whose tool list Hashi has checked. Without it such a release is refused |
 | `--max-turns` | `HASHI_MAX_TURNS` | `10` (Claude) |
 | `--claude-permission-mode` | `HASHI_CLAUDE_PERMISSION_MODE` | Claude's default |
 | `--codex-sandbox` | `HASHI_CODEX_SANDBOX` | `read-only` |
@@ -61,7 +58,6 @@ hashi serve --headless                     # start it with plain log lines inste
 hashi doctor                               # agents, cloudflared, tailscale and its sign-in
 hashi install cloudflared                  # show the official install command, run it on yes
 hashi install tailscale --yes              # run it without asking
-hashi install crush                        # Crush, from its README; then start with --enable-crush
 hashi token create ci --agents codex --expires-in-days 30
 hashi token list                           # status and today's use per token
 hashi token update ci --pause              # by name, prefix or id; or --resume, --daily-requests 100, --clear-limits
@@ -78,7 +74,7 @@ hashi request '<ask-access link>' --name Sam      # on a friend's machine: ask s
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
-hashi update                               # install the latest release (--check, --version v0.4.0, --allow-downgrade, --yes)
+hashi update                               # install the latest release (--check, --version v0.4.1, --allow-downgrade, --yes)
 hashi uninstall                            # remove the binary and ~/.hashi (--dry-run, --keep-data, --yes)
 hashi llm                                  # a Markdown guide for an LLM agent (alias: hashi guide)
 hashi llm --output hashi-guide.md          # write it to a file readable only by you
@@ -96,9 +92,9 @@ hashi token list --json | jq -r '.tokens[] | select(.status == "paused") | .name
 
 `hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
-The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.4.0`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
+The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.4.1`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
 
-- `--version v0.4.0` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
+- `--version v0.4.1` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
 - Downloads are HTTPS only, and only a regular file in the archive is installed (see [supply chain](security-model.md#supply-chain)).
 
 ### Invites and limits
@@ -122,7 +118,7 @@ The claim page shows who is sharing, which agents the person gets, their limits,
 | Flag | Limit |
 |---|---|
 | `--daily-requests`, `--monthly-requests` | Prompts per UTC day or month |
-| `--daily-budget`, `--monthly-budget` | Reported spend in USD per UTC day or month. Only Claude Code, opencode and Crush report cost, so budgets bound only those |
+| `--daily-budget`, `--monthly-budget` | Reported spend in USD per UTC day or month. Only Claude Code and opencode report cost, so budgets bound only those |
 | `--max-pending` | Prompts queued or running at once, 1 to 100. A `user` token created without limits gets 3 |
 
 Over a cap, a prompt answers `429 limit_reached` with the limit and the time it resets. `hashi token update --clear-limits` removes every limit before applying the limit flags given with it.
@@ -163,35 +159,44 @@ Names are 1 to 32 characters from `a-z`, `0-9` and `-`; `default` is reserved. `
 | opencode | `XDG_DATA_HOME`, `opencode auth login --standalone` | not supported |
 | Qwen Code | `QWEN_HOME`, `qwen`, then `/auth` | not supported |
 | Cursor CLI | not supported | `CURSOR_API_KEY` |
-| Crush | `HOME` with `CRUSH_GLOBAL_CONFIG`, `CRUSH_GLOBAL_DATA`, `CRUSH_CACHE_DIR` and `CRUSH_SKILLS_DIR` under it, `crush login` (Charm Hyper; `crush login copilot`, `openai` or `grok` for the others) | not supported |
-
-Crush's `default` account is not your own Crush login: it is `~/.hashi/accounts/crush/default/`, so your `~/.config/crush` (with its MCP servers and hooks) never loads in a Hashi run. Sign it in with `hashi account login crush default`, or leave your provider variables (such as `ANTHROPIC_API_KEY`) in Hashi's environment, which the default account still sees. Other Crush accounts see none of the provider variables in Crush's README, and no Crush run sees an inherited `CRUSH_*` or `XDG_*` directory variable.
 
 A login account is the directory `~/.hashi/accounts/<agent>/<name>/` (mode `0700`). `hashi account add` prints the sign-in command with that variable set and, on a terminal, runs it with the terminal attached once you confirm (`--yes` skips the question); without a terminal it only prints it. It then checks the result with `claude auth status --json` for Claude Code, and for the other CLIs that the CLI wrote something into the directory. Every run on the account sets the variable to the same absolute path, which matters to Claude Code on macOS, whose Keychain entry is tied to that exact string. Hashi never reads, copies or refreshes what the CLI keeps there.
 
-**Starting Claude Code or Codex on an account yourself.** Each local Claude Code account (login, API key or OAuth token) and each Codex login account gets two commands:
-
-| Agent | Command | Runs |
-|---|---|---|
-| Claude Code | `<name>-claude` | `claude` |
-| Claude Code | `<name>-dclaude` | `claude --dangerously-skip-permissions` |
-| Codex | `<name>-codex` | `codex` |
-| Codex | `<name>-dcodex` | `codex --dangerously-bypass-approvals-and-sandbox` |
-
-Any arguments pass through (`rajat-claude --resume`). Each is a short script in the folder that holds the `hashi` your PATH finds, usually `~/.local/bin`, so it works in every shell and no startup file changes. It sets `CLAUDE_CONFIG_DIR` or `CODEX_HOME` to the account's directory (the same string Hashi's runs use, so the macOS Keychain login matches), clears the variables that would pick another sign-in (for Claude Code the `ANTHROPIC_*` and `CLAUDE_*` ones in the list above, such as `ANTHROPIC_API_KEY` and `CLAUDE_CODE_USE_BEDROCK`, but not your `AWS_*` or Google Cloud variables; for Codex the `OPENAI_*` and `CODEX_*` ones), reads a Claude key account's key from its file at run time, and starts the CLI from PATH. Codex API-key accounts get no commands, since Codex reads a key from the environment only in `codex exec`. If the account's directory is gone the command says so and stops, instead of letting the CLI make a fresh signed-out one.
+**Making plain `claude`, `codex`, `gemini` or `opencode` use an account.** `hashi switch claude work` (or `hashi account switch claude work`, or `w` in the dashboard's Accounts popup) points the normal `claude` command at the login account `work`. After that, typing `claude` in any terminal or editor signs in as `work`, with no alias and no variable to set. `hashi switch claude default` puts your original login back, and `hashi switch claude` shows what it uses now.
 
 ```bash
-hashi account commands                                   # list them, making any that are missing
-rajat-dclaude -c                                         # Claude Code as claude:rajat, no permission prompts
-hashi account commands --agent codex --name 'cx-{name}' --skip-name ''   # cx-rajat, and no skip command
-hashi account commands --agent codex --reset             # back to <name>-codex and <name>-dcodex
+hashi switch claude work       # plain claude is now the work account
+hashi switch claude            # who plain claude signs in as, with the email
+hashi switch claude default    # back to your own login
+hashi switch codex alt         # the same for Codex, Gemini CLI and opencode
 ```
 
-**Names.** Each command's name is a pattern with `{name}` for the account's name, once, plus other text from letters, digits, `.`, `_` and `-` (so an account name is never a command by itself), not starting with `-` or `.`, at most 40 characters. An empty pattern turns that command off. No two patterns may be the same. Change them with `hashi account commands --agent <claude|codex> --name <pattern> --skip-name <pattern>` or `--reset`, or with `n` in the dashboard's Accounts popup, which shows what each pattern makes and `*` puts the defaults back. They are saved in `settings.json` as `accountCommands`, and renaming deletes the old commands and makes the new ones at once.
+How it works: Claude Code keeps your normal login in one place (the `Claude Code-credentials` Keychain entry on macOS, `~/.claude/.credentials.json` elsewhere, plus the signed-in identity in `~/.claude.json`); Codex keeps it in `~/.codex/auth.json`, Gemini CLI in `~/.gemini/oauth_creds.json` and `google_accounts.json` (not its `settings.json`), and opencode in `~/.local/share/opencode/auth.json` (or under `$XDG_DATA_HOME`). Qwen Code cannot be switched, because its key sits in `settings.json` with all your other settings, and neither can Cursor CLI, which has no separate login folder. A switch saves what is there now back to where it belongs (the account being left, or a private copy of your original login kept under `~/.hashi/accounts/<agent>/.original/`), copies the chosen account's saved login in, and records the choice in `~/.hashi/accounts/active.json`. Only the login changes: your settings, history, MCP servers, plugins and projects stay as they are. If the account being left holds a fresher token than the copy being saved (a Hashi run refreshed it), the fresher one is kept.
 
-**When they change.** Hashi makes them on `account add` and `account login`, deletes them on `account remove` or when the account's directory is gone, and catches up on `hashi account list`, `hashi account commands` and when the server starts, so it also fixes them after an upgrade or a change made by hand. A disabled, limited or signed-out account keeps its commands: disabling only stops Hashi's runs, and a signed-out one signs in again from the CLI itself. Remote and pool accounts get none, since nothing runs on this machine, and neither does a login someone shared with you, whose use is meant to go through Hashi.
+**Who is active.** `hashi switch claude` (or `codex`) prints the account plain `claude` signs in as and its email, read from `~/.claude.json` (for Codex, from the ID token in `~/.codex/auth.json`; for Gemini CLI, from `google_accounts.json`; opencode has no email, so the providers it is signed in to are named). `hashi account list` ends with the same lines, and the dashboard's Accounts popup shows them on its `now` lines, with `in use` on the account that is switched in.
 
-**What is never touched.** Each script carries a `hashi-account-command home=<home>` line, and Hashi only rewrites or deletes files with its own home's line: a file of the same name you wrote, or another Hashi home's command, is left alone. A command whose name is a program elsewhere on your PATH is not made, so a pattern can never hide one (an account `s` with the pattern `l{name}` does not get `ls`). Two accounts whose names would make the same command get neither. `hashi account commands` says why it skipped each. There are none when the running `hashi` is not the one on PATH (a development build), and `HASHI_NO_ACCOUNT_COMMANDS=1` turns them off. `hashi uninstall` deletes them with the home; `--keep-data` keeps them. On Windows they are `.cmd` files.
+**Putting everything back.** `hashi account reset` (or `R` in the Accounts popup) undoes it all: plain `claude`, `codex`, `gemini` and `opencode` go back to your own logins, Hashi's saved copies of them are deleted (the `.original` folders and their Keychain entries), the skip-permissions words are cleared, and every command Hashi wrote is deleted, including the `<name>-claude` scripts of 0.4.0. If there was no login before the first switch, plain `claude` is signed out again, as it was. Your Hashi accounts and their own logins stay. It asks first; `--yes` skips the question.
+
+Things to know:
+
+- **Running sessions** keep the login they started with until they refresh or restart. Restart a running `claude` after a switch.
+- **The Claude desktop app is not switched.** It keeps its own sign-in, separate from Claude Code's login, so a switch changes the CLI and the IDE extensions but not the app's chat or Code tab. Sign in to the other account inside the app if you need it there.
+- Only **login accounts** can be switched to (not API-key, OAuth-token, remote or shared ones).
+- While an account is switched in, Hashi's own runs on the `default` account use whatever plain `claude` signs in as, and an account that is switched in cannot be removed until you switch back.
+- If `CLAUDE_CONFIG_DIR` (or `CODEX_HOME`, `GEMINI_CLI_HOME`) is set in your shell, plain `claude` does not use the normal login, and the switch says so instead of doing nothing.
+
+**A command for skipping permission prompts.** Nothing is set up by default. Pick the word you want to type, and Hashi makes a command with that name that runs `claude --dangerously-skip-permissions` (or `codex --dangerously-bypass-approvals-and-sandbox`):
+
+```bash
+hashi account commands --agent claude --name dclaude   # now `dclaude -c` works
+hashi account commands --agent codex --name dcodex
+hashi account commands --agent claude --name ''        # remove it
+hashi account commands                                 # show what is set
+```
+
+It starts the plain CLI, so it follows `hashi switch`: `hashi switch claude work`, then `dclaude`, is Claude Code on `work` with no prompts. Arguments pass through. `n` in the Accounts popup sets the same words. The word is letters, digits, `.`, `_` and `-`, at most 32 characters, not starting with `-` or `.`, and not the CLI's own name; the two agents need different words. It is saved in `settings.json` as `dangerousCommands`.
+
+The command is a short script in the folder that holds the `hashi` your PATH finds, usually `~/.local/bin`, so it works in every shell and no startup file changes (on Windows it is a `.cmd` file). Hashi makes it when the word is saved and when the server starts, and deletes it when the word is changed or emptied. It also deletes the per-account `<name>-claude` and `<name>-dclaude` scripts that Hashi 0.4.0 made. Each script carries a `hashi-account-command home=<home>` line, and Hashi only rewrites or deletes files with its own home's line: a file of the same name you wrote, or another Hashi home's command, is left alone. A word that is already a program elsewhere on your PATH is refused, so it can never hide one. There is no command when the running `hashi` is not the one on PATH (a development build), and `HASHI_NO_ACCOUNT_COMMANDS=1` turns it off. `hashi uninstall` deletes it with the home; `--keep-data` keeps it.
 
 A key account keeps its key in `~/.hashi/accounts/<agent>/<name>/key` (mode `0600`) and passes it in the variable above. Its runs also point the login directory variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`) at that same directory, so your own `~/.claude`, `~/.codex` or `~/.gemini` settings never decide which credentials the run uses. The key is never accepted as an argument and never printed, logged or returned by the API.
 
@@ -202,7 +207,6 @@ A key account keeps its key in `~/.hashi/accounts/<agent>/<name>/key` (mode `060
 - Gemini CLI: "exhausted your daily quota", "exhausted your capacity", "quota exceeded", `QUOTA_EXHAUSTED`, `RATE_LIMIT_EXCEEDED` and "Please retry in Ns". N is the reset when it is over 300 seconds; a shorter wait uses the cooldown.
 - Qwen Code: an exhausted token plan ("The quota will reset at MM-DD HH:MM:SS UTC.", read in whichever year puts it nearest now; one up to a day ago has already reset), "free allocated quota exceeded", `insufficient_quota` and "Qwen OAuth free tier has been discontinued".
 - opencode: its typed limit errors (`provider.rate-limit`, `provider.quota`, `provider.go-limit`, `provider.budget-limit`, `provider.model-budget-limit`, `provider.free-limit`, `provider.chatgpt-limit`), with `retryAfterMs` as the reset, and "usage limit reached".
-- Crush: Crush retries provider errors itself and then reports the provider's own message, so only generic wording is matched: "rate limit" (also `rate-limit`, `rate_limit`), "too many requests", "quota", "usage limit", `resource_exhausted` and a bare 429. Crush reports no quota of its own.
 - Cursor CLI: "usage limit", "rate limit", `resource_exhausted`, "quota", its limit codes (`FREE_USER_USAGE_LIMIT`, `PRO_USER_USAGE_LIMIT`, `FREE_USER_RATE_LIMIT_EXCEEDED`, `PRO_USER_RATE_LIMIT_EXCEEDED`, `RATE_LIMITED`, `GENERIC_RATE_LIMIT_EXCEEDED`) and a bare 429. "monthly cycle ends on M/D/YYYY" gives the reset date.
 
 Limits are tracked only for tokens that list accounts for the agent.
@@ -227,7 +231,7 @@ hashi account list                     # the USAGE column: "62% left", "8% left 
 - `run`: Claude Code runs use `--output-format stream-json --verbose`, and each `rate_limit_event` updates the account. A `rejected` limit, or an assistant message with `error: "rate_limit"`, marks the account limited until the event's reset time, which is preferred over reading the message text.
 - `error`: a run that failed with the agent's limit message counts as fully used until its reset.
 
-Accounts without live figures (API keys, Gemini CLI, opencode, Qwen Code, Cursor CLI and Crush) show `unknown`, with their runs, tokens and reported cost today. A Claude Code sign-in whose token has expired shows "unknown, refreshes on its next run": Hashi never refreshes it, and Claude Code renews it itself when it next runs.
+Accounts without live figures (API keys, Gemini CLI, opencode, Qwen Code and Cursor CLI) show `unknown`, with their runs, tokens and reported cost today. A Claude Code sign-in whose token has expired shows "unknown, refreshes on its next run": Hashi never refreshes it, and Claude Code renews it itself when it next runs.
 
 **Summary.** The *headroom* is 100 minus the highest used percent across windows, the *binding window* is that window, and the *state* is `ok`, `warning` (at or above the rotate threshold), `limited` (until a time) or `unknown`.
 
@@ -386,7 +390,7 @@ Tab `5` lists everything the owner can do, grouped, one row each with its key (o
 | Ask | ask an agent (`a`) | `hashi ask`, `hashi ask --remote` |
 | Manage | accounts, projects, bridges I use, connect to a bridge | `hashi account`, `hashi project`, `hashi remote`, `hashi connect` |
 | Server | port and bind address, copy the API URL (`c`) | `hashi serve --port --bind` |
-| Install | cloudflared, tailscale, Crush | `hashi install cloudflared\|tailscale\|crush` |
+| Install | cloudflared, tailscale | `hashi install cloudflared\|tailscale` |
 | Maintenance | check for updates, install the update, doctor, diagnostic report, audit log | `hashi update [--check]`, `hashi doctor`, `hashi report`, `hashi audit` |
 | Help | copy guide for an LLM (copies the guide and says how many lines), all key bindings (`?`) | `hashi llm`, `hashi --help` |
 
@@ -405,7 +409,7 @@ States include "live at <url>", "starting", "approve at <url>", "not installed" 
 | Projects | `a` add, `e` edit, `x` remove | The same checks as `hashi project add` and `update`, with the account strategy (`←` `→`: server default, in-order, most-left, soonest-reset) and rotate at % (50 to 99, empty for the server default). Removing a project with bound tokens puts them back on their own workspace; its folder is never touched |
 | Bridges I use | `c` connect, `a` ask it, `x` forget, `r` request status | Names and URLs only, never tokens. Connect takes a pasted invite link and saves it as `hashi connect` does. Below, the requests for access this machine sent: `r` checks them as `hashi request status` does, and an accepted one is saved as a bridge |
 | Audit log | `↑` `↓`, `PgUp` `PgDn` | The last 500 entries, newest first |
-| Doctor | `u` check for updates, `r` recheck | Agents with versions, Crush, cloudflared, Tailscale and its sign-in state, accounts, the update state, the home and the resource guard |
+| Doctor | `u` check for updates, `r` recheck | Agents with versions, cloudflared, Tailscale and its sign-in state, accounts, the update state, the home and the resource guard |
 | Diagnostic report | `←` `→` change, `Enter` write | `include prompts` is off by default. Saves in the current folder (like `hashi report`) or in `~/.hashi/reports/`, owner-only, and shows the path with `c` to copy it |
 | Install the update | `y` / `n` | Steps aside for `hashi update`, then says to quit and start Hashi again |
 | Port and bind address | `↑` `↓` field, `←` `→` change, `Enter` move | See below |
@@ -441,17 +445,17 @@ Running requests count up their elapsed time, and every status pairs a symbol wi
 
 | Variable | Effect |
 |---|---|
-| `HASHI_VERSION=v0.4.0` | Install a specific release instead of the latest |
+| `HASHI_VERSION=v0.4.1` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
 | `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect -- <link>` instead of `hashi doctor`. Only a link of the shape the claim page builds (`https://<host>[:port]/claim/hashi_inv_<hex>`, or `http://` on loopback) is accepted; anything else stops the installer before it downloads. It fails with a clear message if the link is used up or expired |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.4.0 sh
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.4.1 sh
 ```
 
 ```powershell
-$env:HASHI_VERSION = "v0.4.0"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+$env:HASHI_VERSION = "v0.4.1"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
 The claim page builds the one-command setup for an invited person from its own link:

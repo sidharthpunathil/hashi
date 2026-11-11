@@ -108,9 +108,7 @@ fn row_to_account(r: &Row<'_>) -> rusqlite::Result<Result<AccountState>> {
     let remote_agent: Option<String> = r.get(8)?;
     let build = || -> Result<AccountState> {
         Ok(AccountState {
-            agent: agent
-                .parse()
-                .map_err(|e: crate::agent::UnknownAgent| StoreError::Corrupt(e.to_string()))?,
+            agent: super::stored_agent(&agent)?,
             name: r.get(1)?,
             kind: kind.parse().map_err(StoreError::Corrupt)?,
             disabled: r.get(3)?,
@@ -274,8 +272,7 @@ impl Store {
         let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY agent, name");
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], row_to_account)?;
-        rows.map(|r| r.map_err(StoreError::from).and_then(|a| a))
-            .collect()
+        super::known_rows(rows)
     }
 
     /// Disables or enables an account. Returns `false` if there is no such

@@ -27,8 +27,9 @@ pub struct AccountRow {
     pub signed_in: String,
     /// Tokens that list it.
     pub tokens: usize,
-    /// Its `<name>-claude` shell commands (see [`crate::accounts::commands`]).
-    pub commands: Vec<String>,
+    /// Whether the agent's plain command is switched to it (see
+    /// [`crate::accounts::switch`]).
+    pub active: bool,
 }
 
 /// Entries loaded for the frames between two refreshes.
@@ -86,6 +87,22 @@ impl App {
         }
         if (commands || accounts_popup) && self.cache.accounts.is_none() {
             self.cache.accounts = Some(self.account_rows());
+        }
+        // Read at most every few seconds: `~/.claude.json` can be large.
+        if (self.tab == Tab::Overview || accounts_popup)
+            && self
+                .plain_logins
+                .0
+                .is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(5))
+        {
+            let live = crate::accounts::switch::Live::from_user().ok();
+            let list = self.home().map_or_else(Vec::new, |home| {
+                crate::accounts::switch::AGENTS
+                    .into_iter()
+                    .map(|a| crate::accounts::switch::PlainLogin::read(&home, live.as_ref(), a))
+                    .collect()
+            });
+            self.plain_logins = (Some(std::time::Instant::now()), list);
         }
         if accounts_popup && self.cache.account_rows.is_none() {
             let rows = self.account_table().into_owned();
@@ -180,13 +197,33 @@ impl App {
                             .is_some_and(|l| l.contains(&a.name))
                     })
                     .count(),
-                commands: self.home().map_or_else(Vec::new, |home| {
-                    crate::accounts::commands::existing_for(&home, a.agent, &a.name)
-                }),
+                active: self
+                    .home()
+                    .is_some_and(|home| crate::accounts::switch::active(&home, a.agent) == a.name),
                 state: a.clone(),
             })
             .collect();
         Cow::Owned(rows)
+    }
+
+    /// Who each switchable agent's plain command signs in as.
+    #[must_use]
+    pub fn plain_logins(&self) -> &[crate::accounts::switch::PlainLogin] {
+        &self.plain_logins.1
+    }
+
+    /// Who plain `agent` signs in as, if it can be switched.
+    #[must_use]
+    pub fn plain_login(
+        &self,
+        agent: crate::agent::AgentKind,
+    ) -> Option<&crate::accounts::switch::PlainLogin> {
+        self.plain_logins.1.iter().find(|l| l.agent == agent)
+    }
+
+    /// Reads who the plain commands sign in as on the next frame.
+    pub fn forget_plain_logins(&mut self) {
+        self.plain_logins.0 = None;
     }
 
     /// Projects.

@@ -479,8 +479,8 @@ mod tests {
         let reset = claude.expect("a limit").expect("a reset time");
         let ahead = reset - OffsetDateTime::now_utc();
         assert!(ahead <= time::Duration::try_from(MAX_RESET).unwrap());
-        let crush = limit_hit(AgentKind::Crush, "quota exceeded, retry after 3000000 days");
-        assert!(crush.expect("a limit").is_some());
+        let any = hit("quota exceeded, retry after 3000000 days");
+        assert!(any.expect("a limit").is_some());
     }
 
     #[test]

@@ -36,7 +36,6 @@ impl Cli {
             "HASHI_OPENCODE_BIN",
             "HASHI_QWEN_BIN",
             "HASHI_CURSOR_BIN",
-            "HASHI_CRUSH_BIN",
         ] {
             cmd.env(var, &missing);
         }

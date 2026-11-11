@@ -10,7 +10,6 @@
 
 pub mod claude;
 pub mod codex;
-pub mod crush;
 pub mod cursor;
 pub mod gemini;
 pub mod limit;
@@ -45,20 +44,17 @@ pub enum AgentKind {
     Qwen,
     /// Cursor's CLI agent (`cursor-agent`, also shipped as `agent`).
     Cursor,
-    /// Charmbracelet's Crush (`crush`). Opt in with `--enable-crush`.
-    Crush,
 }
 
 impl AgentKind {
     /// Every supported agent, in display order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
         Self::Gemini,
         Self::Opencode,
         Self::Qwen,
         Self::Cursor,
-        Self::Crush,
     ];
 
     /// Stable lowercase identifier used in the API and database.
@@ -71,7 +67,6 @@ impl AgentKind {
             Self::Opencode => "opencode",
             Self::Qwen => "qwen",
             Self::Cursor => "cursor",
-            Self::Crush => "crush",
         }
     }
 
@@ -85,7 +80,6 @@ impl AgentKind {
             Self::Opencode => "opencode",
             Self::Qwen => "Qwen Code",
             Self::Cursor => "Cursor CLI",
-            Self::Crush => "Crush",
         }
     }
 
@@ -101,7 +95,6 @@ impl AgentKind {
             // `agent` is Cursor's newer name, but it is generic enough that the
             // specific legacy name is tried first.
             Self::Cursor => &["cursor-agent", "agent"],
-            Self::Crush => &["crush"],
         }
     }
 
@@ -120,7 +113,7 @@ impl fmt::Display for AgentKind {
 
 /// Error returned when parsing an unknown agent name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown agent `{0}` (expected claude, codex, gemini, opencode, qwen, cursor or crush)")]
+#[error("unknown agent `{0}` (expected claude, codex, gemini, opencode, qwen or cursor)")]
 pub struct UnknownAgent(pub String);
 
 impl FromStr for AgentKind {
@@ -134,10 +127,21 @@ impl FromStr for AgentKind {
             "opencode" | "open-code" => Ok(Self::Opencode),
             "qwen" | "qwen-code" | "qwen_code" => Ok(Self::Qwen),
             "cursor" | "cursor-agent" | "cursor_agent" | "cursor-cli" => Ok(Self::Cursor),
-            "crush" => Ok(Self::Crush),
             other => Err(UnknownAgent(other.to_owned())),
         }
     }
+}
+
+/// Reads a saved list of agent names, dropping any this Hashi does not run
+/// (such as `crush`, whose support was removed), so an old file still loads.
+/// For `#[serde(deserialize_with = ...)]`.
+///
+/// # Errors
+///
+/// Fails when the value is not a list of strings.
+pub fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AgentKind>, D::Error> {
+    let names = Vec::<String>::deserialize(d)?;
+    Ok(names.iter().filter_map(|n| n.parse().ok()).collect())
 }
 
 /// Static configuration for one agent backend.
@@ -153,9 +157,6 @@ pub struct AgentConfig {
     pub sandbox: String,
     /// Extra arguments appended before the prompt.
     pub extra_args: Vec<String>,
-    /// Run a Crush release newer than the newest one Hashi has checked
-    /// (Crush only, see [`crush::check_version`]).
-    pub allow_newer: bool,
 }
 
 impl AgentConfig {
@@ -172,7 +173,6 @@ impl AgentConfig {
             permission_mode: None,
             sandbox: "read-only".to_owned(),
             extra_args: Vec::new(),
-            allow_newer: false,
         }
     }
 }
@@ -379,8 +379,6 @@ pub async fn execute_in(
         AgentKind::Opencode => (opencode::build_args(cfg, inv), opencode::env(workdir)),
         AgentKind::Qwen => (qwen::build_args(cfg, inv), qwen::env(state_dir)),
         AgentKind::Cursor => (cursor::build_args(cfg, inv), cursor::env(workdir)),
-        // Crush needs checks before and a lookup after the run.
-        AgentKind::Crush => return crush::execute(cfg, inv, workdir, limits, account).await,
     };
     let remove: &[&str] = match account {
         Some(acc) => {
@@ -397,10 +395,6 @@ pub async fn execute_in(
         AgentKind::Opencode => opencode::parse_output(&raw.stdout),
         AgentKind::Qwen => qwen::parse_output(&raw.stdout),
         AgentKind::Cursor => cursor::parse_output(&raw.stdout),
-        AgentKind::Crush => crush::parse_output(&raw.stdout).map(|text| AgentOutput {
-            text,
-            ..AgentOutput::default()
-        }),
     };
     match parsed {
         Ok(out) => Ok(out),
@@ -426,12 +420,11 @@ pub fn limit_hit(kind: AgentKind, error: &str) -> Option<Option<time::OffsetDate
         AgentKind::Opencode => opencode::limit_hit(error),
         AgentKind::Qwen => qwen::limit_hit(error),
         AgentKind::Cursor => cursor::limit_hit(error),
-        AgentKind::Crush => crush::limit_hit(error),
     }
 }
 
 /// The error for a request to an agent this host cannot run: not
-/// installed, or opt-in and not enabled (Crush).
+/// installed, or not enabled.
 #[must_use]
 pub fn unavailable_message(kind: AgentKind) -> String {
     format!(
@@ -587,6 +580,20 @@ mod tests {
     #[test]
     fn agent_kind_rejects_unknown() {
         assert!("copilot".parse::<AgentKind>().is_err());
+        // Support for Crush was removed; old rows naming it must not parse.
+        assert!("crush".parse::<AgentKind>().is_err());
+    }
+
+    #[test]
+    fn saved_agent_lists_drop_unsupported_names() {
+        #[derive(Deserialize)]
+        struct Saved {
+            #[serde(deserialize_with = "known_agents")]
+            agents: Vec<AgentKind>,
+        }
+        let saved: Saved = serde_json::from_str(r#"{"agents":["claude","crush","codex"]}"#)
+            .expect("an old list still loads");
+        assert_eq!(saved.agents, [AgentKind::Claude, AgentKind::Codex]);
     }
 
     #[test]

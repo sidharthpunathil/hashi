@@ -415,6 +415,14 @@ impl App {
                     tokens,
                 }),
             },
+            Popup::ConfirmResetSwitch => match code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.reset_switch();
+                    Some(Popup::Accounts { selected: 0 })
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(Popup::Accounts { selected: 0 }),
+                _ => Some(Popup::ConfirmResetSwitch),
+            },
             Popup::Projects { selected } => self.projects_key(selected, code),
             Popup::Project(form) => self.project_key(form, code),
             Popup::ConfirmRemoveProject { name, tokens } => match code {
@@ -1025,10 +1033,12 @@ impl App {
             (KeyCode::Char('n'), _) => {
                 let names = self
                     .home()
-                    .map(|h| acct::commands::Names::load(&h))
+                    .map(|h| acct::commands::Keywords::load(&h))
                     .unwrap_or_default();
                 return Some(Popup::CommandNames(Box::new(CommandNamesForm::new(&names))));
             }
+            (KeyCode::Char('w'), Some(a)) => self.switch_account(a.agent, &a.name),
+            (KeyCode::Char('R'), _) => return Some(Popup::ConfirmResetSwitch),
             (KeyCode::Char('u'), Some(a)) => self.refresh_usage(a.agent, &a.name),
             (KeyCode::Char('c'), Some(a)) => {
                 match acct::ops::clear_limit(&self.state.store, a.agent, &a.name, ACTOR) {
@@ -1043,7 +1053,12 @@ impl App {
                 }
             }
             (KeyCode::Char('x'), Some(a)) => {
-                match acct::ops::check_removable(&self.state.store, a.agent, &a.name) {
+                match acct::ops::check_removable(
+                    &self.state.store,
+                    &self.home().unwrap_or_default(),
+                    a.agent,
+                    &a.name,
+                ) {
                     Ok(tokens) => {
                         return Some(Popup::ConfirmRemoveAccount {
                             agent: a.agent,
@@ -1068,18 +1083,8 @@ impl App {
             KeyCode::Esc => return Some(Popup::Accounts { selected: 0 }),
             KeyCode::Enter => return self.submit_command_names(form),
             _ if nav(&mut form.field, CommandNamesForm::FIELDS, code, |_| false) => {}
-            // `{` and `}` are typed into the patterns, so reset is a key
-            // a pattern never holds.
-            KeyCode::Char('*') => {
-                form.reset();
-                form.error = None;
-            }
             _ => {
-                if edit(
-                    &mut form.patterns[form.field],
-                    code,
-                    acct::commands::MAX_PATTERN,
-                ) {
+                if edit(&mut form.words[form.field], code, acct::commands::MAX_NAME) {
                     form.error = None;
                 }
             }
@@ -1087,15 +1092,64 @@ impl App {
         Some(Popup::CommandNames(form))
     }
 
-    /// Saves the patterns and renames the commands to match.
+    /// Makes the plain command of `agent` use the account, or goes back to
+    /// the original login when it already does.
+    fn switch_account(&mut self, agent: AgentKind, name: &str) {
+        let Some(home) = self.home() else {
+            self.notify("no Hashi home here");
+            return;
+        };
+        let target = if acct::switch::active(&home, agent) == name {
+            acct::DEFAULT
+        } else {
+            name
+        };
+        match acct::ops::switch(&self.state.store, &home, agent, target, ACTOR) {
+            Ok(o) => {
+                self.state
+                    .bus
+                    .log(format!("plain {agent} switched to {}", o.to));
+                self.cache.clear();
+                self.forget_plain_logins();
+                self.notify(if o.to == acct::DEFAULT {
+                    format!("plain {agent} uses your original login again")
+                } else {
+                    format!("plain {agent} now uses {}; restart running sessions", o.to)
+                });
+            }
+            Err(e) => self.notify(format!("{e:#}")),
+        }
+    }
+
+    /// Undoes every switch and command, as `hashi account reset` does.
+    fn reset_switch(&mut self) {
+        let Some(home) = self.home() else {
+            self.notify("no Hashi home here");
+            return;
+        };
+        match acct::ops::reset(&self.state.store, &home, ACTOR) {
+            Ok(done) if done.is_empty() => self.notify("already clean"),
+            Ok(done) => {
+                for line in &done {
+                    self.state.bus.log(line.clone());
+                }
+                self.cache.clear();
+                self.forget_plain_logins();
+                self.notify("reset: your own logins are back and Hashi's commands are gone");
+            }
+            Err(e) => self.notify(format!("{e:#}")),
+        }
+    }
+
+    /// Saves the words and makes the commands match.
     fn submit_command_names(&mut self, mut form: Box<CommandNamesForm>) -> Option<Popup> {
         let Some(home) = self.home() else {
             self.notify("no Hashi home here");
             return None;
         };
         let names = form.names();
-        if let Err(((agent, skip), why)) = names.check() {
-            let field = CommandNamesForm::field_of(agent, skip);
+        if let Err((agent, why)) = names.check() {
+            let field = CommandNamesForm::field_of(agent);
             form.field = field;
             form.error = Some((field, why));
             return Some(Popup::CommandNames(form));
@@ -1104,9 +1158,9 @@ impl App {
             form.error = Some((form.field, why));
             return Some(Popup::CommandNames(form));
         }
-        let detail = form.patterns.join(" | ");
+        let detail = form.words.join(" | ");
         self.audit("account.commands", "claude,codex", &detail);
-        let msg = match acct::commands::sync(&self.state.store, &home) {
+        let msg = match acct::commands::sync(&home) {
             Ok(r) => {
                 for c in &r.written {
                     self.state.bus.log(format!("made the command {c}"));
@@ -1118,9 +1172,9 @@ impl App {
                     self.state.bus.log(format!("no {c} command: {why}"));
                 }
                 match r.skipped.len() {
-                    0 => format!("account commands saved; {} in place", r.commands.len()),
+                    0 => format!("commands saved; {} in place", r.commands.len()),
                     n => format!(
-                        "account commands saved; {} in place, {n} skipped (see the log)",
+                        "commands saved; {} in place, {n} skipped (see the log)",
                         r.commands.len()
                     ),
                 }
@@ -1449,18 +1503,11 @@ impl App {
     }
 
     /// The agents a new project allows when none are typed: the installed
-    /// ones, Crush only when listed, or every agent when none is installed.
+    /// ones, or every agent when none is installed.
     fn project_agents(&self) -> Vec<AgentKind> {
-        let found: Vec<AgentKind> = self
-            .installed_agents()
-            .into_iter()
-            .filter(|a| *a != AgentKind::Crush)
-            .collect();
+        let found = self.installed_agents();
         if found.is_empty() {
-            AgentKind::ALL
-                .into_iter()
-                .filter(|a| *a != AgentKind::Crush)
-                .collect()
+            AgentKind::ALL.to_vec()
         } else {
             found
         }

@@ -91,40 +91,6 @@ pub fn agents(found: &[AgentInfo]) -> (Vec<Check>, usize) {
     (checks, n)
 }
 
-/// Crush's line when it is not among the configured agents: installed but
-/// not enabled, or neither. `enabled` is `Some(allow_newer)` when it is on.
-#[must_use]
-pub fn crush(enabled: Option<bool>, installed: Option<&Path>) -> Check {
-    let name = AgentKind::Crush.display_name();
-    match (enabled, installed) {
-        (Some(newer), _) => Check::new(
-            Mark::Info,
-            name,
-            format!(
-                "enabled (--enable-crush){}",
-                if newer {
-                    ", newer releases allowed (--crush-allow-newer)"
-                } else {
-                    ""
-                }
-            ),
-        ),
-        (None, Some(p)) => Check::new(
-            Mark::Info,
-            name,
-            format!(
-                "installed ({}), not enabled: start with --enable-crush to offer it",
-                p.display()
-            ),
-        ),
-        (None, None) => Check::new(
-            Mark::Info,
-            name,
-            "not enabled (opt-in: --enable-crush; hashi install crush)",
-        ),
-    }
-}
-
 /// cloudflared's line.
 #[must_use]
 pub fn cloudflared(path: Option<&Path>) -> Check {

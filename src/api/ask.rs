@@ -257,7 +257,7 @@ fn has_remote_account(
 }
 
 /// The agents `token` may use that this server can run for it now:
-/// installed here (and, for Crush, enabled), or served by a remote
+/// installed here, or served by a remote
 /// account. `GET /v1/models` and the MCP `ask_<agent>` tools offer these,
 /// so a client is never shown an agent that can only answer `503`.
 ///

@@ -369,29 +369,22 @@ pub fn effective(token: &Token, project: Option<&Project>) -> Effective {
     }
 }
 
-/// Crush's project config files. Crush can run shell code as soon as it
-/// loads one of these, so Hashi refuses to run Crush in a folder that has
-/// any of them, or under one that does.
-pub const CRUSH_CONFIG_FILES: [&str; 4] = crate::agent::crush::PROJECT_CONFIG_NAMES;
-
-/// Whether `dir` or any parent holds a Crush project config file (see
-/// [`CRUSH_CONFIG_FILES`]): the same check every Crush run makes,
-/// [`crate::agent::crush::crush_config_present`].
-#[must_use]
-pub fn crush_config_present(dir: &Path) -> bool {
-    crate::agent::crush::crush_config_present(dir).is_some()
-}
-
 /// Encodes a model map for the database.
 #[must_use]
 pub fn encode_models(map: &ModelMap) -> String {
     serde_json::to_string(map).unwrap_or_else(|_| "{}".to_owned())
 }
 
-/// Decodes a stored model map. Anything unreadable is an empty map.
+/// Decodes a stored model map. Anything unreadable is an empty map. An
+/// entry for an agent this Hashi does not run (such as `crush`) is dropped
+/// and the rest kept.
 #[must_use]
 pub fn decode_models(s: &str) -> ModelMap {
-    serde_json::from_str(s).unwrap_or_default()
+    serde_json::from_str::<std::collections::BTreeMap<String, String>>(s)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(agent, model)| Some((agent.parse().ok()?, model)))
+        .collect()
 }
 
 /// A model map as `claude=sonnet codex=o4`, or `-` when empty.
@@ -714,24 +707,5 @@ mod tests {
         assert_eq!(decode_models("garbage"), ModelMap::new());
         assert_eq!(format_models(&m), "claude=sonnet");
         assert_eq!(format_models(&ModelMap::new()), "-");
-    }
-
-    #[test]
-    fn crush_config_is_detected() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!crush_config_present(dir.path()));
-        std::fs::write(dir.path().join("README.md"), "x").unwrap();
-        assert!(!crush_config_present(dir.path()));
-        for name in CRUSH_CONFIG_FILES {
-            let d = tempfile::tempdir().unwrap();
-            std::fs::write(d.path().join(name), "{}").unwrap();
-            assert!(crush_config_present(d.path()), "{name}");
-        }
-        assert!(!crush_config_present(&dir.path().join("missing")));
-        // A config in a parent counts, as it does for a Crush run.
-        let nested = dir.path().join("sub").join("deeper");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(dir.path().join(".crushrc"), "echo hi").unwrap();
-        assert!(crush_config_present(&nested));
     }
 }
