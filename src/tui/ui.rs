@@ -1745,6 +1745,13 @@ fn action_state(app: &App, action: Action) -> (String, Rgb) {
             1 => ("1 account".to_owned(), TEXT),
             n => (format!("{n} accounts"), TEXT),
         },
+        Action::MyUsage => {
+            if app.home().is_some_and(|h| crate::stats::enabled(&h)) {
+                ("tracking on".to_owned(), TEXT)
+            } else {
+                ("off: t in the popup turns it on".to_owned(), t::MIST)
+            }
+        }
         Action::Projects => match app.cached_projects().len() {
             0 => ("none yet".to_owned(), TEXT),
             1 => ("1 project".to_owned(), TEXT),
@@ -1807,6 +1814,7 @@ pub fn action_cli(app: &App, action: Action) -> String {
         Action::Doctor => "hashi doctor".to_owned(),
         Action::Report => "hashi report".to_owned(),
         Action::Audit => "hashi audit".to_owned(),
+        Action::MyUsage => "hashi stats".to_owned(),
         Action::CopyGuide => "hashi llm".to_owned(),
         Action::Help => "hashi --help".to_owned(),
     }

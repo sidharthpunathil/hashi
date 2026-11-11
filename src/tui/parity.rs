@@ -247,6 +247,28 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     ("audit", Entry::Row(Action::Audit)),
+    // `hashi stats` with no subcommand is the My usage row itself.
+    (
+        "stats on",
+        Entry::InPopup {
+            row: Action::MyUsage,
+            key: "t",
+        },
+    ),
+    (
+        "stats off",
+        Entry::InPopup {
+            row: Action::MyUsage,
+            key: "t",
+        },
+    ),
+    (
+        "stats forget",
+        Entry::InPopup {
+            row: Action::MyUsage,
+            key: "f",
+        },
+    ),
     ("ask", Entry::Row(Action::Ask)),
     ("connect", Entry::Row(Action::Connect)),
     ("remote list", Entry::Row(Action::Bridges)),

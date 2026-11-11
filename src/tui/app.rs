@@ -98,6 +98,8 @@ pub enum Action {
     Ask,
     /// List and manage agent accounts.
     Accounts,
+    /// The owner's own use, quota burn and their use next to shared use.
+    MyUsage,
     /// List and manage projects.
     Projects,
     /// List and forget the bridges this machine connected to.
@@ -130,7 +132,7 @@ pub enum Action {
 
 impl Action {
     /// Display order. [`Action::group`] starts a new heading where it changes.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Cloudflare,
         Self::TailscaleServe,
         Self::TailscaleFunnel,
@@ -142,6 +144,7 @@ impl Action {
         Self::AccessRequests,
         Self::Ask,
         Self::Accounts,
+        Self::MyUsage,
         Self::Projects,
         Self::Bridges,
         Self::Connect,
@@ -171,7 +174,9 @@ impl Action {
             | Self::NewToken
             | Self::AccessRequests => "Share",
             Self::Ask => "Ask",
-            Self::Accounts | Self::Projects | Self::Bridges | Self::Connect => "Manage",
+            Self::Accounts | Self::MyUsage | Self::Projects | Self::Bridges | Self::Connect => {
+                "Manage"
+            }
             Self::Listen | Self::CopyUrl => "Server",
             Self::InstallCloudflared | Self::InstallTailscale => "Install",
             Self::CheckUpdate | Self::InstallUpdate | Self::Doctor | Self::Report | Self::Audit => {
@@ -210,6 +215,7 @@ impl Action {
             Self::AccessRequests => "Access requests",
             Self::Ask => "Ask an agent",
             Self::Accounts => "Accounts",
+            Self::MyUsage => "My usage",
             Self::Projects => "Projects",
             Self::Bridges => "Bridges I use",
             Self::Connect => "Connect to a bridge",
@@ -242,6 +248,7 @@ impl Action {
             Self::AccessRequests => "people asking for access or for more, and the link",
             Self::Ask => "a prompt through the queue, or to a bridge you use",
             Self::Accounts => "add, sign in, disable and remove agent accounts",
+            Self::MyUsage => "your own Claude Code use, quota burn, you vs shared",
             Self::Projects => "folders that tokens and invites can be bound to",
             Self::Bridges => "other people's Hashi that you connected to",
             Self::Connect => "paste an invite link someone sent you",
@@ -818,6 +825,15 @@ pub enum Popup {
         /// The bridge's name.
         name: String,
     },
+    /// The owner's own use (see [`crate::stats`]).
+    MyUsage {
+        /// Days covered: 1, 7 or 30.
+        days: u32,
+        /// Lines scrolled.
+        scroll: usize,
+    },
+    /// Confirmation of deleting the owner's own use records.
+    ConfirmForgetUsage,
     /// The audit log.
     Audit {
         /// Rows scrolled.
@@ -984,6 +1000,8 @@ pub struct App {
     /// Who each switchable agent's plain command signs in as, and when
     /// that was read.
     pub(crate) plain_logins: (Option<Instant>, Vec<crate::accounts::switch::PlainLogin>),
+    /// The My usage report, when it was built and for how many days.
+    pub(crate) stats_report: Option<(Instant, u32, crate::stats::Report)>,
     /// The selected request in full, for the detail pane.
     pub(crate) detail: Option<Request>,
     /// Selected row of the Commands view, an index into [`Action::ALL`].
@@ -1058,6 +1076,7 @@ impl App {
             detail_cache: super::ui::DetailCache::default(),
             last_refresh: None,
             plain_logins: (None, Vec::new()),
+            stats_report: None,
             detail: None,
             commands_selected: 0,
             details_max_scroll: std::cell::Cell::new(0),
@@ -1462,6 +1481,8 @@ impl App {
             | Popup::PoolJoin(_)
             | Popup::ConfirmRemoveRemote { .. }
             | Popup::Audit { .. }
+            | Popup::MyUsage { .. }
+            | Popup::ConfirmForgetUsage
             | Popup::Doctor
             | Popup::Report(_)
             | Popup::ReportSaved { .. }
@@ -2138,6 +2159,7 @@ impl App {
             | Action::InstallUpdate
             | Action::Doctor
             | Action::Report
+            | Action::MyUsage
             | Action::Audit => self.run_manage_action(action),
         }
     }

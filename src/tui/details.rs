@@ -402,6 +402,23 @@ pub const fn details(action: Action) -> Details {
             ],
             know: &["Nothing is uploaded. Read the file, then attach it to a GitHub issue."],
         },
+        Action::MyUsage => Details {
+            about: "How much you use Claude Code yourself, in any terminal or editor: tokens and \
+                    estimated cost by day, account, model and project, how fast each account's \
+                    quota windows are filling, and your use next to what Hashi ran for others.",
+            how: &[
+                "Off until you press t. Hashi then reads the session files Claude Code keeps \
+                 (~/.claude/projects and each account's own folder), a little at a time.",
+                "d switches between 1, 7 and 30 days; f deletes what was collected.",
+                "Each session is credited to the account it signed in as, so switches count right.",
+            ],
+            know: &[
+                "Only numbers are kept: tokens, model, project folder name and time. Never what \
+                 was said.",
+                "Costs are estimates at API list prices; on a subscription you pay the plan.",
+                "Headless runs (claude -p, Hashi's own) are left out.",
+            ],
+        },
         Action::Audit => Details {
             about: "A record of every change to who can use this Hashi: tokens, invites, \
                     shares, pools, access requests and accounts.",

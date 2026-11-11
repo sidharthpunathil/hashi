@@ -18,6 +18,7 @@ mod accounts;
 mod audit;
 mod cancel;
 mod invites;
+mod own;
 pub(crate) mod pool;
 mod projects;
 mod usage;
@@ -32,6 +33,7 @@ pub use audit::AuditEntry;
 pub use invites::{
     INVITE_PREFIX, Invite, InviteState, LoginShare, MAX_PENDING_INVITES, NewInvite, Redeemed,
 };
+pub use own::{FileState, GroupBy, OwnRow, OwnTotals, QuotaPoint, SharedTotals};
 pub use pool::{MEMBER_PREFIX, POOL_LINK_PREFIX, PoolLink, PoolMember};
 pub use projects::{ProjectStats, RemovedProject};
 pub use usage::{Conversation, PollStatus, Spend};
@@ -699,9 +701,49 @@ ALTER TABLE accounts ADD COLUMN pool_member TEXT;
 ALTER TABLE tokens ADD COLUMN pool INTEGER NOT NULL DEFAULT 0;
 ";
 
-const MIGRATIONS: [&str; 11] = [
+/// Version 12: the owner's own use. `own_usage` holds one row per message
+/// of the owner's interactive Claude Code sessions (numbers only, never the
+/// text), `own_usage_files` how far each session file has been read, and
+/// `quota_history` the quota readings over time, for the forecast. See
+/// [`crate::stats`].
+const SCHEMA_V12: &str = r"
+CREATE TABLE IF NOT EXISTS own_usage (
+    msg_id       TEXT PRIMARY KEY,
+    agent        TEXT NOT NULL,
+    account      TEXT NOT NULL,
+    model        TEXT NOT NULL,
+    project      TEXT NOT NULL,
+    session      TEXT NOT NULL,
+    at           INTEGER NOT NULL,
+    input        INTEGER NOT NULL,
+    output       INTEGER NOT NULL,
+    cache_read   INTEGER NOT NULL,
+    cache_write  INTEGER NOT NULL,
+    cost_usd     REAL NOT NULL,
+    skip_perms   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_own_usage_at ON own_usage(at);
+CREATE TABLE IF NOT EXISTS own_usage_files (
+    path       TEXT PRIMARY KEY,
+    offset     INTEGER NOT NULL,
+    owner      TEXT,
+    skip_perms INTEGER NOT NULL DEFAULT 0,
+    sdk        INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS quota_history (
+    agent        TEXT NOT NULL,
+    account      TEXT NOT NULL,
+    window       TEXT NOT NULL,
+    used_percent REAL NOT NULL,
+    resets_at    INTEGER,
+    observed_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quota_history ON quota_history(agent, account, window, observed_at);
+";
+
+const MIGRATIONS: [&str; 12] = [
     SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8,
-    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11,
+    SCHEMA_V9, SCHEMA_V10, SCHEMA_V11, SCHEMA_V12,
 ];
 
 /// Prepared statements kept per connection. The hot paths cache about 40.
@@ -1474,6 +1516,8 @@ impl Store {
         // Access requests have their own, shorter clock.
         let access = self.prune_access(now_ms() - crate::access::PURGE_DAYS * 86_400_000)?;
         let _ = projects::delete_orphan_sessions(&*self.conn()?)?;
+        // Quota readings only feed the forecast, which looks back a week.
+        let _ = own::prune_quota_history(&*self.conn()?, now_ms() - 15 * 86_400_000)?;
         Ok(Pruned {
             requests,
             audit,

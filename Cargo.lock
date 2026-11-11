@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "hashi"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -937,6 +937,7 @@ dependencies = [
  "hex",
  "hyper",
  "hyper-util",
+ "memchr",
  "nix 0.31.3",
  "qrcode",
  "rand 0.10.3",

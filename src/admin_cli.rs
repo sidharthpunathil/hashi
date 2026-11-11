@@ -892,6 +892,89 @@ impl BinArgs {
     }
 }
 
+/// `hashi stats ...`
+#[derive(Debug, clap::Args)]
+pub struct StatsArgs {
+    /// on, off or forget; leave out for the report.
+    #[command(subcommand)]
+    pub action: Option<StatsAction>,
+    /// Days covered by the report, today included.
+    #[arg(long, default_value_t = 7)]
+    pub days: u32,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// What `hashi stats` does besides reporting.
+#[derive(Debug, Subcommand)]
+pub enum StatsAction {
+    /// Start tracking your own Claude Code use (reads its session files;
+    /// keeps only numbers).
+    On,
+    /// Stop tracking. What was collected stays until `hashi stats forget`.
+    Off,
+    /// Delete everything collected about your own use.
+    Forget {
+        /// Do not ask first.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// Runs `hashi stats`.
+///
+/// # Errors
+///
+/// Fails on database or settings errors.
+pub fn stats(store: &Store, home: &Path, args: StatsArgs) -> Result<()> {
+    match args.action {
+        Some(StatsAction::On) => {
+            hashi::stats::set_enabled(home, true).map_err(|e| anyhow::anyhow!(e))?;
+            store.audit("cli", "stats.on", "", "")?;
+            let r = hashi::stats::scan(store, home).map_err(|e| anyhow::anyhow!(e))?;
+            println!(
+                "tracking your own Claude Code use: read {} session file(s), {} message(s) so far",
+                r.files, r.added
+            );
+            println!(
+                "Only numbers are kept (tokens, model, project folder name, time), never what was \
+                 said. The server keeps it up to date; see it with `hashi stats`."
+            );
+        }
+        Some(StatsAction::Off) => {
+            hashi::stats::set_enabled(home, false).map_err(|e| anyhow::anyhow!(e))?;
+            store.audit("cli", "stats.off", "", "")?;
+            println!("stopped tracking; `hashi stats forget` deletes what was collected");
+        }
+        Some(StatsAction::Forget { yes }) => {
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!("pass --yes to delete without being asked");
+                }
+                if !confirm("Delete everything collected about your own use?") {
+                    println!("nothing deleted");
+                    return Ok(());
+                }
+            }
+            let n = store.forget_own_usage()?;
+            store.audit("cli", "stats.forget", "", &n.to_string())?;
+            println!("deleted {n} message record(s)");
+        }
+        None => {
+            if hashi::stats::enabled(home) {
+                hashi::stats::scan(store, home).map_err(|e| anyhow::anyhow!(e))?;
+            }
+            let r = hashi::stats::report(store, home, args.days).map_err(|e| anyhow::anyhow!(e))?;
+            if args.json {
+                return print_json(&serde_json::to_value(&r)?);
+            }
+            print!("{}", hashi::stats::render(&r));
+        }
+    }
+    Ok(())
+}
+
 /// `hashi account ...`
 #[derive(Debug, Subcommand)]
 pub enum AccountCommand {

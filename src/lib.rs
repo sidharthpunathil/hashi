@@ -26,6 +26,7 @@ pub mod server;
 pub mod settings;
 pub mod share;
 pub mod shutdown;
+pub mod stats;
 pub mod store;
 pub mod tailscale;
 pub mod tls;

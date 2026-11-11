@@ -88,6 +88,15 @@ impl App {
         if (commands || accounts_popup) && self.cache.accounts.is_none() {
             self.cache.accounts = Some(self.account_rows());
         }
+        if let Some(Popup::MyUsage { days, .. }) = self.popup
+            && self.stats_report.as_ref().is_none_or(|(at, d, _)| {
+                *d != days || at.elapsed() > std::time::Duration::from_secs(5)
+            })
+            && let Some(home) = self.home()
+            && let Ok(r) = crate::stats::report(&self.state.store, &home, days)
+        {
+            self.stats_report = Some((std::time::Instant::now(), days, r));
+        }
         // Read at most every few seconds: `~/.claude.json` can be large.
         if (self.tab == Tab::Overview || accounts_popup)
             && self
