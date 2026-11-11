@@ -1,6 +1,6 @@
 [package]
 name = "hashi"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Call Claude Code, Codex and other coding-agent CLIs on your machine over an authenticated HTTP API, with a live terminal dashboard."
@@ -27,7 +27,7 @@ ratatui = "0.30.2"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rustls-pki-types = { version = "1.15.1", features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"
 sysinfo = { version = "0.38.4", default-features = false, features = ["system", "disk"] }
 thiserror = "2.0.21"

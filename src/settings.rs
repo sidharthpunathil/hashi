@@ -1,6 +1,6 @@
 //! `<home>/settings.json`: choices made in the dashboard that last past a
-//! restart: the port and bind address, and the names of the account
-//! commands (see [`crate::accounts::commands`]).
+//! restart: the port and bind address, and the names of the
+//! skip-permissions commands (see [`crate::accounts::commands`]).
 //!
 //! At startup each value comes from the first of: its flag, its
 //! environment variable, this file, the built-in default. The file is
@@ -28,9 +28,9 @@ pub struct Settings {
     /// Address to listen on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<IpAddr>,
-    /// Name patterns of the `<name>-claude` style account commands.
+    /// The owner's names for the skip-permissions commands (`dclaude`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_commands: Option<crate::accounts::commands::Names>,
+    pub dangerous_commands: Option<crate::accounts::commands::Keywords>,
 }
 
 /// Where a value in effect came from.

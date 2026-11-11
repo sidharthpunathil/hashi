@@ -1129,14 +1129,14 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         info!(pruned, "pruned old requests");
     }
     let bootstrap_token = ensure_admin(&store)?;
-    // The `<name>-claude` commands, including for accounts added before
-    // Hashi made them.
-    if let Ok(r) = crate::accounts::commands::sync(&store, &cfg.home) {
+    // The owner's skip-permissions command, and a clean up of the per
+    // account `<name>-claude` scripts of Hashi 0.4.0.
+    if let Ok(r) = crate::accounts::commands::sync(&cfg.home) {
         for c in &r.written {
             bus.log(format!("made the command {c}"));
         }
         for c in &r.removed {
-            bus.log(format!("deleted the command {c}: its account is gone"));
+            bus.log(format!("deleted the command {c}"));
         }
     }
 

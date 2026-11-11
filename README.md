@@ -48,7 +48,7 @@ To share a coding agent today you either hand out a provider API key or let peop
 
 ## Status
 
-Early and actively developed: v0.4.0, released November 2026. CI builds and tests every commit on Linux, macOS and Windows; Windows has seen the least real use. The HTTP API may still change before 1.0, and every change is in the [changelog](CHANGELOG.md).
+Early and actively developed: v0.4.1, released November 2026. CI builds and tests every commit on Linux, macOS and Windows; Windows has seen the least real use. The HTTP API may still change before 1.0, and every change is in the [changelog](CHANGELOG.md).
 
 ## Install
 
@@ -64,7 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install
 irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
-The script downloads the build for your platform, checks its SHA-256 checksum, installs it without admin rights (to `~/.local/bin`, or `%LOCALAPPDATA%\Programs\hashi\bin` on Windows, added to your PATH) and runs `hashi doctor` to show which agents it found. Pin a release with `HASHI_VERSION=v0.4.0` ([installer options](docs/configuration.md#installer-options)).
+The script downloads the build for your platform, checks its SHA-256 checksum, installs it without admin rights (to `~/.local/bin`, or `%LOCALAPPDATA%\Programs\hashi\bin` on Windows, added to your PATH) and runs `hashi doctor` to show which agents it found. Pin a release with `HASHI_VERSION=v0.4.1` ([installer options](docs/configuration.md#installer-options)).
 
 The checksum proves the download arrived intact, not who built it. Every release archive also has a GitHub build attestation tying it to this repository's release workflow. Check one with the [GitHub CLI](https://cli.github.com):
 
@@ -137,7 +137,7 @@ hashi project add api ~/code/api --account claude=work,default --model claude=so
 hashi share alice --project api
 ```
 
-Every Claude Code and Codex account also gets shell commands that start the CLI signed in as it: `work-claude` and `work-dclaude` (with `--dangerously-skip-permissions`), or `work-codex` and `work-dcodex`. Hashi deletes them when the account is removed; `hashi account commands` lists them and renames them, as does `n` in the dashboard's Accounts popup.
+`hashi switch claude work` points your normal `claude` command at the `work` account, so typing `claude` in any terminal or editor signs in as it (the Claude desktop app keeps its own sign-in); `hashi switch claude default` goes back. If you want a command that skips permission prompts, choose its name yourself, for example `hashi account commands --agent claude --name dclaude`.
 
 Alice's prompts now run in `~/code/api` instead of a private workspace, on your `work` Claude plan first and your own login once `work` hits its limit. She sees only the project's name, never its folder or your account names. Your normal login is never touched, and Hashi never changes, moves or deletes a project folder. A project changes where a run starts, not what an agent running as you can read, so share only folders you trust people with. See [accounts](docs/configuration.md#accounts) and [projects](docs/configuration.md#projects).
 

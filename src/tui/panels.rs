@@ -125,6 +125,23 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
                 key_hint(&[("y", "remove"), ("n", "keep")]),
             ],
         ),
+        Popup::ConfirmResetSwitch => fitted(
+            frame,
+            72,
+            "reset",
+            vec![
+                Line::from(Span::styled(
+                    "Put plain claude and codex back on your own logins?",
+                    plain(),
+                )),
+                muted_line(
+                    "Hashi's copies of them and every command it made (such as dclaude) are",
+                ),
+                muted_line("deleted. Your accounts stay."),
+                Line::raw(""),
+                key_hint(&[("y", "reset"), ("n", "keep")]),
+            ],
+        ),
         Popup::Projects { selected } => projects(app, frame, *selected),
         Popup::Project(form) => project(frame, form, app.tick),
         Popup::ConfirmRemoveProject { name, tokens } => fitted(
@@ -610,6 +627,24 @@ fn list_popup(
     frame.render_widget(Paragraph::new(foot).wrap(Wrap { trim: false }), foot_area);
 }
 
+/// Who a plain command signs in as: the email first, then which login it
+/// is. Shared by the Overview cards and the Accounts popup.
+pub(crate) fn login_spans(who: &crate::accounts::switch::PlainLogin) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    match &who.email {
+        Some(email) => spans.push(Span::styled(email.clone(), plain())),
+        None => spans.push(Span::styled("signed-in email unknown", t::muted())),
+    }
+    if who.switched() {
+        spans.push(Span::styled("  ● ", t::fg(t::MINT)));
+        spans.push(Span::styled(who.account.clone(), t::bold(t::MINT)));
+        spans.push(Span::styled(" (switched in)", t::muted()));
+    } else {
+        spans.push(Span::styled("  your own login", t::muted()));
+    }
+    spans
+}
+
 fn accounts(app: &App, frame: &mut Frame, selected: usize) {
     let now = crate::util::now_ms();
     let list = app.account_table();
@@ -628,7 +663,14 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
                     format!("{} {}", t::agent_glyph(a.agent), a.agent),
                     t::fg(t::agent_color(a.agent)),
                 )),
-                Cell::from(Span::styled(a.name.clone(), strong())),
+                Cell::from(if row.active {
+                    Line::from(vec![
+                        Span::styled(a.name.clone(), strong()),
+                        Span::styled(" ● in use", t::fg(t::MINT)),
+                    ])
+                } else {
+                    Line::from(Span::styled(a.name.clone(), strong()))
+                }),
                 Cell::from(Span::styled(a.kind.as_str(), plain())),
                 Cell::from(Span::styled(row.signed_in.clone(), plain())),
                 Cell::from(Span::styled(state, plain())),
@@ -666,14 +708,34 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ),
         ]));
     }
+    for who in app.plain_logins() {
+        let mut spans = vec![Span::styled(
+            format!("plain {:<7}", who.agent.as_str()),
+            t::muted(),
+        )];
+        spans.extend(login_spans(who));
+        foot.push(Line::from(spans));
+    }
     if let Some(sel) = list.get(selected)
-        && !sel.commands.is_empty()
+        && crate::accounts::switch::supports(sel.state.agent)
+        && sel.state.kind == crate::accounts::AccountKind::Login
     {
-        foot.push(Line::from(vec![
-            Span::styled("start  ", t::muted()),
-            Span::styled(sel.commands.join(" or "), plain()),
-            Span::styled("  in your terminal: this account's CLI", t::muted()),
-        ]));
+        let agent = sel.state.agent;
+        foot.push(Line::from(if sel.active {
+            vec![
+                Span::styled("in use  ", t::muted()),
+                Span::styled(format!("plain {agent} signs in as this account"), plain()),
+                Span::styled("  (w goes back to your login)", t::muted()),
+            ]
+        } else {
+            vec![
+                Span::styled("switch  ", t::muted()),
+                Span::styled(
+                    format!("w makes plain {agent} sign in as this account"),
+                    t::muted(),
+                ),
+            ]
+        }));
     }
     match usage {
         Some(u) => foot.extend(super::usage::lines(&[u], rotate_at, 24)),
@@ -710,66 +772,52 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ("e", "enable"),
             ("c", "clear limit"),
             ("u", "read usage"),
-            ("n", "command names"),
+            ("w", "switch"),
+            ("n", "skip command"),
+            ("R", "reset"),
             ("x", "remove"),
             ("esc", "close"),
         ],
     );
 }
 
-/// The account commands' name patterns, with what each makes for an
-/// example account.
-fn command_names(app: &App, frame: &mut Frame, form: &CommandNamesForm, tick: u64) {
-    const W: usize = 16;
-    let labels = ["claude", "claude, skip", "codex", "codex, skip"];
-    let example = app
-        .account_table()
-        .iter()
-        .map(|r| r.state.name.clone())
-        .next()
-        .unwrap_or_else(|| "work".to_owned());
+/// The words for the skip-permissions commands.
+fn command_names(_app: &App, frame: &mut Frame, form: &CommandNamesForm, tick: u64) {
+    const W: usize = 10;
+    let labels = ["claude", "codex"];
     let mut fields = Vec::new();
     for (i, label) in labels.iter().enumerate() {
         let focused = form.field == i;
-        let mut spans = form_text(&form.patterns[i], focused, "off", tick);
-        let pattern = form.patterns[i].trim();
-        let preview = if pattern.is_empty() {
-            "  off".to_owned()
-        } else if crate::accounts::commands::check_pattern(pattern).is_ok() {
-            let (agent, skip) = CommandNamesForm::target(i);
-            let runs = crate::accounts::commands::spec(agent).map_or_else(String::new, |s| {
-                if skip {
-                    format!("{} {}", s.bin, s.skip_flag)
-                } else {
-                    s.bin.to_owned()
-                }
+        let mut spans = form_text(&form.words[i], focused, "none set", tick);
+        let word = form.words[i].trim();
+        let preview = crate::accounts::commands::spec(CommandNamesForm::target(i))
+            .filter(|s| {
+                !word.is_empty() && crate::accounts::commands::check_keyword(word, s).is_ok()
+            })
+            .map_or_else(String::new, |s| {
+                format!("  {word} runs {} {}", s.bin, s.skip_flag)
             });
-            format!(
-                "  {} runs {runs}",
-                pattern.replace(crate::accounts::commands::PLACEHOLDER, &example)
-            )
-        } else {
-            String::new()
-        };
         spans.push(Span::styled(preview, t::muted()));
         fields.push(form_field(focused, label, W, spans));
     }
     let mut lines = with_errors(fields, form.error.as_ref(), W + 2);
     lines.push(Line::raw(""));
     lines.push(muted_line(
-        "  {name} is the account's name. Leave a field empty to turn that command off.",
+        "  The word you type to start the CLI without permission prompts, such as dclaude.",
     ));
     lines.push(muted_line(
-        "  Commands go next to the hashi on your PATH; renaming deletes the old ones.",
+        "  Nothing is set until you pick one. It runs the plain CLI, so it follows w (switch).",
+    ));
+    lines.push(muted_line(
+        "  Empty removes it. It goes next to the hashi on your PATH.",
     ));
     lines.push(Line::raw(""));
     lines.push(key_hint(&[
         ("↑↓", "field"),
-        ("*", "defaults"),
         ("enter", "save"),
         ("esc", "back"),
     ]));
-    fitted(frame, 92, "account commands", lines);
+    fitted(frame, 92, "skip-permissions commands", lines);
 }
 
 fn add_account(frame: &mut Frame, form: &AccountForm, tick: u64) {

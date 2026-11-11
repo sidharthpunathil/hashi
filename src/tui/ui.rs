@@ -674,7 +674,8 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [state, counts, timing, usage, spark] = Layout::vertical([
+    let [state, counts, timing, usage, login, spark] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -682,6 +683,12 @@ fn render_agent(app: &App, frame: &mut Frame, area: Rect, agent: AgentKind) {
         Constraint::Fill(1),
     ])
     .areas(inner);
+    // Who the plain command in a terminal signs in as (see `hashi switch`).
+    if available && let Some(who) = app.plain_login(agent) {
+        let mut spans = vec![Span::styled("signed in ", t::muted())];
+        spans.extend(super::panels::login_spans(who));
+        frame.render_widget(Paragraph::new(Line::from(spans)), login);
+    }
 
     let state_line = if !available {
         Line::from(vec![

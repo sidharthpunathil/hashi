@@ -41,6 +41,7 @@ use crate::agent::{AgentKind, EnvOverride};
 
 pub mod commands;
 pub mod ops;
+pub mod switch;
 
 /// Name of the implicit account that is the owner's own login.
 pub const DEFAULT: &str = "default";

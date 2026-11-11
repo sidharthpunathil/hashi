@@ -51,6 +51,14 @@ enum Command {
     /// Add, sign in, list, disable and remove agent accounts.
     #[command(subcommand, after_help = ACCOUNT_EXAMPLES)]
     Account(admin_cli::AccountCommand),
+    /// Point the plain `claude` or `codex` command at one of your accounts
+    /// (see `hashi account switch`).
+    Switch {
+        /// claude or codex.
+        agent: hashi::agent::AgentKind,
+        /// A login account, or `default` for your original login.
+        name: Option<String>,
+    },
     /// Add, update, list and remove projects: folders to share.
     #[command(subcommand, after_help = PROJECT_EXAMPLES)]
     Project(admin_cli::ProjectCommand),
@@ -616,6 +624,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Account(cmd)) => admin_cli::account(&server::open_store(&home)?, &home, cmd),
+        Some(Command::Switch { agent, name }) => {
+            admin_cli::switch(&server::open_store(&home)?, &home, agent, name)
+        }
         Some(Command::Project(cmd)) => admin_cli::project(&server::open_store(&home)?, &home, cmd),
         Some(Command::Audit { limit, json }) => {
             admin_cli::audit(&server::open_store(&home)?, limit, json)

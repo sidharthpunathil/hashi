@@ -234,8 +234,11 @@ pub const fn details(action: Action) -> Details {
                 "l signs an account in again, d disables, e enables, x removes, u reads its \
                  usage now.",
                 "Each row shows how much of its usage windows is used and when they reset.",
-                "Each Claude Code and Codex account gets terminal commands, such as \
-                 work-claude and work-dclaude; n changes their names.",
+                "w makes the plain claude (or codex) command sign in as the selected login \
+                 account in any terminal or editor, and w again goes back to your own login. \
+                 n picks the word for a skip-permissions command, such as dclaude. The now \
+                 lines say who plain claude and codex sign in as, and R puts everything back \
+                 (own logins, no commands).",
             ],
             know: &[
                 "When an account hits its limit, Hashi moves to the next one, as the account \

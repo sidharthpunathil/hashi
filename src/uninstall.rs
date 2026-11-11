@@ -293,7 +293,7 @@ pub struct Target {
     pub user_home: Option<PathBuf>,
     /// Windows: the user PATH and the installer's directory.
     pub user_path: Option<(String, PathBuf)>,
-    /// The folder holding the `<name>-claude` account commands, when the
+    /// The folder holding the skip-permissions command, when the
     /// running binary is on PATH.
     pub commands_dir: Option<PathBuf>,
 }
@@ -315,7 +315,7 @@ pub struct Plan {
     pub remotes: Vec<(String, String)>,
     /// A problem reading `remotes.json`.
     pub remotes_error: Option<String>,
-    /// The `<name>-claude` account commands this home wrote.
+    /// The skip-permissions commands this home wrote.
     pub commands: Vec<PathBuf>,
 }
 
@@ -851,22 +851,18 @@ mod tests {
 
     #[test]
     fn removes_the_homes_account_commands_and_nothing_else() {
-        use crate::accounts::{self as acct, AccountKind};
+        use crate::accounts::{self as acct};
         use crate::agent::AgentKind;
         let tmp = tmp();
         let t = fake_install(tmp.path());
         let bin = tmp.path().join("bin");
         acct::create_dir(&t.home, AgentKind::Claude, "rajat").unwrap();
-        let account = acct::commands::test_account("rajat", AccountKind::Login);
         let windows = cfg!(windows);
-        let r = acct::commands::sync_in(
-            &bin,
-            &t.home,
-            &[account],
-            &acct::commands::Names::default(),
-            &[],
-            windows,
-        );
+        let keywords = acct::commands::Keywords {
+            claude: Some("dclaude".to_owned()),
+            codex: Some("dcodex".to_owned()),
+        };
+        let r = acct::commands::sync_in(&bin, &t.home, &keywords, &[], windows);
         assert_eq!(r.commands.len(), 2);
         let mine = if windows {
             "mine-claude.cmd"
@@ -882,7 +878,7 @@ mod tests {
         );
         let plan = plan(&t, false).unwrap();
         assert_eq!(plan.commands.len(), 2);
-        assert!(describe(&plan).contains("rajat-dclaude"));
+        assert!(describe(&plan).contains("dclaude"));
         let removed = remove_files(&plan, None);
         assert!(removed.failed.is_empty(), "{:?}", removed.failed);
         let mut left: Vec<String> = std::fs::read_dir(&bin)

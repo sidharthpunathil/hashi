@@ -157,9 +157,29 @@ pub const TABLE: &[(&str, Entry)] = &[
         },
     ),
     ("account list", Entry::Row(Action::Accounts)),
-    // The selected account's commands show in the Accounts popup, where n
-    // renames them; the server makes them when it starts and as accounts
-    // change.
+    // w switches the selected account in; n picks the word for the
+    // skip-permissions command.
+    (
+        "account switch",
+        Entry::InPopup {
+            row: Action::Accounts,
+            key: "w",
+        },
+    ),
+    (
+        "switch",
+        Entry::InPopup {
+            row: Action::Accounts,
+            key: "w",
+        },
+    ),
+    (
+        "account reset",
+        Entry::InPopup {
+            row: Action::Accounts,
+            key: "R",
+        },
+    ),
     (
         "account commands",
         Entry::InPopup {

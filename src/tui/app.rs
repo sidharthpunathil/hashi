@@ -773,8 +773,10 @@ pub enum Popup {
     },
     /// "Add account" form.
     AddAccount(Box<AccountForm>),
-    /// The account commands' name patterns.
+    /// The skip-permissions commands' words.
     CommandNames(Box<CommandNamesForm>),
+    /// Confirmation of `hashi account reset`: switches and commands undone.
+    ConfirmResetSwitch,
     /// Account removal confirmation.
     ConfirmRemoveAccount {
         /// The agent.
@@ -984,6 +986,8 @@ pub struct App {
     /// The request detail pane, kept between frames.
     pub detail_cache: super::ui::DetailCache,
     pub(crate) last_refresh: Option<Instant>,
+    /// Who plain `claude` and `codex` sign in as, and when that was read.
+    pub(crate) plain_logins: (Option<Instant>, Vec<crate::accounts::switch::PlainLogin>),
     /// The selected request in full, for the detail pane.
     pub(crate) detail: Option<Request>,
     /// Selected row of the Commands view, an index into [`Action::ALL`].
@@ -1059,6 +1063,7 @@ impl App {
             reduced_motion: std::env::var("HASHI_REDUCED_MOTION").is_ok_and(|v| v != "0"),
             detail_cache: super::ui::DetailCache::default(),
             last_refresh: None,
+            plain_logins: (None, Vec::new()),
             detail: None,
             commands_selected: 0,
             details_max_scroll: std::cell::Cell::new(0),
@@ -1452,6 +1457,7 @@ impl App {
             | Popup::AddAccount(_)
             | Popup::CommandNames(_)
             | Popup::ConfirmRemoveAccount { .. }
+            | Popup::ConfirmResetSwitch
             | Popup::Projects { .. }
             | Popup::Project(_)
             | Popup::ConfirmRemoveProject { .. }
