@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- Re-verified against Claude Code 2.1.322, opencode 2.2.7 and Qwen Code 0.27.2.
+- Qwen Code runs get `QWEN_CODE_DISABLE_LSP=1`, so an owner's `tools.lspEnabled` setting or exported `QWEN_CODE_ENABLE_LSP` (new in Qwen Code 0.27.1) cannot start language servers in a shared run.
+
+### Fixed
+
+- opencode's "usage limit your ChatGPT workspace admin set" error (new in 2.2.6) now counts as a usage limit, so failover moves to the next account.
+
 ## [0.4.2] - 2026-11-11
 
 ### Added

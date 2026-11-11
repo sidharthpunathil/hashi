@@ -1,6 +1,6 @@
 //! Qwen Code backend: `qwen --output-format stream-json --prompt=<text>`.
 //!
-//! Verified against the Qwen Code 0.26.7 source (`github:QwenLM/qwen-code`);
+//! Verified against the Qwen Code 0.27.2 source (`github:QwenLM/qwen-code`);
 //! see `docs/research/agent-clis.md` for the wider notes.
 //!
 //! - **Prompt form.** The prompt is one argv element, `--prompt=<text>`.
@@ -51,11 +51,17 @@ pub const APPROVAL_MODE: &str = "default";
 /// (`packages/core/src/memory/paths.ts`, `getMemoryBaseDir`) from the owner's
 /// global Qwen directory into the run's own workspace, so memories written
 /// during one token's runs are never read back in another token's runs.
+///
+/// `QWEN_CODE_DISABLE_LSP` keeps language servers off. Since 0.27.1 they
+/// start from `QWEN_CODE_ENABLE_LSP` or the owner's `tools.lspEnabled`, not
+/// only `--experimental-lsp`, and this switch overrides all three
+/// (`packages/cli/src/config/lsp-opt-in.ts`).
 #[must_use]
 pub fn env(workdir: &Path) -> Vec<(String, String)> {
     let dir = std::path::absolute(workdir).unwrap_or_else(|_| workdir.to_path_buf());
     vec![
         ("QWEN_CODE_NO_RELAUNCH".to_owned(), "1".to_owned()),
+        ("QWEN_CODE_DISABLE_LSP".to_owned(), "1".to_owned()),
         (
             "QWEN_CODE_MEMORY_BASE_DIR".to_owned(),
             dir.join(MEMORY_DIR).to_string_lossy().into_owned(),
@@ -387,6 +393,15 @@ mod tests {
         assert!(
             env.iter()
                 .any(|(k, v)| k == "QWEN_CODE_NO_RELAUNCH" && v == "1")
+        );
+    }
+
+    #[test]
+    fn env_keeps_language_servers_off() {
+        let env = env(Path::new("/tmp/ws"));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "QWEN_CODE_DISABLE_LSP" && v == "1")
         );
     }
 

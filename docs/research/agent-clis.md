@@ -41,7 +41,7 @@ Also installed here: `claude` 2.1.318 and `codex` 0.166.0, the two existing back
 
 ## 1. opencode
 
-Source: `github:sst/opencode` (redirects to `anomalyco/opencode`), cached at `~/.opensrc/repos/github.com/sst/opencode/dev`. **Version warning:** the cached source is **opencode V2** (`@opencode/cli` 2.2.5, CHANGELOG 2026-10-30, effect/cli parser, code in `packages/cli`). The legacy yargs `packages/opencode/src/cli/cmd/run.ts` is gone. The binary installed here is a 1.x build (`~/.opencode/package.json` pins `@opencode-ai/plugin` 1.4.5). Everything below is V2; the 1.x `--format json` schema is UNVERIFIED and may differ, so pin a V2 version before integrating.
+Source: `github:sst/opencode` (redirects to `anomalyco/opencode`), cached at `~/.opensrc/repos/github.com/sst/opencode/dev`. **Version warning:** the cached source is **opencode V2** (`@opencode/cli` 2.2.5, CHANGELOG 2026-10-30, re-checked against 2.2.7 on 2026-11-11, effect/cli parser, code in `packages/cli`). The legacy yargs `packages/opencode/src/cli/cmd/run.ts` is gone. The binary installed here is a 1.x build (`~/.opencode/package.json` pins `@opencode-ai/plugin` 1.4.5). Everything below is V2; the 1.x `--format json` schema is UNVERIFIED and may differ, so pin a V2 version before integrating.
 
 - **Install:** `curl -fsSL https://opencode.ai/v2/install | bash` (to `$HOME/.opencode/bin`), `npm i -g @opencode/cli@latest`, or `brew install anomalyco/tap/opencode-v2` (README.md:50-55).
 - **Binary:** `opencode`.
@@ -49,7 +49,7 @@ Source: `github:sst/opencode` (redirects to `anomalyco/opencode`), cached at `~/
 - **Server attachment:** `run` attaches to an already running background opencode server if one exists, otherwise spawns a private `opencode serve --stdio --port 0` (handlers/run.ts:10, services/standalone.ts, server-connection.ts:49-58). **Always pass `--standalone`** so requests from different tokens never share a server.
 - **Prompt passing:**
   - `--` is honoured: packages/cli/test/mini.test.ts:146 passes `run ... -- --foo`, and flag.test.ts:44-45 shows option-like text after `--` landing in `message`.
-  - **Quoting gotcha (verified):** `run/run.ts:179-182`:
+  - **Quoting gotcha (verified, 2.2.0 to 2.2.6):** `run/run.ts:179-182` in 2.2.5. 2.2.7 removed `formatMessage` and joins parts with a plain space (`run/run.ts:64`), so splitting on single spaces is correct on both:
     ```ts
     const value = message.map((part) => (part.includes(" ") ? `"${part.replace(/"/g, '\\"')}"` : part)).join(" ")
     ```
@@ -68,13 +68,15 @@ Source: `github:sst/opencode` (redirects to `anomalyco/opencode`), cached at `~/
   | `tool_use` | 439-541 | `part{...,type:"tool",tool,state{status:"completed"\|"error",input,output?,error?,title?,metadata,time}}` |
   | `step_finish` | 543-557, 729-742 | `part{...,type:"step-finish",reason,cost,tokens{input,output,reasoning,cache{read,write}}}` |
   | `error` | 559-592, 871-876 | `error{type,message,status?,response?,retryAfterMs?}` |
+  | `retry` | 2.2.6+, noninteractive.ts:478-492 | `messageID,attempt,nextRetryAt,error`; not terminal |
+  | `background_wait` | 2.2.6+, noninteractive.ts:468-476 | `jobs[{id,kind,title}]`; run waits for its background jobs with no time limit |
 
   `reason` is `stop|length|tool-calls|content-filter|error|unknown` (schema/src/llm.ts:5). There is no terminal result event; the run ends at process exit.
 - **Parser:** text = `part.text` of the `text` events after the last `step_start` (or all joined); session id = top-level `sessionID`; usage = sum of `part.tokens.input` (plus `cache.read`/`cache.write` to match the Claude convention) and `part.tokens.output`; cost = sum of `part.cost` (USD). Any `error` event means `Reported`.
 - **Usage/cost:** yes, both.
 - **Auth:** provider env vars such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (models.dev env names, core/src/integration.ts:398, 701), or `opencode auth login` (stored in the SQLite data dir, core/src/credential/sql.ts). Subscription OAuth logins exist for some providers (UNVERIFIED for V2).
 - **Permissions:** most tools default to allow, `external_directory`, `doom_loop` and `.env` reads default to ask (packages/web/src/content/docs/permissions.mdx:172-178). In `run` without `--auto`, every ask is answered reject and the model is told to continue (noninteractive.ts:189-217); forms and questions are cancelled (219-238). **Safe default:** omit `--auto`, and deny `bash`/`edit` through `OPENCODE_CONFIG_CONTENT` (core/src/config.ts:297) when a read-only agent is wanted. No OS sandbox.
-- **Exit codes:** 0 success, 1 on any error event or bad flag, 130 on SIGINT (noninteractive.ts:584, 758-761). Errors before a session exists print `{"type":"error","sessionID":"",...}` and exit 1 (run.ts:265-279).
+- **Exit codes:** 0 success, 1 on any error event or bad flag, 130 on SIGINT, 143 on SIGTERM from 2.2.6 (noninteractive.ts:584, 758-761 in 2.2.5; index.ts:176 in 2.2.7). Errors before a session exists print `{"type":"error","sessionID":"",...}` and exit 1 (run.ts:265-279).
 - **Git repo:** not required (file-access.ts:115 falls back to the directory; UNVERIFIED end to end).
 - **Windows:** supported (desktop builds, `OPENCODE_GIT_BASH_PATH`); CLI Windows binaries UNVERIFIED.
 - **Env:** `OPENCODE_DISABLE_AUTOUPDATE=1` (updater.ts:535), `OPENCODE_DISABLE_MODELS_FETCH`, `OPENCODE_CONFIG_DIR`. stderr carries ANSI codes regardless of `NO_COLOR`; stdout is clean in json mode.
@@ -156,7 +158,7 @@ Fixture `gemini_failure.jsonl` (message text illustrative):
 
 ## 3. Qwen Code
 
-Source: `github:QwenLM/qwen-code` (v0.26.7), a Gemini CLI fork whose headless output copies Claude Code's `stream-json`.
+Source: `github:QwenLM/qwen-code` (v0.27.2), a Gemini CLI fork whose headless output copies Claude Code's `stream-json`.
 
 - **Install:** `npm i -g @qwen-code/qwen-code@latest` (Node 22+), `brew install qwen-code`, or standalone sh/PowerShell scripts (README.md:34-62).
 - **Binary:** `qwen` (packages/cli/package.json:13-14).
@@ -408,7 +410,7 @@ Not recommended for now: **Crush** (no JSON, auto-approves everything, loads wor
 Added after the security audit. The runner skips each one when the agent's extra arguments already set the same flag; those arguments are not yet exposed as a Hashi setting.
 
 - **Claude Code**: `--setting-sources user` (project and local settings in a token's workspace never load), `--strict-mcp-config` (no MCP servers unless `--mcp-config <file>` lists them), and `--disallowedTools WebFetch` when no `--permission-mode` is set. A leading `/` in the prompt gets a space, as for Gemini and Qwen.
-- **Gemini CLI and Qwen Code**: `--allowed-mcp-server-names ""`, which their own source treats as "allow no MCP servers". Qwen also gets `QWEN_CODE_MEMORY_BASE_DIR` inside the workspace. Neither CLI has a flag to skip project-level settings, and `web_fetch` stays denied only while the owner has no user-level allow rule for it.
+- **Gemini CLI and Qwen Code**: `--allowed-mcp-server-names ""`, which their own source treats as "allow no MCP servers". Qwen also gets `QWEN_CODE_MEMORY_BASE_DIR` inside the workspace, and `QWEN_CODE_DISABLE_LSP=1` so a user-level `tools.lspEnabled` or an exported `QWEN_CODE_ENABLE_LSP` cannot start language servers. Neither CLI has a flag to skip project-level settings, and `web_fetch` stays denied only while the owner has no user-level allow rule for it.
 - **Codex**: no MCP flag. `-c` overrides are deep-merged, so `-c mcp_servers={}` does not remove configured servers; disabling one needs its name, `-c mcp_servers.<name>.enabled=false`.
 - **opencode**: the inline config starts with `"*": "deny"` and allows only `read` (without `.env` files), `glob`, `grep`, `list` and `lsp`. MCP tools are checked under `<server>_<tool>` and fall under the `*` deny.
 - **Cursor CLI**: `--approve-mcps` is stripped from extra arguments, like `--force` and `--yolo`.

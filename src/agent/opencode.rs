@@ -1,7 +1,8 @@
 //! opencode backend: `opencode run --standalone --format json`, which streams
 //! JSONL events.
 //!
-//! Targets opencode V2 (`@opencode/cli`), as read from the 2.2.5 source.
+//! Targets opencode V2 (`@opencode/cli`), as read from the 2.2.5 source and
+//! re-checked against 2.2.7.
 //! **Minimum version: 2.2.0**, the release that accepts `--standalone` after
 //! the subcommand and reports server connection failures as JSON. The 1.x
 //! builds (`opencode-ai`) have a different CLI and are not supported.
@@ -11,9 +12,10 @@
 //!
 //! - `run/run.ts`: the project directory is `process.env.PWD ?? process.cwd()`,
 //!   so [`env`] points `PWD` at the workspace. Positional message parts are
-//!   joined with a space, and any part that contains a space is first wrapped
-//!   in literal double quotes. [`build_args`] therefore splits the prompt on
-//!   single spaces so that the join rebuilds the original text exactly.
+//!   joined with a space. Before 2.2.7 any part that contains a space was
+//!   first wrapped in literal double quotes, so [`build_args`] splits the
+//!   prompt on single spaces: the join rebuilds the original text exactly on
+//!   every 2.2 release.
 //! - effect/cli's lexer splits argv at the first `--` and keeps everything
 //!   after it as operands, so no piece of the prompt is read as a flag, even
 //!   a piece that is itself `--help` or `--`.
@@ -22,7 +24,8 @@
 //!   cancelled, so an unattended run never waits for a human. Events are
 //!   `{"type", "timestamp", "sessionID", ...}` lines on stdout: `step_start`,
 //!   `text`, `reasoning`, `tool_use`, `step_finish` (per step `cost` in USD
-//!   and `tokens`) and `error`. There is no final result event.
+//!   and `tokens`) and `error`, plus `retry` and `background_wait` from
+//!   2.2.6 on, which are ignored. There is no final result event.
 //! - `services/server-connection.ts`: without `--standalone`, `run` attaches
 //!   to an already running background service. `--standalone` gives every
 //!   run a private server.
@@ -265,13 +268,20 @@ fn describe_error(event: &Value, message: &str) -> String {
 }
 
 /// Whether a failed run's error says this account is at its limit: one of
-/// the typed limit errors, or "usage limit reached" (which also covers
-/// "Workspace usage limit reached"). A `retryAfterMs` sets the reset. See
+/// the typed limit errors, "usage limit reached" (which also covers
+/// "Workspace usage limit reached"), or the cap a ChatGPT workspace admin
+/// set (2.2.6 on). A `retryAfterMs` sets the reset. See
 /// [`super::limit_hit`].
 #[must_use]
 pub fn limit_hit(error: &str) -> Option<Option<time::OffsetDateTime>> {
     (super::limit::contains_any(error, &LIMIT_TYPES)
-        || super::limit::contains_any(error, &["usage limit reached"]))
+        || super::limit::contains_any(
+            error,
+            &[
+                "usage limit reached",
+                "usage limit your chatgpt workspace admin set",
+            ],
+        ))
     .then(|| super::limit::hit(error))
     .flatten()
 }
@@ -589,6 +599,10 @@ mod tests {
             assert!(limit_hit(&format!("x ({kind})")).is_some(), "{kind}");
         }
         assert_eq!(limit_hit("usage limit reached"), Some(None));
+        assert_eq!(
+            limit_hit("You've reached the usage limit your ChatGPT workspace admin set for you."),
+            Some(None)
+        );
         assert!(limit_hit("quota exceeded").is_none());
         assert!(limit_hit("Invalid API key").is_none());
     }
