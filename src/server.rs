@@ -1269,6 +1269,35 @@ pub async fn start_with(cfg: ServerConfig, net: NetLimits, bus: Bus) -> Result<R
         cfg.retention_days,
         cancel.clone(),
     );
+    // The owner's own Claude Code use, while they have it turned on.
+    {
+        let store = Arc::clone(&store);
+        let home = cfg.home.clone();
+        let cancel = cancel.clone();
+        tasks.spawn(async move {
+            let first = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            let mut tick = tokio::time::interval_at(first, crate::stats::SCAN_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    _ = tick.tick() => {}
+                }
+                if !crate::stats::enabled(&home) {
+                    continue;
+                }
+                let (store, home) = (Arc::clone(&store), home.clone());
+                match tokio::task::spawn_blocking(move || crate::stats::scan(&store, &home)).await {
+                    Ok(Ok(r)) if r.added > 0 => {
+                        tracing::debug!(added = r.added, "own usage read");
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "reading own usage failed"),
+                    Err(e) => tracing::warn!(error = %e, "own usage task stopped"),
+                }
+            }
+        });
+    }
 
     // Usage: the default policy, and a poller for refreshes and (unless
     // turned off) background reads of Claude Code and Codex accounts.

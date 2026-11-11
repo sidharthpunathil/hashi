@@ -1,6 +1,6 @@
 [package]
 name = "hashi"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.89"
 description = "Call Claude Code, Codex and other coding-agent CLIs on your machine over an authenticated HTTP API, with a live terminal dashboard."
@@ -21,6 +21,7 @@ dirs = "7.0.0"
 futures = "0.3.34"
 hex = "0.4.3"
 hyper = { version = "1.12.0", features = ["server", "http1"] }
+memchr = "2.8.3"
 hyper-util = { version = "0.1.21", features = ["server", "server-graceful", "http1", "service", "tokio"] }
 rand = "0.10.3"
 ratatui = "0.30.2"

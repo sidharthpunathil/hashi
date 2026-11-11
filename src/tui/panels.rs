@@ -188,6 +188,21 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
             ],
         ),
         Popup::Audit { scroll } => audit(app, frame, *scroll),
+        Popup::MyUsage { days, scroll } => my_usage(app, frame, *days, *scroll),
+        Popup::ConfirmForgetUsage => fitted(
+            frame,
+            64,
+            "forget my usage",
+            vec![
+                Line::from(Span::styled(
+                    "Delete everything collected about your own use?",
+                    plain(),
+                )),
+                muted_line("Tracking stays as it is; turn it off with t."),
+                Line::raw(""),
+                key_hint(&[("y", "delete"), ("n", "keep")]),
+            ],
+        ),
         Popup::Doctor => doctor_popup(app, frame),
         Popup::Report(form) => report(app, frame, form),
         Popup::ReportSaved {
@@ -1391,6 +1406,63 @@ fn connect(frame: &mut Frame, form: &forms::ConnectForm, tick: u64) {
         ("esc", "cancel"),
     ]));
     fitted(frame, 90, "connect to a bridge", lines);
+}
+
+/// The owner's own use, as `hashi stats` prints it.
+fn my_usage(app: &App, frame: &mut Frame, days: u32, scroll: usize) {
+    let area = frame.area();
+    let rect = centered(area, 110, area.height.saturating_sub(4).max(10));
+    let inner = modal("").inner(rect);
+    let [body, keys] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let report = app.stats_report.as_ref().map(|(_, _, r)| r);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match report {
+        Some(r) => {
+            for l in crate::stats::render(r).lines() {
+                if l.is_empty() {
+                    lines.push(Line::raw(""));
+                } else if l.starts_with(' ') {
+                    lines.push(Line::from(Span::styled(l.to_owned(), plain())));
+                } else {
+                    lines.push(Line::from(Span::styled(l.to_owned(), t::bold(t::MIST))));
+                }
+            }
+        }
+        None => lines.push(muted_line("reading…")),
+    }
+    let visible = usize::from(body.height).max(1);
+    let scroll = scroll.min(lines.len().saturating_sub(visible));
+    frame.render_widget(Clear, rect);
+    let tracking = report.is_some_and(|r| r.tracking);
+    frame.render_widget(
+        modal(&format!(
+            "my usage · last {days} day{} · tracking {}",
+            if days == 1 { "" } else { "s" },
+            if tracking { "on" } else { "off" }
+        )),
+        rect,
+    );
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(scroll).collect::<Vec<_>>()),
+        body,
+    );
+    frame.render_widget(
+        Paragraph::new(key_hint(&[
+            (
+                "t",
+                if tracking {
+                    "stop tracking"
+                } else {
+                    "start tracking"
+                },
+            ),
+            ("d", "1/7/30 days"),
+            ("f", "forget"),
+            ("↑↓", "scroll"),
+            ("esc", "close"),
+        ])),
+        keys,
+    );
 }
 
 fn audit(app: &App, frame: &mut Frame, scroll: usize) {

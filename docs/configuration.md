@@ -74,7 +74,7 @@ hashi request '<ask-access link>' --name Sam      # on a friend's machine: ask s
 hashi audit                                # who changed what
 hashi ask "What does this repo do?" -a claude   # one prompt, no server
 hashi report                               # redacted diagnostics for a bug report
-hashi update                               # install the latest release (--check, --version v0.4.1, --allow-downgrade, --yes)
+hashi update                               # install the latest release (--check, --version v0.4.2, --allow-downgrade, --yes)
 hashi uninstall                            # remove the binary and ~/.hashi (--dry-run, --keep-data, --yes)
 hashi llm                                  # a Markdown guide for an LLM agent (alias: hashi guide)
 hashi llm --output hashi-guide.md          # write it to a file readable only by you
@@ -92,9 +92,9 @@ hashi token list --json | jq -r '.tokens[] | select(.status == "paused") | .name
 
 `hashi install` prints the vendor's documented command for your platform (Homebrew on macOS, Cloudflare's package repository or Tailscale's install script on Linux) and runs it with your terminal attached, so `sudo` can prompt. Where the vendor documents no command for your system or its package manager is not on `PATH` (Windows, for both helpers), it prints the download page instead. Without a terminal it refuses unless you pass `--yes`. The commands and their sources are listed in [remote access](remote-access.md#installing-the-helpers).
 
-The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.4.1`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
+The update check sends one request to api.github.com a day, carrying only the Hashi version in its User-Agent (such as `hashi/0.4.2`), and caches the answer in `~/.hashi/update-check.json`. `hashi update` downloads the archive for your platform from the GitHub release, verifies its SHA-256 checksum, checks that the new binary reports the expected version and swaps it in; restart Hashi afterwards. It refuses a binary installed by Cargo (update that with `cargo install --locked --git https://github.com/sidharthpunathil/hashi --force`) or one in a directory you cannot write to, and asks before replacing unless you pass `--yes`. Without a terminal to ask on, it refuses unless you pass `--yes`.
 
-- `--version v0.4.1` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
+- `--version v0.4.2` installs that release. One older than the running Hashi is refused unless you also pass `--allow-downgrade`, which prints a warning first: this build keeps the database at its own schema version, and an older release may refuse to start on it or misread it. Back up `~/.hashi` before a downgrade.
 - Downloads are HTTPS only, and only a regular file in the archive is installed (see [supply chain](security-model.md#supply-chain)).
 
 ### Invites and limits
@@ -252,6 +252,32 @@ hashi project update api --clear-account-strategy --clear-rotate-at   # back to 
 **Sessions.** A stateful conversation stays on its account until that account reaches the threshold or its limit; only then does the next message start a fresh conversation on the newly chosen account. A new conversation always starts on the strategy's choice. `GET /v1/tokens` lists, for each token, which account each of its conversations is on.
 
 **Dashboard.** Agent cards show the best account's headroom, and the log and a toast say when an account crosses the threshold, is limited or recovers. `hashi serve --headless` prints the same lines.
+
+### Your own usage
+
+Hashi can also tell you how much you use Claude Code yourself, in any terminal or editor (with `claude`, `dclaude`, an IDE extension or a switched account). It is off until you turn it on:
+
+```bash
+hashi stats on            # start; reads what is already there (the first time can take a minute)
+hashi stats               # the last 7 days
+hashi stats --days 30     # or any number of days; --json for scripts
+hashi stats off           # stop; what was collected stays
+hashi stats forget        # delete what was collected (asks first; --yes skips that)
+```
+
+In the dashboard it is the **My usage** row in the Commands view: `t` turns tracking on or off, `d` switches between 1, 7 and 30 days, and `f` deletes what was collected.
+
+**What it reads and keeps.** Claude Code writes every interactive session to `~/.claude/projects/<project>/<session>.jsonl` (and the same under each Hashi account's folder). Hashi reads those files a little at a time, remembering how far it got in each, and keeps only numbers from each reply: the tokens (input, output, cache reads and writes), the model, the project folder's name, the session id, the time and an estimated cost. It never keeps what was said. Everything stays in `~/.hashi/hashi.db`. Headless sessions (`claude -p` and the SDK, which is how Hashi itself runs prompts) are left out, since Hashi's own runs are already counted in its requests. While the server runs it reads new lines every two minutes; `hashi stats` also reads them before it reports, so the server does not have to be running.
+
+**Which account.** Each session file names the account it signed in as. Hashi matches that against your accounts' identities, so a session after `hashi switch claude work` counts for `work`, and sessions on your own login count for `default`. A login Hashi does not know shows as `other`.
+
+**The report** shows:
+
+- totals and the estimated cost, by day, account, model and project, and how much ran without permission prompts (as `dclaude` does);
+- **quota burn**: for each Claude Code and Codex account, how full each window is, how fast it has been filling over the last few hours, and when it will be full at that pace, or how full it will be when it resets. The pace comes from the quota readings Hashi keeps for 15 days;
+- **you vs shared**: on each account, your own use next to what Hashi ran for tokens and friends in the same period.
+
+Costs are estimates at the API's list prices. On a Pro or Max plan you pay the plan, so read them as a measure of how much you use, not a bill.
 
 ### Projects
 
@@ -437,6 +463,8 @@ With "keep for next start" on (the default), the move is saved in `~/.hashi/sett
 }
 ```
 
+The same file keeps `dangerousCommands` (the skip-permissions command words, see [accounts](#accounts)) and `trackOwnUse` (see [your own usage](#your-own-usage)).
+
 At startup each value comes from, in order: its flag (`--port`, `--bind`), its environment variable (`HASHI_PORT`, `HASHI_BIND`), `settings.json`, then the default (`7878`, `127.0.0.1`). When a flag or variable is set, the form says it wins over the saved value at the next start. A file that cannot be read, or that saves port `0`, is ignored with a warning in the log. While the server listens outside loopback, however that was chosen, the dashboard header shows `! exposed, no TLS` (or `! exposed, HTTPS`) next to the local URL. `hashi uninstall` counts `settings.json` and `reports/` as Hashi's own.
 
 Running requests count up their elapsed time, and every status pairs a symbol with its colour (`✓` done, `✗` failed, `◌` queued, a spinner for running). Body text uses your terminal's own foreground colour, so light and dark themes both stay readable, and `HASHI_REDUCED_MOTION=1` freezes the animation.
@@ -445,17 +473,17 @@ Running requests count up their elapsed time, and every status pairs a symbol wi
 
 | Variable | Effect |
 |---|---|
-| `HASHI_VERSION=v0.4.1` | Install a specific release instead of the latest |
+| `HASHI_VERSION=v0.4.2` | Install a specific release instead of the latest |
 | `HASHI_INSTALL_DIR=/some/dir` | Install somewhere else |
 | `HASHI_NO_DOCTOR=1` | Skip the `hashi doctor` check at the end |
 | `HASHI_CONNECT='<invite link>'` | After installing, run `hashi connect -- <link>` instead of `hashi doctor`. Only a link of the shape the claim page builds (`https://<host>[:port]/claim/hashi_inv_<hex>`, or `http://` on loopback) is accepted; anything else stops the installer before it downloads. It fails with a clear message if the link is used up or expired |
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.4.1 sh
+curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.sh | HASHI_VERSION=v0.4.2 sh
 ```
 
 ```powershell
-$env:HASHI_VERSION = "v0.4.1"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
+$env:HASHI_VERSION = "v0.4.2"; irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
 The claim page builds the one-command setup for an invited person from its own link:

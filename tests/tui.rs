@@ -1931,6 +1931,30 @@ fn doctor_audit_and_update_popups_open_from_commands() {
     assert!(toast(&app).contains("hashi update"));
 }
 
+#[test]
+fn my_usage_opens_from_commands_cycles_days_and_asks_before_forgetting() {
+    let mut app = App::new(without_helpers(), None, false);
+    select_action(&mut app, Action::MyUsage);
+    app.on_key(key(KeyCode::Enter));
+    let out = draw(&mut app, 140, 44);
+    assert!(
+        out.contains("my usage") && out.contains("last 7 days"),
+        "{out}"
+    );
+    assert!(
+        out.contains("1/7/30 days") && out.contains("forget"),
+        "{out}"
+    );
+    app.on_key(key(KeyCode::Char('d')));
+    assert!(matches!(app.popup, Some(Popup::MyUsage { days: 30, .. })));
+    app.on_key(key(KeyCode::Char('f')));
+    assert!(matches!(app.popup, Some(Popup::ConfirmForgetUsage)));
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(matches!(app.popup, Some(Popup::MyUsage { .. })));
+    app.on_key(key(KeyCode::Esc));
+    assert!(app.popup.is_none());
+}
+
 // ── access requests ─────────────────────────────────────────────────────────
 
 /// A pending "new person" request from `name`, through an ask-access link.

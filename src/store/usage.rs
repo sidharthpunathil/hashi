@@ -92,6 +92,19 @@ fn insert_window(
         w.source.as_str(),
         w.observed_at.unwrap_or_else(now_ms),
     ])?;
+    // The reading over time, for the forecast (see `crate::stats`): kept
+    // when the figure moved, or at most every ten minutes when it did not.
+    let at = w.observed_at.unwrap_or_else(now_ms);
+    let pct = crate::usage::clamp_percent(w.used_percent);
+    conn.prepare_cached(
+        "INSERT INTO quota_history (agent, account, window, used_percent, resets_at, observed_at)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6
+         WHERE NOT EXISTS (
+             SELECT 1 FROM quota_history
+             WHERE agent = ?1 AND account = ?2 AND window = ?3
+               AND used_percent = ?4 AND observed_at > ?6 - 600000)",
+    )?
+    .execute(params![agent.as_str(), name, w.key, pct, w.resets_at, at])?;
     Ok(())
 }
 

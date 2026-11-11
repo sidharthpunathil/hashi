@@ -362,6 +362,10 @@ impl App {
             }
             Action::Report => Some(Popup::Report(Box::default())),
             Action::Audit => Some(Popup::Audit { scroll: 0 }),
+            Action::MyUsage => {
+                self.stats_report = None;
+                Some(Popup::MyUsage { days: 7, scroll: 0 })
+            }
             _ => return,
         };
     }
@@ -455,6 +459,48 @@ impl App {
                 }
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(Popup::Remotes { selected: 0 }),
                 _ => Some(Popup::ConfirmRemoveRemote { name }),
+            },
+            Popup::MyUsage {
+                mut days,
+                mut scroll,
+            } => {
+                match code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return None,
+                    KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
+                    KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+                    KeyCode::PageDown | KeyCode::Char('J') => scroll = scroll.saturating_add(10),
+                    KeyCode::PageUp | KeyCode::Char('K') => scroll = scroll.saturating_sub(10),
+                    KeyCode::Char('d') => {
+                        days = match days {
+                            1 => 7,
+                            7 => 30,
+                            _ => 1,
+                        };
+                        scroll = 0;
+                        self.stats_report = None;
+                    }
+                    KeyCode::Char('t') => self.toggle_tracking(),
+                    KeyCode::Char('f') => return Some(Popup::ConfirmForgetUsage),
+                    _ => {}
+                }
+                Some(Popup::MyUsage { days, scroll })
+            }
+            Popup::ConfirmForgetUsage => match code {
+                KeyCode::Char('y' | 'Y') => {
+                    match self.state.store.forget_own_usage() {
+                        Ok(n) => {
+                            self.audit("stats.forget", "", &n.to_string());
+                            self.notify(format!("deleted {n} message record(s)"));
+                        }
+                        Err(e) => self.notify(format!("{e}")),
+                    }
+                    self.stats_report = None;
+                    Some(Popup::MyUsage { days: 7, scroll: 0 })
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    Some(Popup::MyUsage { days: 7, scroll: 0 })
+                }
+                _ => Some(Popup::ConfirmForgetUsage),
             },
             Popup::Audit { mut scroll } => {
                 match code {
@@ -1118,6 +1164,33 @@ impl App {
                 });
             }
             Err(e) => self.notify(format!("{e:#}")),
+        }
+    }
+
+    /// Turns tracking of the owner's own use on or off. Turning it on reads
+    /// the session files at once, on a thread of its own.
+    fn toggle_tracking(&mut self) {
+        let Some(home) = self.home() else {
+            self.notify("no Hashi home here");
+            return;
+        };
+        let on = !crate::stats::enabled(&home);
+        if let Err(e) = crate::stats::set_enabled(&home, on) {
+            self.notify(e);
+            return;
+        }
+        self.audit(if on { "stats.on" } else { "stats.off" }, "", "");
+        self.stats_report = None;
+        if on {
+            let store = std::sync::Arc::clone(&self.state.store);
+            std::thread::spawn(move || {
+                if let Err(e) = crate::stats::scan(&store, &home) {
+                    tracing::warn!(error = %e, "reading own usage failed");
+                }
+            });
+            self.notify("tracking on: reading your session files (the first time takes a while)");
+        } else {
+            self.notify("tracking off; f deletes what was collected");
         }
     }
 

@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-11
+
+### Added
+
+- Your own Claude Code use, if you want it: `hashi stats on` starts tracking, `hashi stats` reports the last 7 days (`--days N`, `--json`), `hashi stats off` stops and `hashi stats forget` deletes what was collected. In the dashboard it is the **My usage** row in the Commands view (`t` tracking, `d` 1, 7 or 30 days, `f` forget). Hashi reads the session files Claude Code keeps for every interactive session (`claude`, `dclaude`, the IDE extensions, switched accounts), a little at a time, and keeps only numbers: tokens, model, project folder name, session and time, never what was said. Headless runs are left out. The report shows:
+  - totals and an estimated cost at API list prices, by day, account, model and project, and how much ran without permission prompts;
+  - quota burn: how fast each Claude Code and Codex window is filling and when it will be full at that pace, from quota readings Hashi now keeps for 15 days;
+  - you vs shared: your own use on each account next to what Hashi ran for others there.
+  Each session counts for the account it signed in as, so use after `hashi switch` is credited right.
+
+### Changed
+
+- The README is rewritten around what Hashi is now: your coding-agent accounts in one place (switching, usage, failover) and sharing them over HTTP.
+- The database moves to schema version 12 (three new tables). Hashi 0.4.1 and older refuse to open it; `hashi update --version v0.4.1 --allow-downgrade` warns about this.
+
 ## [0.4.1] - 2026-11-11
 
 ### Added

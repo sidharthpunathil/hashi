@@ -51,6 +51,11 @@ enum Command {
     /// Add, sign in, list, disable and remove agent accounts.
     #[command(subcommand, after_help = ACCOUNT_EXAMPLES)]
     Account(admin_cli::AccountCommand),
+    /// Your own Claude Code use: how much, on which account, model and
+    /// project, how fast each quota is filling, and your use next to what
+    /// Hashi ran for others. Off until `hashi stats on`; only numbers are
+    /// kept, never what was said.
+    Stats(admin_cli::StatsArgs),
     /// Point the plain `claude` (or `codex`, `gemini`, `opencode`) command at
     /// one of your accounts
     /// (see `hashi account switch`).
@@ -610,6 +615,7 @@ async fn main() -> Result<()> {
         }
         Some(Command::Invite(cmd)) => admin_cli::invite(&server::open_store(&home)?, cmd),
         Some(Command::Account(cmd)) => admin_cli::account(&server::open_store(&home)?, &home, cmd),
+        Some(Command::Stats(args)) => admin_cli::stats(&server::open_store(&home)?, &home, args),
         Some(Command::Switch { agent, name }) => {
             admin_cli::switch(&server::open_store(&home)?, &home, agent, name)
         }

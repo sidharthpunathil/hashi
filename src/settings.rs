@@ -31,6 +31,10 @@ pub struct Settings {
     /// The owner's names for the skip-permissions commands (`dclaude`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangerous_commands: Option<crate::accounts::commands::Keywords>,
+    /// Whether the owner's own Claude Code use is tracked (see
+    /// [`crate::stats`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_own_use: Option<bool>,
 }
 
 /// Where a value in effect came from.
