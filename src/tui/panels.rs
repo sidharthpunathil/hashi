@@ -723,16 +723,22 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ),
         ]));
     }
+    // One label width for this block, from the longest agent name, so the
+    // values line up whatever agents are shown.
+    let label_w = crate::accounts::switch::AGENTS
+        .iter()
+        .map(|a| "plain ".len() + a.as_str().len())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let label = |text: String| Span::styled(format!("{text:<label_w$}"), t::muted());
     // Agents with no login here and nothing switched in say nothing.
     for who in app
         .plain_logins()
         .iter()
         .filter(|w| w.switched() || w.email.is_some())
     {
-        let mut spans = vec![Span::styled(
-            format!("plain {:<7}", who.agent.as_str()),
-            t::muted(),
-        )];
+        let mut spans = vec![label(format!("plain {}", who.agent.as_str()))];
         spans.extend(login_spans(who));
         foot.push(Line::from(spans));
     }
@@ -743,13 +749,13 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
         let agent = sel.state.agent;
         foot.push(Line::from(if sel.active {
             vec![
-                Span::styled("in use  ", t::muted()),
+                label("in use".to_owned()),
                 Span::styled(format!("plain {agent} signs in as this account"), plain()),
                 Span::styled("  (w goes back to your login)", t::muted()),
             ]
         } else {
             vec![
-                Span::styled("switch  ", t::muted()),
+                label("switch".to_owned()),
                 Span::styled(
                     format!("w makes plain {agent} sign in as this account"),
                     t::muted(),
