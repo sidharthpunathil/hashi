@@ -27,6 +27,9 @@ pub struct AccountRow {
     pub signed_in: String,
     /// Tokens that list it.
     pub tokens: usize,
+    /// Tokens used on it in the last seven days (see
+    /// [`crate::store::Store::account_tokens_since`]).
+    pub used: i64,
     /// Whether the agent's plain command is switched to it (see
     /// [`crate::accounts::switch`]).
     pub active: bool,
@@ -192,10 +195,20 @@ impl App {
         if let Some(v) = &self.cache.account_rows {
             return Cow::Borrowed(v);
         }
+        let week = now_ms() - 7 * 86_400_000;
+        let used = self
+            .state
+            .store
+            .account_tokens_since(week)
+            .unwrap_or_default();
         let rows = self
             .cached_accounts()
             .iter()
             .map(|a| AccountRow {
+                used: used
+                    .get(&(a.agent.as_str().to_owned(), a.name.clone()))
+                    .copied()
+                    .unwrap_or(0),
                 signed_in: self.signed_in(a),
                 tokens: self
                     .tokens

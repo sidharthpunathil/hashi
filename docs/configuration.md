@@ -219,6 +219,7 @@ Limits are tracked only for tokens that list accounts for the agent.
 
 ```bash
 hashi account usage                    # a bar per window with its percent and reset, the plan, source and age, the state
+hashi account usage --all              # also each agent's default account (your own login)
 hashi account usage --agent codex      # one agent
 hashi account usage --refresh          # read Claude Code and Codex quota now first
 hashi account usage --json             # each account as GET /v1/accounts shows it

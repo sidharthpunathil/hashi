@@ -694,6 +694,11 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
                         .map_or_else(|| "never".to_owned(), |u| format!("{} ago", human_age(u))),
                     t::muted(),
                 )),
+                Cell::from(if row.used > 0 {
+                    Span::styled(crate::stats::tokens(row.used), plain())
+                } else {
+                    Span::styled("-", t::muted())
+                }),
                 Cell::from(Span::styled(row.tokens.to_string(), plain())),
             ]
         })
@@ -763,6 +768,15 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ]
         }));
     }
+    // What the two count columns mean, when there is a row to spare.
+    if !list.is_empty() && frame.area().height >= 30 {
+        let tracked = app.home().is_some_and(|h| crate::stats::enabled(&h));
+        foot.push(muted_line(if tracked {
+            "used 7d: tokens of Hashi's runs and your sessions. bound: tokens that may use it"
+        } else {
+            "used 7d: Hashi's runs (My usage adds yours). bound: tokens that may use it"
+        }));
+    }
     match usage {
         Some(u) => foot.extend(super::usage::lines(&[u], rotate_at, 24)),
         None if list.is_empty() => {}
@@ -785,9 +799,10 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
             ("signed in", 13),
             ("state", 20),
             ("last used", 10),
-            ("tokens", 6),
+            ("used 7d", 8),
+            ("bound", 5),
         ],
-        &[5, 2, 6, 3],
+        &[7, 5, 2, 6, 3],
         rows,
         selected,
         foot,

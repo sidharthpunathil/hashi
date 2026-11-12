@@ -678,6 +678,41 @@ mod poller_tests {
     }
 
     #[tokio::test]
+    async fn a_switched_in_account_is_read_from_the_plain_commands_login() {
+        let r = rig();
+        let (base, ep) = endpoint().await;
+        ep.answer(200, None, USAGE);
+        r.login(AgentKind::Claude, "work");
+        // `hashi switch claude work`: the plain command now holds its login
+        // and refreshes it there, so the saved copy goes stale.
+        let state = crate::accounts::root(&r.home()).join(crate::accounts::switch::STATE_FILE);
+        std::fs::write(&state, r#"{"claude":"work"}"#).unwrap();
+        let security = fake_security(r.dir.path(), "tok-live", NOW * 10);
+        let p = r.poller(r.claude_settings(&base, security), None);
+        if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+            return;
+        }
+        p.poll(AgentKind::Claude, "work").await.unwrap();
+        let log = std::fs::read_to_string(r.dir.path().join("security.log")).unwrap();
+        assert!(log.trim().ends_with("-s Claude Code-credentials"), "{log}");
+        assert_eq!(ep.calls()[0].0.as_deref(), Some("Bearer tok-live"));
+        // The figures are the account's, not the default's.
+        assert_eq!(
+            r.store
+                .usage_windows(AgentKind::Claude, "work")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            r.store
+                .usage_windows(AgentKind::Claude, "default")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn an_expired_token_is_never_refreshed_or_sent() {
         let r = rig();
         let (base, ep) = endpoint().await;

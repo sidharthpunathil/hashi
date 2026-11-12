@@ -184,6 +184,14 @@ impl Store {
                     r.skip_perms,
                 ])?;
             }
+            // The owner's own sessions are use of the account too.
+            let mut touch = tx.prepare_cached(
+                "UPDATE accounts SET last_used = ?3
+                 WHERE agent = ?1 AND name = ?2 AND COALESCE(last_used, 0) < ?3",
+            )?;
+            for r in rows {
+                touch.execute(params![r.agent.as_str(), r.account, r.at])?;
+            }
         }
         tx.execute(
             "INSERT INTO own_usage_files (path, offset, owner, skip_perms, sdk)
@@ -284,6 +292,39 @@ impl Store {
                     cost_usd: r.get(6)?,
                 })
             })?)
+    }
+
+    /// Tokens used on each account since `since`, by agent name and account:
+    /// what Hashi ran (input and output, as the runs reported them) plus the
+    /// owner's own tracked use (every token counted, as `hashi stats` does).
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub fn account_tokens_since(
+        &self,
+        since: i64,
+    ) -> Result<std::collections::HashMap<(String, String), i64>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT agent, account, SUM(n) FROM (
+                 SELECT agent, COALESCE(account, 'default') AS account,
+                     COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS n
+                 FROM requests WHERE status = 'completed' AND created_at >= ?1
+                 UNION ALL
+                 SELECT agent, account, input + output + cache_read + cache_write
+                 FROM own_usage WHERE at >= ?1)
+             GROUP BY 1, 2",
+        )?;
+        let rows = stmt
+            .query_map([since], |r| {
+                Ok((
+                    (r.get(0)?, r.get(1)?),
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
     }
 
     /// What Hashi ran for tokens on each account of `agent` since `since`.

@@ -9,8 +9,14 @@ All notable changes to this project are documented here. The format follows [Kee
 - Re-verified against Claude Code 2.1.322, opencode 2.2.7 and Qwen Code 0.27.2.
 - Qwen Code runs get `QWEN_CODE_DISABLE_LSP=1`, so an owner's `tools.lspEnabled` setting or exported `QWEN_CODE_ENABLE_LSP` (new in Qwen Code 0.27.1) cannot start language servers in a shared run.
 
+- `hashi account usage` shows only the accounts you added; `--all` also shows each agent's `default` account (your own login).
+- The Accounts popup's "tokens" column is now **bound** (the tokens allowed to use the account), next to a new **used 7d** column: tokens used on the account in the last 7 days by Hashi's runs, plus your own sessions when My usage tracking is on.
+
 ### Fixed
 
+- The usage of an account switched in with `w` (`hashi switch`) stopped updating a few hours after the switch: Hashi read the account's saved login, which expires once the plain command refreshes its token elsewhere. It is now read from the plain command's own login.
+- Usage figures kept after a failed read now say how old they are and why the newest read failed, in the dashboard and `hashi account usage`, instead of looking current.
+- "last used" in the Accounts popup only counted Hashi's runs, so accounts you use through the plain command stayed at "never". It now also moves when a quota reading shows the account was used (from anywhere) and with your tracked sessions.
 - opencode's "usage limit your ChatGPT workspace admin set" error (new in 2.2.6) now counts as a usage limit, so failover moves to the next account.
 
 ## [0.4.2] - 2026-11-11
