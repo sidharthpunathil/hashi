@@ -1044,6 +1044,11 @@ pub enum AccountCommand {
         /// are never refreshed).
         #[arg(long)]
         refresh: bool,
+        /// Also show each agent's `default` account (your own login, or
+        /// whatever the plain command is switched to). Without it only the
+        /// accounts you added are shown.
+        #[arg(long)]
+        all: bool,
         /// Print JSON, as `GET /v1/accounts` shows each account.
         #[arg(long)]
         json: bool,
@@ -1522,9 +1527,10 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
         AccountCommand::Usage {
             agent,
             refresh,
+            all,
             json,
             bins,
-        } => account_usage(store, home, agent, refresh, json, &bins)?,
+        } => account_usage(store, home, agent, refresh, all, json, &bins)?,
         AccountCommand::Disable { agent, name } => {
             acct::ops::set_disabled(store, agent, &name, true, "cli")?;
             println!("disabled {agent}:{name}");
@@ -1612,13 +1618,18 @@ fn account_usage(
     home: &Path,
     agent: Option<AgentKind>,
     refresh: bool,
+    all: bool,
     json: bool,
     bins: &BinArgs,
 ) -> Result<()> {
+    // The accounts you added; the `default` ones only with --all.
+    let shown = |a: &hashi::store::AccountState| {
+        agent.is_none_or(|g| a.agent == g) && (all || a.name != acct::DEFAULT)
+    };
     let mut accounts: Vec<_> = hashi::api::accounts_with_usage(store)
         .map_err(api_err)?
         .into_iter()
-        .filter(|a| agent.is_none_or(|g| a.agent == g))
+        .filter(|a| shown(a))
         .collect();
     if refresh {
         let store = std::sync::Arc::new(server_store(home)?);
@@ -1637,7 +1648,8 @@ fn account_usage(
             Some(bins.bin(AgentKind::Codex)),
             &installed,
         );
-        let targets = poller.eligible();
+        let mut targets = poller.eligible();
+        targets.retain(|(a, n)| agent.is_none_or(|g| *a == g) && (all || n != acct::DEFAULT));
         let results = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut out = Vec::new();
@@ -1657,7 +1669,7 @@ fn account_usage(
         accounts = hashi::api::accounts_with_usage(store.as_ref())
             .map_err(api_err)?
             .into_iter()
-            .filter(|a| agent.is_none_or(|g| a.agent == g))
+            .filter(|a| shown(a))
             .collect();
     }
     let now = now_ms();
@@ -1674,10 +1686,17 @@ fn account_usage(
         return Ok(());
     }
     if accounts.is_empty() {
-        println!(
-            "no usage yet: Claude Code and Codex accounts are read while `hashi serve` runs \
-             (or now with --refresh)"
-        );
+        if all {
+            println!(
+                "no usage yet: Claude Code and Codex accounts are read while `hashi serve` runs \
+                 (or now with --refresh)"
+            );
+        } else {
+            println!(
+                "no accounts added yet: add one with `hashi account add`, or see your own \
+                 login's usage with --all"
+            );
+        }
         return Ok(());
     }
     for a in &accounts {
@@ -1697,6 +1716,11 @@ fn account_usage(
             head.push_str(&format!("  ({}, {} ago)", w.source.as_str(), human_age(at)));
         }
         println!("{head}");
+        if !windows.is_empty()
+            && let Some(note) = poll.as_ref().and_then(|p| p.note.as_deref())
+        {
+            println!("  these figures are old; the last read failed: {note}");
+        }
         if let Some(by) = &a.shared_by {
             println!(
                 "  {}",

@@ -5,8 +5,8 @@
       "name": "Claude Code",
       "source": "npm:@anthropic-ai/claude-code",
       "repo": "anthropics/claude-code",
-      "version": "2.1.318",
-      "verified": "2026-11-06"
+      "version": "2.1.322",
+      "verified": "2026-11-11"
     },
     "codex": {
       "name": "Codex",
@@ -28,18 +28,18 @@
       "name": "opencode",
       "source": "github:anomalyco/opencode",
       "repo": "anomalyco/opencode",
-      "version": "2.2.5",
-      "tag": "v2.2.5",
-      "verified": "2026-11-06"
+      "version": "2.2.7",
+      "tag": "v2.2.7",
+      "verified": "2026-11-11"
     },
     "qwen": {
       "name": "Qwen Code",
       "source": "github:QwenLM/qwen-code",
       "repo": "QwenLM/qwen-code",
-      "version": "0.26.8",
-      "tag": "v0.26.8",
+      "version": "0.27.2",
+      "tag": "v0.27.2",
       "tag_pattern": "^v[0-9]",
-      "verified": "2026-11-06"
+      "verified": "2026-11-11"
     },
     "cursor": {
       "name": "Cursor CLI",

@@ -68,12 +68,61 @@ fn row_to_window(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Window>> {
     Ok(build())
 }
 
+/// The longest window whose start says when the account was last used: a
+/// five-hour window that has usage began with a message.
+const SHORT_WINDOW_MINS: i64 = 300;
+
+/// When a reading shows the account was used, Unix ms, compared with the
+/// reading `before` it: a window whose share went up, or that started
+/// again with some use, was used by now; a short window with some use was
+/// used no later than its start. `None` when the reading shows no use.
+/// This sees every use of the account, including the plain command and
+/// other machines, which Hashi's own runs cannot.
+fn used_at(before: Option<(f64, Option<i64>)>, w: &Window, at: i64) -> Option<i64> {
+    let pct = crate::usage::clamp_percent(w.used_percent);
+    if pct <= 0.0 {
+        return None;
+    }
+    let started = w
+        .resets_at
+        .zip(w.window_mins)
+        .filter(|(_, mins)| *mins <= SHORT_WINDOW_MINS)
+        .map(|(reset, mins)| reset - mins * 60_000)
+        .filter(|start| *start <= at);
+    let moved = before.is_some_and(|(old, old_reset)| {
+        let new_window = match (old_reset, w.resets_at) {
+            (Some(a), Some(b)) => (a - b).abs() > 60_000,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        pct > old + 0.5 || new_window
+    });
+    if moved { Some(at) } else { started }
+}
+
 fn insert_window(
     conn: &rusqlite::Connection,
     agent: AgentKind,
     name: &str,
     w: &Window,
 ) -> Result<()> {
+    let at = w.observed_at.unwrap_or_else(now_ms);
+    let before: Option<(f64, Option<i64>)> = conn
+        .prepare_cached(
+            "SELECT used_percent, resets_at FROM usage
+             WHERE agent = ?1 AND account = ?2 AND window = ?3",
+        )?
+        .query_row(params![agent.as_str(), name, w.key], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    if let Some(used) = used_at(before, w, at) {
+        conn.prepare_cached(
+            "UPDATE accounts SET last_used = ?3
+             WHERE agent = ?1 AND name = ?2 AND COALESCE(last_used, 0) < ?3",
+        )?
+        .execute(params![agent.as_str(), name, used])?;
+    }
     conn.prepare_cached(
         "INSERT INTO usage (agent, account, window, label, used_percent, resets_at, window_mins,
              source, observed_at)
@@ -94,7 +143,6 @@ fn insert_window(
     ])?;
     // The reading over time, for the forecast (see `crate::stats`): kept
     // when the figure moved, or at most every ten minutes when it did not.
-    let at = w.observed_at.unwrap_or_else(now_ms);
     let pct = crate::usage::clamp_percent(w.used_percent);
     conn.prepare_cached(
         "INSERT INTO quota_history (agent, account, window, used_percent, resets_at, observed_at)
@@ -121,12 +169,25 @@ impl Store {
         if !super::accounts::account_known(&tx, agent, name)? {
             return Ok(());
         }
-        tx.execute(
-            "DELETE FROM usage WHERE agent = ?1 AND account = ?2",
-            params![agent.as_str(), name],
-        )?;
+        // Each window is compared with its last reading as it is saved,
+        // then the windows this reading no longer has are dropped.
         for w in windows {
             insert_window(&tx, agent, name, w)?;
+        }
+        let gone: Vec<String> = {
+            let mut stmt =
+                tx.prepare_cached("SELECT window FROM usage WHERE agent = ?1 AND account = ?2")?;
+            stmt.query_map(params![agent.as_str(), name], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|k| !windows.iter().any(|w| &w.key == k))
+                .collect()
+        };
+        for k in gone {
+            tx.execute(
+                "DELETE FROM usage WHERE agent = ?1 AND account = ?2 AND window = ?3",
+                params![agent.as_str(), name, k],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -491,6 +552,102 @@ mod tests {
         )
         .unwrap();
         s
+    }
+
+    fn last_used(s: &Store) -> Option<i64> {
+        s.get_account(AgentKind::Claude, "work")
+            .unwrap()
+            .unwrap()
+            .last_used
+    }
+
+    fn at(mut w: Window, observed: i64) -> Window {
+        w.observed_at = Some(observed);
+        w
+    }
+
+    #[test]
+    fn a_reading_that_shows_use_sets_last_used() {
+        let s = with_work();
+        let now = now_ms();
+        let reset = now + 3_600_000;
+        // Nothing used: never.
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[at(w("five_hour", 0.0, None, Source::Poll), now - 60_000)],
+        )
+        .unwrap();
+        assert_eq!(last_used(&s), None);
+        // A five-hour window with use began with a message: used by its start.
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[at(
+                w("five_hour", 10.0, Some(reset), Source::Poll),
+                now - 30_000,
+            )],
+        )
+        .unwrap();
+        assert_eq!(last_used(&s), Some(now - 30_000), "a new window is use");
+        // The same figure again says nothing new.
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[at(
+                w("five_hour", 10.0, Some(reset), Source::Poll),
+                now - 10_000,
+            )],
+        )
+        .unwrap();
+        assert_eq!(last_used(&s), Some(now - 30_000));
+        // It went up: used by this reading.
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[at(w("five_hour", 12.0, Some(reset), Source::Poll), now)],
+        )
+        .unwrap();
+        assert_eq!(last_used(&s), Some(now));
+        // A later, lower window start never moves it back.
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[at(
+                w("five_hour", 12.0, Some(reset), Source::Poll),
+                now + 1_000,
+            )],
+        )
+        .unwrap();
+        assert_eq!(last_used(&s), Some(now));
+    }
+
+    #[test]
+    fn a_first_reading_with_use_dates_it_from_the_window_start() {
+        let s = with_work();
+        let now = now_ms();
+        let reset = now + 3_600_000;
+        s.replace_usage(
+            AgentKind::Claude,
+            "work",
+            &[
+                at(w("five_hour", 30.0, Some(reset), Source::Poll), now),
+                at(
+                    Window::new(
+                        "seven_day",
+                        "week",
+                        50.0,
+                        Some(now + 86_400_000),
+                        Some(10_080),
+                        Source::Poll,
+                    ),
+                    now,
+                ),
+            ],
+        )
+        .unwrap();
+        // Five hours before the reset: when its first message was sent.
+        assert_eq!(last_used(&s), Some(reset - 300 * 60_000));
     }
 
     #[test]

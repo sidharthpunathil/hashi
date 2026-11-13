@@ -313,7 +313,13 @@ fn account_usage_shows_bars_resets_and_unknowns_without_reading_anything() {
     use hashi::usage::{Source, Window};
     let cli = Cli::new();
     assert!(
-        cli.ok(&["account", "usage"]).contains("no usage yet"),
+        cli.ok(&["account", "usage"])
+            .contains("no accounts added yet"),
+        "nothing added yet"
+    );
+    assert!(
+        cli.ok(&["account", "usage", "--all"])
+            .contains("no usage yet"),
         "nothing read yet"
     );
     cli.ok(&["account", "add", "claude", "work", "--yes"]);
@@ -349,9 +355,30 @@ fn account_usage_shows_bars_resets_and_unknowns_without_reading_anything() {
             Some("unknown, refreshes on its next run"),
         )
         .unwrap();
+    // Your own login's figures show only with --all.
+    store
+        .replace_usage(
+            AgentKind::Claude,
+            "default",
+            &[Window::new(
+                "seven_day",
+                "week",
+                10.0,
+                None,
+                Some(10_080),
+                Source::Poll,
+            )],
+        )
+        .unwrap();
     drop(store);
+    assert!(
+        cli.ok(&["account", "usage", "--all"])
+            .contains("claude:default"),
+        "--all shows the default account"
+    );
 
     let out = cli.ok(&["account", "usage"]);
+    assert!(!out.contains("claude:default"), "{out}");
     assert!(
         out.contains("claude:work  max  8% left (warning)  (poll,"),
         "{out}"
@@ -376,7 +403,7 @@ fn account_usage_shows_bars_resets_and_unknowns_without_reading_anything() {
     assert_eq!(work["summary"]["state"], "warning");
     assert_eq!(work["usage"].as_array().unwrap().len(), 2);
     let other = cli.ok(&["account", "usage", "--agent", "codex"]);
-    assert!(other.contains("no usage yet"), "{other}");
+    assert!(other.contains("no accounts added yet"), "{other}");
 
     let list = cli.ok(&["account", "list"]);
     assert!(

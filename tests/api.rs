@@ -1154,7 +1154,7 @@ async fn machine_figures_are_for_admins_only() {
             .unwrap()
     };
     let claude = agent("claude");
-    assert_eq!(claude["verified"], "2.1.318");
+    assert_eq!(claude["verified"], "2.1.322");
     if claude["version"].is_string() {
         assert_eq!(claude["newerThanVerified"], true, "{claude}");
     }

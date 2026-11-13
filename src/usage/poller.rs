@@ -1,8 +1,10 @@
 //! The background usage poller.
 //!
-//! It reads the live quota of every Claude Code and Codex account that can
-//! take runs: the agent's default account, and each login account bound to
-//! at least one token or project. Each account is read every
+//! It reads the live quota of every Claude Code and Codex account: the
+//! agent's default account and each enabled login account. A login that is
+//! switched in for the plain command (see [`crate::accounts::switch`]) is
+//! read from the plain command's own login, which is where its token is
+//! kept fresh. Each account is read every
 //! [`UsageSettings::interval`] (five minutes) plus up to a minute of
 //! jitter, and again shortly after each finished run on it, but never more
 //! than once a minute. A 429 or 403 waits for `retry-after` (five minutes
@@ -305,13 +307,19 @@ impl Poller {
                 "{agent}:{name} is a {kind} account; only sign-ins have a plan quota to read"
             )));
         }
-        if self.store.account_busy(agent, name).unwrap_or(false) {
+        // A login switched in for the plain command (`hashi switch`) is
+        // read where that command keeps it: the CLI refreshes the token
+        // there, so the account's own saved copy expires within hours.
+        let live = kind == AccountKind::Login && acct::switch::active(&self.home, agent) == name;
+        let busy = |n: &str| self.store.account_busy(agent, n).unwrap_or(false);
+        if busy(name) || (live && busy(acct::DEFAULT)) {
             return Err(PollError::Busy);
         }
         self.mark(&key, None);
+        let source = if live { AccountKind::Default } else { kind };
         let result = match agent {
-            AgentKind::Claude => self.read_claude(name, kind).await,
-            _ => self.read_codex(name, kind).await,
+            AgentKind::Claude => self.read_claude(name, source).await,
+            _ => self.read_codex(name, source).await,
         };
         self.finish(&key, agent, name, &result);
         if result.is_ok() {

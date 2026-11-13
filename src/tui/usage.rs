@@ -33,8 +33,10 @@ pub struct AccountUsage {
     pub summary: Summary,
     /// The plan, when known.
     pub plan: Option<String>,
-    /// Why there are no figures, when there are none.
+    /// Why the last read gave no figures, when it failed.
     pub note: Option<String>,
+    /// When a read last succeeded, Unix ms.
+    pub read_at: Option<i64>,
 }
 
 /// Every account with usage figures or a read, from `store`, under
@@ -57,6 +59,7 @@ pub fn snapshot(store: &Store, rotate_at: u8) -> Vec<AccountUsage> {
                 windows,
                 summary,
                 plan: poll.as_ref().and_then(|p| p.plan.clone()),
+                read_at: poll.as_ref().and_then(|p| p.ok_at),
                 note: poll.and_then(|p| p.note),
                 name,
             }
@@ -184,12 +187,28 @@ pub fn lines(accounts: &[AccountUsage], rotate_at: u8, bar_width: usize) -> Vec<
         if a.windows.is_empty() {
             let note = a.note.as_deref().unwrap_or("unknown");
             out.push(Line::from(Span::styled(format!("  {note}"), t::muted())));
+        } else if let Some(line) = stale_line(a) {
+            out.push(line);
         }
         for w in &a.windows {
             out.push(window_line(w, rotate_at, bar_width, now));
         }
     }
     out
+}
+
+/// When the last read failed but older figures are kept, says how old
+/// they are and why the newest read failed, so they are not taken as now.
+fn stale_line(a: &AccountUsage) -> Option<Line<'static>> {
+    let note = a.note.as_deref()?;
+    let age = a.read_at.map_or_else(
+        || "figures from earlier".to_owned(),
+        |at| format!("figures from {} ago", crate::util::human_age(at)),
+    );
+    Some(Line::from(Span::styled(
+        format!("  {age}; the last read failed: {note}"),
+        t::fg(t::AMBER),
+    )))
 }
 
 /// Draws the usage section into `area`, with bars sized to fit.
@@ -319,6 +338,7 @@ mod tests {
             summary: crate::usage::summarize(&[], None, 90, now),
             plan: Some("max".into()),
             note: None,
+            read_at: None,
         };
         let text: Vec<String> = lines(std::slice::from_ref(&a), 90, 10)
             .iter()
@@ -336,13 +356,29 @@ mod tests {
         let b = AccountUsage {
             windows: Vec::new(),
             note: Some("unknown, refreshes on its next run".into()),
-            ..a
+            ..a.clone()
         };
         let text: Vec<String> = lines(&[b], 90, 10)
             .iter()
             .map(ToString::to_string)
             .collect();
         assert!(text[1].contains("refreshes on its next run"), "{text:?}");
+        // Older figures kept after a failed read say how old they are.
+        let c = AccountUsage {
+            note: Some("unknown, refreshes on its next run".into()),
+            read_at: Some(now - 2 * 3_600_000),
+            ..a
+        };
+        let text: Vec<String> = lines(&[c], 90, 10)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            text[1].contains("figures from 2h ago")
+                && text[1].contains("refreshes on its next run"),
+            "{text:?}"
+        );
+        assert!(text[2].contains("5 hours"), "{text:?}");
     }
 
     #[test]
