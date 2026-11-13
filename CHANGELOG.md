@@ -4,11 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-13
+
 ### Changed
 
 - Re-verified against Claude Code 2.1.322, opencode 2.2.7 and Qwen Code 0.27.2.
 - Qwen Code runs get `QWEN_CODE_DISABLE_LSP=1`, so an owner's `tools.lspEnabled` setting or exported `QWEN_CODE_ENABLE_LSP` (new in Qwen Code 0.27.1) cannot start language servers in a shared run.
-
 - `hashi account usage` shows only the accounts you added; `--all` also shows each agent's `default` account (your own login).
 - The Accounts popup's "tokens" column is now **bound** (the tokens allowed to use the account), next to a new **used 7d** column: tokens used on the account in the last 7 days by Hashi's runs, plus your own sessions when My usage tracking is on.
 

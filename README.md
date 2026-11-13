@@ -38,7 +38,7 @@ hashi account usage --refresh      # how much of each plan is left
 
 ## Status
 
-Early and actively developed: v0.4.2, released November 2026. CI builds and tests every commit on Linux, macOS and Windows; Windows has seen the least real use. The HTTP API may still change before 1.0, and every change is in the [changelog](CHANGELOG.md).
+Early and actively developed: v0.4.4, released November 2026. CI builds and tests every commit on Linux, macOS and Windows; Windows has seen the least real use. The HTTP API may still change before 1.0, and every change is in the [changelog](CHANGELOG.md).
 
 ## Install
 
@@ -54,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install
 irm https://raw.githubusercontent.com/sidharthpunathil/hashi/main/install.ps1 | iex
 ```
 
-The script downloads the build for your platform, checks its SHA-256 checksum, installs it without admin rights (to `~/.local/bin`, or `%LOCALAPPDATA%\Programs\hashi\bin` on Windows, added to your PATH) and runs `hashi doctor` to show which agents it found. Pin a release with `HASHI_VERSION=v0.4.2` ([installer options](docs/configuration.md#installer-options)).
+The script downloads the build for your platform, checks its SHA-256 checksum, installs it without admin rights (to `~/.local/bin`, or `%LOCALAPPDATA%\Programs\hashi\bin` on Windows, added to your PATH) and runs `hashi doctor` to show which agents it found. Pin a release with `HASHI_VERSION=v0.4.4` ([installer options](docs/configuration.md#installer-options)).
 
 The checksum proves the download arrived intact, not who built it. Every release archive also has a GitHub build attestation tying it to this repository's release workflow. Check one with the [GitHub CLI](https://cli.github.com):
 
