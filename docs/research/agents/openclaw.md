@@ -109,3 +109,7 @@ Source: ~/.opensrc/repos/github.com/openclaw/openclaw/main, not installed or run
 - **Status**: `models status --check` exits 0 ok, 1 missing/expired/unavailable/indeterminate, 2 expiring (src/cli/models-cli.ts:297-306; src/commands/models/list.status-command.ts:1023-1066, 1110). It counts env keys too, so it reports signed in whenever a provider env key is present.
 - **Exec output**: usage {input, output, cacheRead?, cacheWrite?, total?} and costUsd are copied from agentMeta when present (src/commands/agent-exec-result.ts:107-108); spec pointers /usage/input, /usage/output, /costUsd are correct; error at /error/message (agent-exec-result.ts:120).
 - **Auth in exec**: `withAuthProfileStoreAgentDir(storedAuthAgentDir, storedAuthStateDir, ...)` unless --auth-env-only (src/commands/agent-exec.ts:290-298); provider env vars are omitted from tool subprocesses (agent-exec.ts:311-315).
+
+## Real-binary check (2026-11-16)
+
+OpenClaw 2026.11.4 (`npm i openclaw`, needs Node 24.16+ or 26.1+) has no `--config-override` on `agent exec`; only `--config <file>`. The pin was dropped, so OpenClaw runs with its own tool settings and stays opt-in. A run without a login fails cleanly with `No route-compatible authentication source is configured`, and `models status --check --json` exits 1 when signed out.

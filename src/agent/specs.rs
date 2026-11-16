@@ -542,7 +542,7 @@ pub const DROID: Spec = Spec {
         hint: Some("type /login to sign in, then quit droid"),
     }),
     switch: None,
-    status_args: Some(&["doctor", "--checks", "auth", "--json"]),
+    status_args: None,
     limit_messages: &[
         "usage limit reached",
         "credit limits are exhausted",
@@ -2182,9 +2182,7 @@ pub const OPENCLAW: Spec = Spec {
     binaries: &["openclaw"],
     aliases: &["clawdbot", "moltbot"],
     base_args: &["agent", "exec", "--json"],
-    pinned_args: &[&[
-        "--config-override={\"tools\":{\"allow\":[\"ls\",\"read\"],\"exec\":{\"mode\":\"deny\"}}}",
-    ]],
+    pinned_args: &[],
     prompt: Prompt::DashDash,
     model_flag: Some("--model"),
     resume_flag: None,

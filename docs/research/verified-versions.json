@@ -93,7 +93,7 @@
     },
     "kimi": {
       "name": "Kimi Code",
-      "source": "npm:kimi-code",
+      "source": "npm:@moonshot-ai/kimi-code",
       "repo": "MoonshotAI/kimi-code",
       "version": "2.6.2",
       "verified": "2026-11-16"

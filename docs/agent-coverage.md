@@ -15,7 +15,7 @@ Which Hashi features each agent supports. Generated from the agent specs in `src
 | Antigravity | antigravity | yes | tokens | - | - | - | - | - | - | upstream only |
 | Goose | goose | yes | tokens and cost | yes | - | `configure` | `info --check` | - | - | - |
 | Amp | amp | opt-in | tokens | - | yes | - | - | - | - | upstream only |
-| Factory Droid | droid | opt-in | tokens | yes | yes | built in | `doctor --checks auth --json` | - | - | upstream only |
+| Factory Droid | droid | opt-in | tokens | yes | yes | built in | - | - | - | upstream only |
 | Kimi Code | kimi | opt-in | text only | yes | - | `login` | - | yes | - | upstream only |
 | Kilo Code CLI | kilo | yes | tokens and cost | yes | - | `auth login` | - | yes | - | upstream only |
 | Cline CLI | cline | yes | tokens and cost | yes | yes | `auth` | - | yes | yes | upstream only |
@@ -58,5 +58,16 @@ What the columns mean:
 - **`hashi switch`**: the plain command can be pointed at a login account, because its login is plain files in one folder. A `-` means it is kept in an OS keyring, encrypted per path, or mixed into a database or settings file, where copying it would be unsafe.
 - **Shows who is signed in**: `hashi switch <agent>` and `hashi account list` name the user of the plain command.
 - **Live quota**: `yes` is read in the background today (Claude Code and Codex). `upstream only` means the agent has a quota endpoint or command that Hashi does not read yet; for every agent, a run that hits a limit still marks the account limited and moves the prompt to the next one.
+
+## Checked against the real CLIs (2026-11-16)
+
+Twenty-three of the new agents were installed (npm packages into a scratch folder, plus Grok, Antigravity, Goose and Crush already on the test machine) and checked three ways:
+
+- **Flags:** every flag Hashi passes appears in the CLI's own `--help`, for all 23. Grok's `--no-auto-update` is hidden from help but accepted (Grok rejects unknown flags). Auggie accepts any flag, so `--disable-process-tools` could not be confirmed.
+- **A headless run through `hashi ask`** with an empty home folder: 21 of 23 stop at once with the agent's own "not signed in" message, which shows the arguments were accepted. **Grok and Amp start an interactive sign-in instead and wait until Hashi's timeout**, so give them a working login or key; an expired login does the same. Antigravity also answered a real prompt with the owner's login.
+- **`hashi switch`** with the real binary in a sandboxed home: switch to an account, show it, switch back and `hashi account reset` all work for the 10 agents in the switch column.
+- **Status checks** with no login: Goose, OpenClaude, Qoder, Qoder CN, OpenClaw and Command Code report "not signed in". Droid's `doctor --checks auth` exits 0 even when signed out, so it is not used.
+
+Not installed or not runnable here: Aider, Hermes (Python), Kiro, Devin, Rovo Dev, TRAE, Muse, Ante, ZCode, Prime Agent, Vibe and Jcode.
 
 Not covered at all: Codebuff and Freebuff (no one-shot mode), and Orca's claude-teams (an interactive launcher over `claude`). `opencode2` is a second binary name of opencode.
