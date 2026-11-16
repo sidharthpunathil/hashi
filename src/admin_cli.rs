@@ -461,10 +461,26 @@ fn bind(
     Ok(project)
 }
 
-/// The agents column: `all` when a token or invite may use every agent.
+/// The agents column: `all` when a token or invite may use every agent,
+/// `all` with the opt-in agents it also has (`all+goose`), when it may use
+/// every agent that is not opt-in.
 fn agents_cell(agents: &[AgentKind]) -> String {
-    if AgentKind::ALL.iter().all(|a| agents.contains(a)) {
-        "all".to_owned()
+    if hashi::agent::default_agents()
+        .iter()
+        .all(|a| agents.contains(a))
+    {
+        let extra: Vec<&str> = agents
+            .iter()
+            .filter(|a| hashi::agent::needs_opt_in(**a))
+            .map(|a| a.as_str())
+            .collect();
+        if extra.is_empty()
+            || extra.len() == AgentKind::ALL.len() - hashi::agent::default_agents().len()
+        {
+            "all".to_owned()
+        } else {
+            format!("all+{}", extra.join("+"))
+        }
     } else {
         hashi::token::encode_agents(agents)
     }
@@ -498,7 +514,7 @@ pub fn token(store: &Store, cmd: TokenCommand) -> Result<()> {
             limits,
         } => {
             let accounts = bindings(store, AccountMap::new(), accounts)?;
-            let agents = agents.unwrap_or_else(|| AgentKind::ALL.to_vec());
+            let agents = agents.unwrap_or_else(hashi::agent::default_agents);
             let project = bind(store, project, &agents, &accounts)?;
             let role = if admin { Role::Admin } else { Role::User };
             let new = NewToken {
@@ -703,7 +719,7 @@ pub fn share(store: &Store, args: ShareArgs) -> Result<()> {
     let mut limits = args.limits.apply(Limits::default());
     limits.max_pending = limits.max_pending.or(Some(3));
     let accounts = bindings(store, AccountMap::new(), args.accounts)?;
-    let agents = args.agents.unwrap_or_else(|| AgentKind::ALL.to_vec());
+    let agents = args.agents.unwrap_or_else(hashi::agent::default_agents);
     let project = bind(store, args.project, &agents, &accounts)?;
     let (invite, code) = store.create_invite(&hashi::store::NewInvite {
         label: clean_label(&args.label)?,
@@ -876,6 +892,22 @@ pub struct BinArgs {
     /// Path to the Cursor CLI executable.
     #[arg(long, env = "HASHI_CURSOR_BIN")]
     cursor_bin: Option<PathBuf>,
+    /// Path to any other agent's executable, as `<agent>=<path>`.
+    #[arg(long = "agent-bin", env = "HASHI_AGENT_BINS", value_delimiter = ',',
+          value_parser = parse_agent_bin)]
+    agent_bins: Vec<(AgentKind, PathBuf)>,
+}
+
+/// Parses one `--agent-bin` pair, `<agent>=<path>`.
+fn parse_agent_bin(s: &str) -> std::result::Result<(AgentKind, PathBuf), String> {
+    let (name, path) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected <agent>=<path>, got `{s}`"))?;
+    let kind = name.parse::<AgentKind>().map_err(|e| e.to_string())?;
+    if path.trim().is_empty() {
+        return Err(format!("no path for {name}"));
+    }
+    Ok((kind, PathBuf::from(path)))
 }
 
 impl BinArgs {
@@ -887,6 +919,12 @@ impl BinArgs {
             AgentKind::Opencode => self.opencode_bin.clone(),
             AgentKind::Qwen => self.qwen_bin.clone(),
             AgentKind::Cursor => self.cursor_bin.clone(),
+            other => self
+                .agent_bins
+                .iter()
+                .rev()
+                .find(|(k, _)| *k == other)
+                .map(|(_, p)| p.clone()),
         };
         custom.unwrap_or_else(|| AgentConfig::default_for(agent).bin)
     }
@@ -1512,7 +1550,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             );
             println!();
             let live = acct::switch::Live::from_user().ok();
-            for agent in acct::switch::AGENTS {
+            for agent in acct::switch::agents() {
                 let who = acct::switch::PlainLogin::read(home, live.as_ref(), agent);
                 // Agents with no login here and nothing switched in say nothing.
                 if who.switched() || who.email.is_some() {
@@ -1637,6 +1675,9 @@ fn account_usage(
         let installed: Vec<AgentKind> = [AgentKind::Claude, AgentKind::Codex]
             .into_iter()
             .filter(|a| agent.is_none_or(|g| *a == g))
+            // An agent that must be turned on with `--enable-agents` is never
+            // picked by default.
+            .filter(|a| !hashi::agent::needs_opt_in(*a))
             .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
             .collect();
         let poller = hashi::usage::Poller::new(
@@ -1866,14 +1907,19 @@ pub enum ProjectCommand {
     },
 }
 
-/// The agents whose executable is there, or every agent when none is.
+/// The agents whose executable is there, or every agent when none is. An
+/// agent that must be turned on with `--enable-agents` is never picked by
+/// default.
 fn installed_agents(bins: &BinArgs) -> Vec<AgentKind> {
-    let found: Vec<AgentKind> = AgentKind::ALL
+    let offered = AgentKind::ALL
         .into_iter()
+        .filter(|a| !hashi::agent::needs_opt_in(*a));
+    let found: Vec<AgentKind> = offered
+        .clone()
         .filter(|a| hashi::agent::is_executable(&bins.bin(*a)))
         .collect();
     if found.is_empty() {
-        AgentKind::ALL.to_vec()
+        offered.collect()
     } else {
         found
     }

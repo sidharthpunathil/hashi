@@ -222,7 +222,7 @@ pub fn current_link(store: &Store) -> ApiResult<Option<AccessLink>> {
 /// Fails on database errors, or when the project is gone.
 pub fn link_agents(store: &Store, link: &AccessLink) -> ApiResult<Vec<AgentKind>> {
     match &link.project {
-        None => Ok(AgentKind::ALL.to_vec()),
+        None => Ok(crate::agent::default_agents()),
         Some(name) => match store.get_project(name)? {
             Some(p) => Ok(sorted(p.agents)),
             None => Err(link_closed()),
@@ -622,7 +622,7 @@ pub fn prefill(store: &Store, r: &AccessRequest) -> ApiResult<Prefill> {
         AccessKind::New => {
             let allowed = match &r.project {
                 Some(name) => store.get_project(name)?.map_or_else(Vec::new, |p| p.agents),
-                None => AgentKind::ALL.to_vec(),
+                None => crate::agent::default_agents(),
             };
             let mut agents: Vec<AgentKind> = r
                 .agents

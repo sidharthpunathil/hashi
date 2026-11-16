@@ -506,7 +506,7 @@ pub fn reset(store: &Store, home: &Path, actor: &str) -> Result<Vec<String>> {
     let keychain = acct::switch::Keychain::new();
     let ctx = switch_ctx(home, &live, &keychain);
     let mut done = Vec::new();
-    for agent in acct::switch::AGENTS {
+    for agent in acct::switch::agents() {
         match acct::switch::reset(&ctx, agent).map_err(|e| anyhow::anyhow!(e))? {
             Reset::AlreadyClean => {}
             Reset::Restored { from } => {

@@ -109,7 +109,7 @@ impl App {
         {
             let live = crate::accounts::switch::Live::from_user().ok();
             let list = self.home().map_or_else(Vec::new, |home| {
-                crate::accounts::switch::AGENTS
+                crate::accounts::switch::agents()
                     .into_iter()
                     .map(|a| crate::accounts::switch::PlainLogin::read(&home, live.as_ref(), a))
                     .collect()

@@ -414,3 +414,57 @@ Added after the security audit. The runner skips each one when the agent's extra
 - **Codex**: no MCP flag. `-c` overrides are deep-merged, so `-c mcp_servers={}` does not remove configured servers; disabling one needs its name, `-c mcp_servers.<name>.enabled=false`.
 - **opencode**: the inline config starts with `"*": "deny"` and allows only `read` (without `.env` files), `glob`, `grep`, `list` and `lsp`. MCP tools are checked under `<server>_<tool>` and fall under the `*` deny.
 - **Cursor CLI**: `--approve-mcps` is stripped from extra arguments, like `--force` and `--yolo`.
+
+## Table-driven agents (2026-11-16)
+
+Hashi 0.5 adds 35 agents through one table-driven backend instead of a module each: `src/agent/spec.rs` holds the shared argument builder and output readers, and `src/agent/specs.rs` one `Spec` per agent. Each agent's source was fetched with [`opensrc`](https://github.com/vercel-labs/opensrc) where it is public and read for its headless call, argument parser, output shapes, approval rules, config and credential variables and limit messages; closed CLIs were read from their docs and shipped bundles. Per-agent notes, with file and line references and the success and error output they were built from, are in [`agents/`](agents/).
+
+"Auto-approves" means the agent can run shell or write tools in a headless run whatever Hashi passes, so it is offered only with `--enable-agents`. Confidence: `ran` (a real run was recorded here), `source` (its code was read), `docs` (documentation only), `unverified` (thin evidence; check against a real run before relying on it).
+
+| Agent | `agent` value | Output read | Auto-approves | Confidence |
+|---|---|---|---|---|
+| [Copilot CLI](agents/copilot.md) | `copilot` | jsonl | no | source |
+| [Grok Build](agents/grok.md) | `grok` | json | no | docs |
+| [Antigravity](agents/antigravity.md) | `antigravity` | json | no | ran |
+| [Goose](agents/goose.md) | `goose` | jsonl | no | ran |
+| [Amp](agents/amp.md) | `amp` | json | yes | docs |
+| [Factory Droid](agents/droid.md) | `droid` | claude result | yes (expands `/command` anywhere in a prompt) | source |
+| [Kimi Code](agents/kimi.md) | `kimi` | jsonl | yes | source |
+| [Kilo Code CLI](agents/kilo.md) | `kilo` | jsonl | no | source |
+| [Cline CLI](agents/cline.md) | `cline` | jsonl | no | source |
+| [Crush](agents/crush.md) | `crush` | text | yes | ran |
+| [Aider](agents/aider.md) | `aider` | text | no | source |
+| [Continue CLI](agents/continue.md) | `continue` | text | no | source |
+| [Pi](agents/pi.md) | `pi` | jsonl | no | source |
+| [oh-my-pi](agents/omp.md) | `omp` | jsonl | no | source |
+| [OpenClaude](agents/openclaude.md) | `openclaude` | claude result | no | source |
+| [CodeBuddy Code](agents/codebuddy.md) | `codebuddy` | claude result | no | source |
+| [Qoder CLI](agents/qoder.md) | `qoder` | claude result | no | source |
+| [Qoder CN](agents/qoder-cn.md) | `qoder-cn` | claude result | no | source |
+| [Kiro CLI](agents/kiro.md) | `kiro` | text | no | docs |
+| [Auggie](agents/auggie.md) | `auggie` | claude result | yes | source |
+| [Devin CLI](agents/devin.md) | `devin` | text | no | docs |
+| [Rovo Dev](agents/rovodev.md) | `rovodev` | text | yes | docs |
+| [Mistral Vibe](agents/vibe.md) | `vibe` | jsonl | no | source |
+| [Hermes Agent](agents/hermes.md) | `hermes` | jsonl | no | source |
+| [OpenClaw](agents/openclaw.md) | `openclaw` | json | yes | source |
+| [Jcode](agents/jcode.md) | `jcode` | jsonl | yes | source |
+| [MiMo Code](agents/mimo.md) | `mimo` | jsonl | yes | source |
+| [Ante](agents/ante.md) | `ante` | jsonl | no | docs |
+| [TRAE CLI](agents/trae.md) | `trae` | json | no | docs |
+| [Muse Code](agents/muse.md) | `muse` | jsonl | yes | unverified |
+| [DeepSeek](agents/deepseek.md) | `deepseek` | jsonl | yes | source |
+| [ZCode](agents/zcode.md) | `zcode` | json | no | source |
+| [Prime Agent](agents/prime.md) | `prime` | jsonl | yes | source |
+| [Autohand Code](agents/autohand.md) | `autohand` | json | no | source |
+| [Command Code](agents/command-code.md) | `command-code` | json | no | source |
+
+Not added:
+
+- **Codebuff** and **Freebuff**: no way to run one prompt and exit; the prompt only pre-fills the full-screen UI, and the SDK would need a Node wrapper.
+- **Claude Agent Teams** (`orca claude-teams`): a pane launcher from the Orca app that runs `claude --teammate-mode auto`, which the `claude` backend already covers.
+- **OpenCode 2** (`opencode2`): the legacy name of opencode V2, now a fallback binary name of the `opencode` backend.
+
+Known gaps: Copilot reports reliable token counts only in a side file (`--usage-output-file`), so its usage is left out; Kiro, Devin, Rovo Dev, Crush, Aider and Continue print plain text, so they report no session id or usage; Rovo Dev's answer comes inside a drawn box; Amp and Rovo Dev have no read-only flag and need a settings file Hashi does not yet write, so both are opt-in; Muse's event fields are unverified.
+
+Changes after review (2026-11-16): a prompt never starts with `-` for any agent (some CLIs, Claude Code and its clones among them, scan the raw arguments for options such as `--debug-file=` before parsing, so `--` alone does not protect it); Goose gets `GOOSE_SLASH_COMMANDS_ENABLED=false` because it trims a prompt before matching commands; Droid is opt-in because it expands `/command` anywhere in a prompt; Goose and Droid accounts turn their OS keyring off so they never use the owner's secret; Vibe has no login accounts because `VIBE_HOME` does not move its keyring entry; Kilo, Crush, Aider and Antigravity have no API-key accounts because the owner's own config would still apply; TRAE pins `--disallowed-tool` for Bash, Edit and Write; Autohand pins `--bare`; Copilot sets `COPILOT_ALLOW_ALL=false`.

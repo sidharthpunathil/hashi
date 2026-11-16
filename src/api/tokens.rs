@@ -225,7 +225,7 @@ pub fn validate_new_token(body: CreateTokenBody) -> ApiResult<NewToken> {
             "expiresInDays must be between 1 and 3650".to_owned(),
         ));
     }
-    let mut agents = body.agents.unwrap_or_else(|| AgentKind::ALL.to_vec());
+    let mut agents = body.agents.unwrap_or_else(crate::agent::default_agents);
     agents.sort_by_key(|a| a.as_str());
     agents.dedup();
     if agents.is_empty() {
@@ -581,12 +581,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_new_token_defaults_to_user_with_all_agents() {
+    fn validate_new_token_defaults_to_user_with_all_agents_but_opt_in_ones() {
         let t = validate_new_token(body(" bot ")).unwrap();
         assert_eq!(
             (t.name.as_str(), t.role, t.agents.len()),
-            ("bot", Role::User, AgentKind::ALL.len())
+            ("bot", Role::User, crate::agent::default_agents().len())
         );
+        assert!(!t.agents.contains(&AgentKind::Crush));
+        assert!(t.agents.contains(&AgentKind::Goose));
     }
 
     #[test]

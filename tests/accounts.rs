@@ -46,6 +46,7 @@ impl Cli {
             .env("HASHI_OPENCODE_BIN", &missing)
             .env("HASHI_QWEN_BIN", &missing)
             .env("HASHI_CURSOR_BIN", &missing)
+            .env("HASHI_AGENT_BINS", missing_agent_bins(&missing))
             .env("HASHI_NO_UPDATE_CHECK", "1")
             .stdin(Stdio::null());
         cmd
@@ -461,4 +462,14 @@ fn projects_take_a_strategy_and_threshold() {
         (p.account_strategy, p.rotate_at),
         (Some(hashi::usage::Strategy::SoonestReset), None)
     );
+}
+
+/// `HASHI_AGENT_BINS` pointing every table-driven agent at `missing`, so an
+/// agent installed on the test machine is never found.
+fn missing_agent_bins(missing: &std::path::Path) -> String {
+    hashi::agent::specs::ALL
+        .iter()
+        .map(|s| format!("{}={}", s.id, missing.display()))
+        .collect::<Vec<_>>()
+        .join(",")
 }

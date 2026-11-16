@@ -70,7 +70,7 @@ pub enum StoreError {
     /// reached. The message says which.
     #[error("{0}")]
     LimitReached(&'static str),
-    /// A row names an agent this Hashi does not run, such as `crush`, whose
+    /// A row names an agent this Hashi does not run, such as one whose
     /// support was removed in 0.4.1. Lists skip such rows and lookups treat
     /// them as missing, so an old row never breaks a listing.
     #[error("record for unsupported agent `{0}`")]
@@ -1428,7 +1428,7 @@ impl Store {
     /// and counts the interruption. A request that has now interrupted the
     /// server [`MAX_INTERRUPTS`] times is failed instead, so a prompt that
     /// crashes Hashi cannot run again on every start. A queued or running
-    /// request for an agent this Hashi does not run (such as `crush`, whose
+    /// request for an agent this Hashi does not run (such as one whose
     /// support was removed) is failed too, since nothing would ever claim
     /// it. Returns how many requests were touched.
     ///

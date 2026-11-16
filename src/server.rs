@@ -1076,7 +1076,9 @@ pub async fn discover_agents(agents: &HashMap<AgentKind, AgentConfig>) -> Vec<Ag
     let probes = AgentKind::ALL.into_iter().filter_map(|kind| {
         let cfg = agents.get(&kind)?;
         Some(async move {
-            let version = agent::probe_version(&cfg.bin).await;
+            let version = agent::probe_version(&cfg.bin)
+                .await
+                .filter(|v| agent::is_own_version(kind, v));
             AgentInfo {
                 agent: kind,
                 available: version.is_some(),

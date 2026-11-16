@@ -82,12 +82,12 @@ else ok; fi
 
 # The committed JSON has a known source type for every agent.
 real=$(run list)
-eq "real json lists six agents" 6 "$(printf '%s\n' "$real" | grep -c .)"
-for a in claude codex gemini opencode qwen cursor; do
+eq "real json lists every agent" 41 "$(printf '%s\n' "$real" | grep -c .)"
+for a in claude codex gemini opencode qwen cursor goose copilot; do
     has "real json has $a" "$a|" "$real"
 done
 eq "real json sources are known" "" \
-    "$(printf '%s\n' "$real" | cut -d'|' -f3 | grep -Ev '^(npm|github|installer):' || true)"
+    "$(printf '%s\n' "$real" | cut -d'|' -f3 | grep -Ev '^(npm|github|installer|manual):' || true)"
 
 # Issue body
 body=$(run issue-body codex 0.170.1 https://example.test/notes "$FIX/verified-versions.json")
@@ -173,6 +173,17 @@ status=$?
 eq "failed lookup exits 1" 1 "$status"
 has "failed lookup warns" "::warning::Claude Code: could not look up" "$out"
 has "later agents still checked" "cursor 2026.11.05-86047df" "$out"
+
+# A closed CLI with no release feed is listed as manual and looked up nowhere.
+rm -f "$work/log"
+manual="$work/manual.json"
+cat >"$manual" <<'EOF'
+{"agents":{"grok":{"name":"Grok CLI","source":"manual:https://x.ai","repo":null,"version":"0.2.20","verified":"2026-11-16"}}}
+EOF
+out=$(GH="$work/gh" NPM="$work/npm" CURL="$work/curl" sh "$script" check "$manual")
+eq "manual source exits 0" 0 "$?"
+eq "manual source listed" "grok 0.2.20 manual" "$out"
+eq "manual source fetches nothing" "" "$(cat "$work/log" 2>/dev/null)"
 
 printf '%s passed, %s failed\n' "$passes" "$fails"
 [ "$fails" = 0 ]

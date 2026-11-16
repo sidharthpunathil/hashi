@@ -1580,7 +1580,7 @@ impl App {
     fn project_agents(&self) -> Vec<AgentKind> {
         let found = self.installed_agents();
         if found.is_empty() {
-            AgentKind::ALL.to_vec()
+            crate::agent::default_agents()
         } else {
             found
         }

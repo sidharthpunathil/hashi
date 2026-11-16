@@ -389,7 +389,7 @@ hashi account usage --refresh --json
 ```
 
 - A login account prints its sign-in command. The owner runs it in a terminal; then check with `hashi account list`.
-- `hashi switch <claude|codex|gemini|opencode> <name|default>` points the owner's plain `claude` or `codex` command at a login account (the desktop app is not affected); without a name it shows who is signed in. `hashi account reset` undoes every switch and command. `hashi account commands --agent <claude|codex> --name <word>` makes a command with that name that runs the CLI without permission prompts; nothing is set by default, and an empty name removes it.
+- `hashi switch <agent> <name|default>` points the owner's plain `claude`, `codex` or other agent command at a login account (agents whose login is plain files; see docs/agent-coverage.md) (the desktop app is not affected); without a name it shows who is signed in. `hashi account reset` undoes every switch and command. `hashi account commands --agent <claude|codex> --name <word>` makes a command with that name that runs the CLI without permission prompts; nothing is set by default, and an empty name removes it.
 - Never ask the owner to paste a key into the chat. Use `--key-env <VAR>` with a variable they set, or `--key-stdin` in their own terminal.
 - Put an account on a token with `hashi token update <id> --account claude=work,personal`.
 - `hashi account disable`, `enable` and `clear-limit` take `<agent> <name>`. `hashi account remove` deletes the account and its key (ask first).

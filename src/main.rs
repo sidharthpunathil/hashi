@@ -306,6 +306,18 @@ struct AgentArgs {
     /// Path to the Cursor CLI executable (`cursor-agent` or `agent`).
     #[arg(long, env = "HASHI_CURSOR_BIN")]
     cursor_bin: Option<PathBuf>,
+    /// Path to any other agent's executable, as `<agent>=<path>` (for
+    /// example `goose=/opt/goose/bin/goose`). Repeat it, or separate pairs
+    /// with commas in the variable.
+    #[arg(long = "agent-bin", env = "HASHI_AGENT_BINS", value_delimiter = ',',
+          value_parser = parse_agent_bin)]
+    agent_bins: Vec<(AgentKind, PathBuf)>,
+    /// Offer agents that run shell and write tools without asking in a
+    /// headless run (such as Goose, Crush or Aider), by name, comma
+    /// separated, or `all`. Anyone with a token for one of them can run
+    /// commands as you, so they are off until named here.
+    #[arg(long, env = "HASHI_ENABLE_AGENTS", value_delimiter = ',')]
+    enable_agents: Vec<String>,
     /// Maximum agentic turns per Claude request.
     #[arg(long, default_value_t = 10, env = "HASHI_MAX_TURNS")]
     max_turns: u32,
@@ -318,10 +330,31 @@ struct AgentArgs {
     codex_sandbox: String,
 }
 
+/// Parses one `--agent-bin` pair, `<agent>=<path>`.
+fn parse_agent_bin(s: &str) -> Result<(AgentKind, PathBuf), String> {
+    let (name, path) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected <agent>=<path>, got `{s}`"))?;
+    let kind = name.parse::<AgentKind>().map_err(|e| e.to_string())?;
+    if path.trim().is_empty() {
+        return Err(format!("no path for {name}"));
+    }
+    Ok((kind, PathBuf::from(path)))
+}
+
 impl AgentArgs {
+    /// Whether the owner turned `kind` on with `--enable-agents`.
+    fn enabled(&self, kind: AgentKind) -> bool {
+        self.enable_agents.iter().any(|n| {
+            let n = n.trim();
+            n.eq_ignore_ascii_case("all") || n.parse::<AgentKind>() == Ok(kind)
+        })
+    }
+
     fn configs(&self) -> HashMap<AgentKind, AgentConfig> {
         AgentKind::ALL
             .into_iter()
+            .filter(|kind| !agent::needs_opt_in(*kind) || self.enabled(*kind))
             .map(|kind| {
                 let mut cfg = AgentConfig::default_for(kind);
                 let custom = match kind {
@@ -331,6 +364,12 @@ impl AgentArgs {
                     AgentKind::Opencode => self.opencode_bin.clone(),
                     AgentKind::Qwen => self.qwen_bin.clone(),
                     AgentKind::Cursor => self.cursor_bin.clone(),
+                    other => self
+                        .agent_bins
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| *k == other)
+                        .map(|(_, p)| p.clone()),
                 };
                 if let Some(bin) = custom {
                     cfg.bin = bin;
@@ -1179,6 +1218,12 @@ async fn doctor(home: &std::path::Path, args: &DoctorArgs) -> Result<()> {
     println!("\n  ✦ hashi doctor\n");
     let found_agents = server::discover_agents(&args.agents.configs()).await;
     let (mut checks, found) = doctor::agents(&found_agents);
+    let off: Vec<AgentKind> = AgentKind::ALL
+        .into_iter()
+        .filter(|k| agent::needs_opt_in(*k) && !args.agents.enabled(*k))
+        .filter(|k| k.binary_names().iter().any(|n| agent::locate(n).is_some()))
+        .collect();
+    checks.extend(doctor::opt_in(&off));
     let cloudflared = install::locate(Helper::Cloudflared, args.helpers.cloudflared_bin.as_deref());
     checks.push(doctor::cloudflared(cloudflared.as_deref()));
     // Tailscale's sign-in state is read only when it is installed.
@@ -1228,13 +1273,45 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_is_configured() {
+    fn every_agent_is_configured_unless_it_needs_opting_in() {
         let all = configs(&["--cursor-bin", "/opt/cursor-agent"]);
-        assert_eq!(all.len(), AgentKind::ALL.len());
+        let opt_in = AgentKind::ALL
+            .iter()
+            .filter(|k| agent::needs_opt_in(**k))
+            .count();
+        assert!(opt_in > 0);
+        assert_eq!(all.len(), AgentKind::ALL.len() - opt_in);
+        assert!(!all.contains_key(&AgentKind::Crush));
         assert_eq!(
             all[&AgentKind::Cursor].bin,
             PathBuf::from("/opt/cursor-agent")
         );
+        let every = configs(&["--enable-agents", "all"]);
+        assert_eq!(every.len(), AgentKind::ALL.len());
+    }
+
+    #[test]
+    fn opt_in_agents_are_enabled_by_name_and_get_custom_paths() {
+        let all = configs(&[
+            "--enable-agents",
+            "crush,amp",
+            "--agent-bin",
+            "crush=/opt/crush",
+            "--agent-bin",
+            "goose=/opt/goose,copilot=/opt/copilot",
+        ]);
+        assert_eq!(all[&AgentKind::Crush].bin, PathBuf::from("/opt/crush"));
+        assert!(all.contains_key(&AgentKind::Amp));
+        assert!(!all.contains_key(&AgentKind::Kimi));
+        assert_eq!(all[&AgentKind::Goose].bin, PathBuf::from("/opt/goose"));
+        assert_eq!(all[&AgentKind::Copilot].bin, PathBuf::from("/opt/copilot"));
+    }
+
+    #[test]
+    fn agent_bin_rejects_bad_pairs() {
+        assert!(parse_agent_bin("goose").is_err());
+        assert!(parse_agent_bin("nonesuch=/x").is_err());
+        assert!(parse_agent_bin("goose=").is_err());
     }
 
     /// Every leaf subcommand path, such as `token update`, and each

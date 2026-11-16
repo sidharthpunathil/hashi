@@ -67,6 +67,7 @@ impl Check {
 pub fn agents(found: &[AgentInfo]) -> (Vec<Check>, usize) {
     let mut n = 0;
     let mut checks = Vec::with_capacity(found.len());
+    let mut missing: Vec<&str> = Vec::new();
     for info in found {
         match &info.version {
             Some(v) => {
@@ -81,6 +82,9 @@ pub fn agents(found: &[AgentInfo]) -> (Vec<Check>, usize) {
                     checks.push(Check::new(Mark::Warn, "", note));
                 }
             }
+            None if crate::agent::specs::of(info.agent).is_some() => {
+                missing.push(info.agent.as_str());
+            }
             None => checks.push(Check::new(
                 Mark::Info,
                 info.agent.display_name(),
@@ -88,7 +92,34 @@ pub fn agents(found: &[AgentInfo]) -> (Vec<Check>, usize) {
             )),
         }
     }
+    if !missing.is_empty() {
+        checks.push(Check::new(
+            Mark::Info,
+            "others",
+            format!("not installed (optional): {}", missing.join(", ")),
+        ));
+    }
     (checks, n)
+}
+
+/// One line for the installed agents that are off until the owner names
+/// them in `--enable-agents`, because they run tools without asking.
+#[must_use]
+pub fn opt_in(installed_but_off: &[crate::agent::AgentKind]) -> Option<Check> {
+    if installed_but_off.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = installed_but_off.iter().map(|k| k.as_str()).collect();
+    Some(Check::new(
+        Mark::Info,
+        "off",
+        format!(
+            "installed but off, since they can run shell and write tools without asking: {}; \
+             turn one on with --enable-agents {}",
+            names.join(", "),
+            names[0]
+        ),
+    ))
 }
 
 /// cloudflared's line.

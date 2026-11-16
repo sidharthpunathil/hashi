@@ -83,6 +83,10 @@ pub const fn agent_color(agent: AgentKind) -> Rgb {
         AgentKind::Opencode => Rgb(255, 196, 120),
         AgentKind::Qwen => Rgb(180, 150, 255),
         AgentKind::Cursor => Rgb(200, 204, 214),
+        other => match crate::agent::specs::of(other) {
+            Some(s) => Rgb(s.color.0, s.color.1, s.color.2),
+            None => Rgb(200, 204, 214),
+        },
     }
 }
 
@@ -96,6 +100,10 @@ pub const fn agent_glyph(agent: AgentKind) -> &'static str {
         AgentKind::Opencode => "▣",
         AgentKind::Qwen => "◉",
         AgentKind::Cursor => "▲",
+        other => match crate::agent::specs::of(other) {
+            Some(s) => s.glyph,
+            None => "•",
+        },
     }
 }
 

@@ -30,7 +30,9 @@ pub fn env(_workdir: &std::path::Path) -> Vec<(String, String)> {
 ///   argument (for example `--allowedTools WebFetch`) drops the WebFetch deny,
 ///   and `--mcp-config <file>` loads exactly the servers in that file.
 /// - A prompt starting with `/` gets a leading space so it is never run as a
-///   slash command or skill from the owner's config.
+///   slash command or skill from the owner's config, and so does one
+///   starting with `-`, which Claude Code's early scan of the raw arguments
+///   could read as an option even after `--`.
 ///
 /// `--disallowedTools` takes a variable number of values, so it is always
 /// followed by another option and never by text from the request.
@@ -66,7 +68,14 @@ pub fn build_args(cfg: &AgentConfig, inv: Invocation<'_>) -> Vec<OsString> {
     }
     args.extend(cfg.extra_args.iter().map(OsString::from));
     args.push("--".into());
-    args.push(neutralize_slash_command(inv.prompt).into());
+    let mut prompt = neutralize_slash_command(inv.prompt);
+    // Claude Code reads some options, such as `--debug-file=<path>`, from
+    // the raw argument list before parsing, so `--` alone does not keep a
+    // prompt starting with `-` from setting one.
+    if prompt.starts_with('-') {
+        prompt.insert(0, ' ');
+    }
+    args.push(prompt.into());
     args
 }
 
@@ -86,16 +95,22 @@ struct ResultEnvelope {
     usage: Option<RawUsage>,
 }
 
+/// Token counts. A count may be missing or `null` (Claude Code clones such
+/// as CodeBuddy print `null`), which reads as 0.
 #[derive(Debug, Deserialize)]
 struct RawUsage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_creation_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     output_tokens: u64,
+}
+
+fn null_as_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    Ok(Option::<u64>::deserialize(d)?.unwrap_or(0))
 }
 
 /// `rate_limit_event.rate_limit_info`, as the Agent SDK types declare it
@@ -267,7 +282,27 @@ mod tests {
         let args = build_args(&cfg(), inv);
         let n = args.len();
         assert_eq!(args[n - 2], "--");
-        assert_eq!(args[n - 1], "--help");
+        assert_eq!(args[n - 1], " --help");
+    }
+
+    #[test]
+    fn prompt_never_starts_with_a_dash() {
+        let inv = Invocation {
+            prompt: "--debug-file=/tmp/x",
+            resume: None,
+            model: None,
+        };
+        let args = build_args(&cfg(), inv);
+        assert_eq!(args.last().unwrap(), " --debug-file=/tmp/x");
+    }
+
+    #[test]
+    fn null_token_counts_read_as_zero() {
+        let out = parse_output(
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s","usage":{"input_tokens":5,"cache_creation_input_tokens":null,"cache_read_input_tokens":null,"output_tokens":1},"total_cost_usd":0}"#,
+        )
+        .unwrap();
+        assert_eq!(out.usage.unwrap().input_tokens, 5);
     }
 
     #[test]
