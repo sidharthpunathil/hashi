@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-16
+
 ### Added
 
 - 35 more agents: `copilot`, `grok`, `antigravity`, `goose`, `amp`, `droid`, `kimi`, `kilo`, `cline`, `crush`, `aider`, `continue`, `pi`, `omp`, `openclaude`, `codebuddy`, `qoder`, `qoder-cn`, `kiro`, `auggie`, `devin`, `rovodev`, `vibe`, `hermes`, `openclaw`, `jcode`, `mimo`, `ante`, `trae`, `muse`, `deepseek`, `zcode`, `prime`, `autohand`, `command-code`. Each is driven headless with its safest unattended settings: flags that let the agent approve its own tools are stripped from extra arguments, safe flags (read-only tool lists, no MCP servers, no update checks) are pinned, and a prompt starting with `/`, `!` or `@` gets a leading space so it is never a command. They run through one table-driven backend (`src/agent/spec.rs`, `src/agent/specs.rs`) that reads plain text, Claude Code style results, a JSON object or a JSON event stream. Accounts work where the agent has a config-directory or API-key variable, and limit messages move a prompt to the next account as before. The research behind each one, read from its source with `opensrc` where public, is in `docs/research/agents/`.
