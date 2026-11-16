@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- 35 more agents: `copilot`, `grok`, `antigravity`, `goose`, `amp`, `droid`, `kimi`, `kilo`, `cline`, `crush`, `aider`, `continue`, `pi`, `omp`, `openclaude`, `codebuddy`, `qoder`, `qoder-cn`, `kiro`, `auggie`, `devin`, `rovodev`, `vibe`, `hermes`, `openclaw`, `jcode`, `mimo`, `ante`, `trae`, `muse`, `deepseek`, `zcode`, `prime`, `autohand`, `command-code`. Each is driven headless with its safest unattended settings: flags that let the agent approve its own tools are stripped from extra arguments, safe flags (read-only tool lists, no MCP servers, no update checks) are pinned, and a prompt starting with `/`, `!` or `@` gets a leading space so it is never a command. They run through one table-driven backend (`src/agent/spec.rs`, `src/agent/specs.rs`) that reads plain text, Claude Code style results, a JSON object or a JSON event stream. Accounts work where the agent has a config-directory or API-key variable, and limit messages move a prompt to the next account as before. The research behind each one, read from its source with `opensrc` where public, is in `docs/research/agents/`.
+- `--enable-agents` (`HASHI_ENABLE_AGENTS`): agents that can run shell or write tools without asking in a headless run (amp, auggie, crush, deepseek, droid, jcode, kimi, mimo, muse, openclaw, prime, rovodev) are off until named here. `hashi doctor` lists the installed ones that are off.
+- `--agent-bin <agent>=<path>` (`HASHI_AGENT_BINS`) sets the executable of any of the new agents.
+- opencode is also found as `opencode2`, the legacy name of the opencode V2 binary.
+- The weekly upstream check accepts `manual:` sources for closed CLIs with no release feed, and lists them without looking them up.
+
+### Changed
+
+- `hashi doctor` sums up the new agents that are not installed in one line.
+- New tokens, invites, links and projects that name no agents get every agent except the opt-in ones, which are only ever given by name.
+
+### Fixed
+
+- A prompt starting with `-` sent to Claude Code gets a leading space. Claude Code reads some options, such as `--debug-file=<path>`, from the raw argument list before parsing, so `--` alone did not stop a shared user's prompt from setting one.
+- Cursor CLI's generic `agent` binary name no longer picks up Grok Build's own `agent` executable.
+
 ## [0.4.4] - 2026-11-13
 
 ### Changed

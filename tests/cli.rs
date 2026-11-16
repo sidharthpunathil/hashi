@@ -39,7 +39,8 @@ impl Cli {
         ] {
             cmd.env(var, &missing);
         }
-        cmd.env("HASHI_NO_UPDATE_CHECK", "1")
+        cmd.env("HASHI_AGENT_BINS", missing_agent_bins(&missing))
+            .env("HASHI_NO_UPDATE_CHECK", "1")
             .env_remove("HASHI_PUBLIC_URL")
             .env_remove("HASHI_PORT")
             .stdin(Stdio::null())
@@ -303,4 +304,14 @@ fn llm_prints_the_guide_with_the_command_reference() {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+/// `HASHI_AGENT_BINS` pointing every table-driven agent at `missing`, so an
+/// agent installed on the test machine is never found.
+fn missing_agent_bins(missing: &std::path::Path) -> String {
+    hashi::agent::specs::ALL
+        .iter()
+        .map(|s| format!("{}={}", s.id, missing.display()))
+        .collect::<Vec<_>>()
+        .join(",")
 }

@@ -226,7 +226,7 @@ Alice sees only the project's name, never its folder or your account names, and 
 
 ## Supported agents
 
-Hashi drives whichever of these you have installed and signed in to. Each runs headless with its safest unattended setting, so a prompt cannot make it approve its own tool use.
+Hashi drives whichever of these you have installed and signed in to. Each runs headless with its safest unattended setting, so a prompt cannot make it approve its own tool use. A few agents run shell or write tools without asking whatever Hashi passes; they are marked **Opt-in** below and stay off until you name them in `--enable-agents`, because anyone with a token for one can run commands as you. The first six have been used the most; the rest were built from each CLI's source or docs ([research notes](docs/research/agent-clis.md#table-driven-agents-2026-11-16)) and are newer.
 
 | Agent | `agent` value | Headless defaults Hashi uses | Reports | Verified with |
 |---|---|---|---|---|
@@ -236,6 +236,41 @@ Hashi drives whichever of these you have installed and signed in to. Each runs h
 | [opencode](https://opencode.ai) 2.2+ | `opencode` | every tool denied except read, glob, grep, list and lsp; `.env` files unreadable; project config ignored | tokens and cost | 2.2.7 (2026-11-11) |
 | [Qwen Code](https://github.com/QwenLM/qwen-code) | `qwen` | `--approval-mode default`, so shell and edits are denied; no MCP servers | tokens | 0.27.2 (2026-11-11) |
 | [Cursor CLI](https://docs.cursor.com/en/cli/overview) | `cursor` | print mode with the sandbox on, never `--force`, so changes are proposed and not applied | text only | 2026.11.05-86047df (2026-11-06) |
+| [Copilot CLI](https://github.com/features/copilot/cli) | `copilot` | `--output-format json`, pins `--no-ask-user`, `--no-auto-update`, `--disable-builtin-mcps` and more; agent flags that approve tools are stripped. | tokens | 1.0.112 (2026-11-16) |
+| [Grok Build](https://x.ai) | `grok` | `--output-format json`, pins `--permission-mode`, `--tools`, `--disable-web-search` and more; agent flags that approve tools are stripped. | text only | 0.2.20 (2026-11-16) |
+| [Antigravity](https://antigravity.google) | `antigravity` | `--output-format json`, pins `--settings={"agentMode":""}`, `--disable-slash-commands`; agent flags that approve tools are stripped. | text only | 1.5.9 (2026-11-16) |
+| [Goose](https://github.com/block/goose) | `goose` | `run -q --output-format stream-json`, pins `--no-profile`; agent flags that approve tools are stripped. | tokens and cost | 1.58.0 (2026-11-16) |
+| [Amp](https://ampcode.com) | `amp` | `--stream-json`, pins `--no-ide`, `--no-notifications`, `--no-remote-control-terminal`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents amp`): it can run shell or write tools without asking. | text only | 0.0.1794816357 (2026-11-16) |
+| [Factory Droid](https://factory.ai) | `droid` | `exec -o json`, pins `--remove-tools`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents droid`): it expands `/command` anywhere in a prompt, which runs your custom commands and skills. | tokens | 1.12.1 (2026-11-16) |
+| [Kimi Code](https://github.com/MoonshotAI/kimi-code) | `kimi` | `--output-format stream-json`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents kimi`): it can run shell or write tools without asking. | text only | 2.6.2 (2026-11-16) |
+| [Kilo Code CLI](https://github.com/Kilo-Org/kilocode) | `kilo` | `run --format json`; agent flags that approve tools are stripped. | tokens and cost | 7.8.28 (2026-11-16) |
+| [Cline CLI](https://github.com/cline/cline) | `cline` | `--json`, pins `--auto-approve`; agent flags that approve tools are stripped. | tokens and cost | 3.0.74 (2026-11-16) |
+| [Crush](https://github.com/charmbracelet/crush) | `crush` | `run -q`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents crush`): it can run shell or write tools without asking. | text only | 0.100.0 (2026-11-16) |
+| [Aider](https://github.com/Aider-AI/aider) | `aider` | `one-shot`, pins `--chat-mode`, `--yes-always`, `--no-git` and more; agent flags that approve tools are stripped. | text only | 0.86.3 (2026-11-16) |
+| [Continue CLI](https://github.com/continuedev/continue) | `continue` | `-p`, pins `--exclude`; agent flags that approve tools are stripped. | text only | 1.5.47 (2026-11-16) |
+| [Pi](https://github.com/badlogic/pi-mono) | `pi` | `-p --mode json`, pins `--tools`, `--no-extensions`, `--no-mcp` and more; agent flags that approve tools are stripped. | tokens and cost | 1.5.2 (2026-11-16) |
+| [oh-my-pi](https://github.com/can1357/oh-my-pi) | `omp` | `-p --mode json`, pins `--approval-mode`, `--no-extensions`, `--no-skills` and more; agent flags that approve tools are stripped. | tokens and cost | 18.20.3 (2026-11-16) |
+| [OpenClaude](https://github.com/Gitlawb/openclaude) | `openclaude` | `-p --output-format json`, pins `--setting-sources`, `--strict-mcp-config`, `--disallowedTools`; agent flags that approve tools are stripped. | tokens and cost | 0.36.0 (2026-11-16) |
+| [CodeBuddy Code](https://www.codebuddy.ai) | `codebuddy` | `-p --output-format stream-json`, pins `--permission-mode`; agent flags that approve tools are stripped. | tokens | 2.184.0 (2026-11-16) |
+| [Qoder CLI](https://qoder.com) | `qoder` | `-p --output-format json`; agent flags that approve tools are stripped. | tokens | 1.1.89 (2026-11-16) |
+| [Qoder CN](https://qoder.com) | `qoder-cn` | `-p --output-format json`; agent flags that approve tools are stripped. | tokens | 1.1.89 (2026-11-16) |
+| [Kiro CLI](https://kiro.dev) | `kiro` | `chat --no-interactive`, pins `--wrap`; agent flags that approve tools are stripped. | text only | 3.3.0 (2026-11-16) |
+| [Auggie](https://www.augmentcode.com) | `auggie` | `--print --quiet --output-format json`, pins `--disable-process-tools`, `--remove-tool`, `--remove-tool` and more; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents auggie`): it can run shell or write tools without asking. | tokens | 0.37.1 (2026-11-16) |
+| [Devin CLI](https://devin.ai) | `devin` | `one-shot`, pins `--permission-mode`, `--respect-workspace-trust`, `--verbosity`; agent flags that approve tools are stripped. | text only | 3000.12.57 (2026-11-16) |
+| [Rovo Dev](https://www.atlassian.com/software/rovo-dev) | `rovodev` | `rovodev run`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents rovodev`): it can run shell or write tools without asking. | text only | 1.3.40 (2026-11-16) |
+| [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | `vibe` | `--output streaming`, pins `--agent`; agent flags that approve tools are stripped. | text only | 3.1.2 (2026-11-16) |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `hermes` | `chat --format stream-json`, pins `--toolsets=todo`, `--ignore-rules`, `--source=tool`; agent flags that approve tools are stripped. | tokens | 0.23.1 (2026-11-16) |
+| [OpenClaw](https://github.com/openclaw/openclaw) | `openclaw` | `agent exec --json`, pins `--config-override={"tools":{"allow":["ls","read"],"exec":{"mode":"deny"}}}`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents openclaw`): it can run shell or write tools without asking. | text only | 2026.11.4 (2026-11-16) |
+| [Jcode](https://github.com/1jehuang/jcode) | `jcode` | `run --ndjson`, pins `--no-update`, `--quiet`, `--tools=read,ls,agentgrep`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents jcode`): it can run shell or write tools without asking. | tokens | 0.99.1 (2026-11-16) |
+| [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) | `mimo` | `run --format json`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents mimo`): it can run shell or write tools without asking. | tokens and cost | 0.1.17 (2026-11-16) |
+| [Ante](https://github.com/AntigmaLabs/ante) | `ante` | `--output-format json`, pins `--permission-mode`, `--disable-auto-memory`; agent flags that approve tools are stripped. | tokens | 0.3.5 (2026-11-16) |
+| [TRAE CLI](https://www.trae.ai) | `trae` | `-p --output-format stream-json`; agent flags that approve tools are stripped. | text only | 0.121.3 (2026-11-16) |
+| [Muse Code](https://ai.meta.com) | `muse` | `exec --json`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents muse`): it can run shell or write tools without asking. | tokens | 1.4.20 (2026-11-16) |
+| [DeepSeek](https://github.com/deepseek-ai/deepseek-harness) | `deepseek` | `headless --json`, pins `--approval-policy`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents deepseek`): it can run shell or write tools without asking. | text only | 0.2.2 (2026-11-16) |
+| [ZCode](https://github.com/zai-org/ZCode) | `zcode` | `--output-format stream-json --no-color`, pins `--mode`; agent flags that approve tools are stripped. | text only | 3.18.2 (2026-11-16) |
+| [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) | `prime` | `--mode json`, pins `--no-skills`, `--no-prompt-templates`; agent flags that approve tools are stripped. **Opt-in** (`--enable-agents prime`): it can run shell or write tools without asking. | tokens and cost | 0.10.3 (2026-11-16) |
+| [Autohand Code](https://github.com/autohandai/code-cli) | `autohand` | `--json local`, pins `--no-daemon`; agent flags that approve tools are stripped. | text only | 0.9.11 (2026-11-16) |
+| [Command Code](https://commandcode.ai) | `command-code` | `--output-format json`, pins `--no-auto-update`, `--skip-onboarding`; agent flags that approve tools are stripped. | text only | 1.89.1 (2026-11-16) |
 
 "Verified with" is the upstream release whose headless flags, environment variables, account isolation and limit messages were last checked, recorded in [`verified-versions.json`](docs/research/verified-versions.json). A newer release usually works; `hashi doctor` says when yours is newer, and a weekly check opens an issue for each new release.
 

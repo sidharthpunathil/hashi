@@ -42,6 +42,8 @@ Pass flags to `hashi serve` (for example `hashi serve --port 9000 --tunnel`). Ru
 | `--claude-bin` | `HASHI_CLAUDE_BIN` | found on `PATH` |
 | `--codex-bin` | `HASHI_CODEX_BIN` | found on `PATH` |
 | `--gemini-bin`, `--opencode-bin`, `--qwen-bin`, `--cursor-bin` | `HASHI_GEMINI_BIN`, `HASHI_OPENCODE_BIN`, `HASHI_QWEN_BIN`, `HASHI_CURSOR_BIN` | found on `PATH` |
+| `--agent-bin <agent>=<path>` (repeat it) | `HASHI_AGENT_BINS` (pairs separated by commas) | found on `PATH`. The executable of any other agent, such as `goose=/opt/goose/bin/goose` |
+| `--enable-agents <agent>,...` or `all` | `HASHI_ENABLE_AGENTS` | none. Offers agents that can run shell or write tools without asking in a headless run (amp, auggie, crush, deepseek, droid, jcode, kimi, mimo, muse, openclaw, prime, rovodev). Anyone with a token for one can run commands as you |
 | `--max-turns` | `HASHI_MAX_TURNS` | `10` (Claude) |
 | `--claude-permission-mode` | `HASHI_CLAUDE_PERMISSION_MODE` | Claude's default |
 | `--codex-sandbox` | `HASHI_CODEX_SANDBOX` | `read-only` |

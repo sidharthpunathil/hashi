@@ -2,7 +2,7 @@
 # Weekly upstream check for the agent CLIs Hashi drives.
 #
 # Reads docs/research/verified-versions.json, looks up each agent's latest
-# release and, with --report, opens or updates one GitHub issue per agent
+# release (skipping `manual:` sources, closed CLIs with no release feed) and, with --report, opens or updates one GitHub issue per agent
 # that is newer than the verified version. A newer upstream never fails:
 # the exit status is non-zero only when a lookup itself failed.
 #
@@ -202,6 +202,13 @@ check() {
     agents "$json" >"$list"
     failed=0 labelled=0
     while IFS="$sep" read -r agent name source repo version pattern <&3; do
+        case $source in
+            manual:*)
+                # A closed CLI with no release feed: re-checked by hand.
+                echo "$agent $version manual"
+                continue
+                ;;
+        esac
         if ! found=$(latest "$source" "$repo" "$pattern"); then
             echo "::warning::$name: could not look up the latest release ($source)"
             failed=1

@@ -64,7 +64,7 @@ fn row_to_project(r: &Row<'_>) -> rusqlite::Result<Result<Project>> {
             path: r.get(1)?,
             agents: token::decode_agents(&agents),
             accounts: acct::decode(&accounts),
-            // An agent this Hashi no longer runs (such as `crush`) is no
+            // An agent this Hashi no longer runs (such as one whose support was removed) is no
             // default: the project falls back to its first agent.
             default_agent: default_agent.and_then(|a| a.parse().ok()),
             models: proj::decode_models(&models),
@@ -350,11 +350,11 @@ mod tests {
         .0
     }
 
-    /// Hashi 0.4.0 could run Crush, so a database from it may name `crush`
+    /// A database may name an agent this Hashi no longer runs (0.4.0 ran Crush)
     /// in any agent column. Support is gone; such rows must not break a
     /// listing, the dashboard or the API.
     #[test]
-    fn rows_naming_the_removed_crush_agent_do_not_break_listings() {
+    fn rows_naming_a_removed_agent_do_not_break_listings() {
         let s = store();
         let t = token(&s, None);
         let kept = uuid::Uuid::new_v4().to_string();
@@ -378,30 +378,30 @@ mod tests {
         {
             let c = s.conn().unwrap();
             c.execute(
-                "UPDATE requests SET agent = 'crush', status = 'failed' WHERE id = ?1",
+                "UPDATE requests SET agent = 'retired', status = 'failed' WHERE id = ?1",
                 [&old],
             )
             .unwrap();
             c.execute(
-                "UPDATE requests SET agent = 'crush' WHERE id = ?1",
+                "UPDATE requests SET agent = 'retired' WHERE id = ?1",
                 [&queued],
             )
             .unwrap();
             c.execute(
-                "UPDATE accounts SET agent = 'crush' WHERE agent = 'codex'",
+                "UPDATE accounts SET agent = 'retired' WHERE agent = 'codex'",
                 [],
             )
             .unwrap();
             c.execute(
-                r#"UPDATE tokens SET agents = 'claude,crush',
-                       accounts = '{"claude":["work"],"crush":["default"]}' WHERE id = ?1"#,
+                r#"UPDATE tokens SET agents = 'claude,retired',
+                       accounts = '{"claude":["work"],"retired":["default"]}' WHERE id = ?1"#,
                 [&t.id],
             )
             .unwrap();
             c.execute(
-                r#"UPDATE projects SET agents = 'claude,crush', default_agent = 'crush',
-                       accounts = '{"crush":["default"],"claude":["work"]}',
-                       models = '{"crush":"x","claude":"sonnet"}' WHERE name = 'api'"#,
+                r#"UPDATE projects SET agents = 'claude,retired', default_agent = 'retired',
+                       accounts = '{"retired":["default"],"claude":["work"]}',
+                       models = '{"retired":"x","claude":"sonnet"}' WHERE name = 'api'"#,
                 [],
             )
             .unwrap();
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(proj::format_models(&p.models), "claude=sonnet");
         assert_eq!(s.list_projects().unwrap().len(), 1);
 
-        // A queued Crush prompt can never run, so start-up fails it.
+        // A queued prompt for a removed agent can never run, so start-up fails it.
         assert_eq!(s.recover_interrupted().unwrap(), 1);
         let status: String = s
             .conn()

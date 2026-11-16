@@ -227,7 +227,7 @@ fn installed(state: &AppState) -> Vec<AgentKind> {
         .map(|a| a.agent)
         .collect();
     if found.is_empty() {
-        AgentKind::ALL.to_vec()
+        crate::agent::default_agents()
     } else {
         found
     }

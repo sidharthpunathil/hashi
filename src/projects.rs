@@ -376,7 +376,7 @@ pub fn encode_models(map: &ModelMap) -> String {
 }
 
 /// Decodes a stored model map. Anything unreadable is an empty map. An
-/// entry for an agent this Hashi does not run (such as `crush`) is dropped
+/// entry for an agent this Hashi does not run (such as one whose support was removed) is dropped
 /// and the rest kept.
 #[must_use]
 pub fn decode_models(s: &str) -> ModelMap {

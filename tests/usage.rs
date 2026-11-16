@@ -621,7 +621,7 @@ printf '%s' '{"claudeAiOauth":{"accessToken":"tok-refresh","expiresAt":999999999
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = h
-        .post("/v1/accounts/copilot/x/refresh", &h.admin, json!({}))
+        .post("/v1/accounts/nonesuch/x/refresh", &h.admin, json!({}))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     h.running.shutdown().await;

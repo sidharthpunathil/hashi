@@ -161,15 +161,37 @@ pub const fn dir_var(agent: AgentKind) -> Option<&'static str> {
         AgentKind::Opencode => Some("XDG_DATA_HOME"),
         AgentKind::Qwen => Some("QWEN_HOME"),
         AgentKind::Cursor => None,
+        other => match crate::agent::specs::of(other) {
+            Some(s) => s.dir_var,
+            None => None,
+        },
     }
 }
 
 /// The variables that point `agent` at the account directory `dir`: the
-/// [`dir_var`], or nothing for an agent without one.
+/// [`dir_var`], or nothing for an agent without one, and the agent's
+/// [`account_extra`].
 #[must_use]
 pub fn account_vars(agent: AgentKind, dir: &Path) -> Vec<(String, String)> {
-    dir_var(agent)
+    let mut vars: Vec<(String, String)> = dir_var(agent)
         .map(|var| vec![(var.to_owned(), dir.to_string_lossy().into_owned())])
+        .unwrap_or_default();
+    vars.extend(account_extra(agent));
+    vars
+}
+
+/// Fixed variables for any non-default account of `agent`, such as turning
+/// off an OS keyring that its account directory does not cover (so an
+/// account never reads or overwrites the owner's secret there).
+#[must_use]
+pub fn account_extra(agent: AgentKind) -> Vec<(String, String)> {
+    crate::agent::specs::of(agent)
+        .map(|s| {
+            s.account_env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -182,6 +204,19 @@ pub const fn key_var(agent: AgentKind, kind: AccountKind) -> Option<&'static str
         (AgentKind::Codex, AccountKind::ApiKey) => Some("CODEX_API_KEY"),
         (AgentKind::Gemini, AccountKind::ApiKey) => Some("GEMINI_API_KEY"),
         (AgentKind::Cursor, AccountKind::ApiKey) => Some("CURSOR_API_KEY"),
+        (
+            AgentKind::Claude
+            | AgentKind::Codex
+            | AgentKind::Gemini
+            | AgentKind::Opencode
+            | AgentKind::Qwen
+            | AgentKind::Cursor,
+            _,
+        ) => None,
+        (other, AccountKind::ApiKey) => match crate::agent::specs::of(other) {
+            Some(s) => s.key_var,
+            None => None,
+        },
         _ => None,
     }
 }
@@ -301,6 +336,10 @@ pub const fn credential_vars(agent: AgentKind) -> &'static [&'static str] {
             "OPENCODE_GO_API_KEY",
         ],
         AgentKind::Opencode => &["XDG_DATA_HOME", "OPENCODE_DB"],
+        other => match crate::agent::specs::of(other) {
+            Some(s) => s.credential_vars,
+            None => &[],
+        },
     }
 }
 
@@ -346,6 +385,16 @@ pub const fn sign_in(agent: AgentKind) -> Option<SignIn> {
             hint: Some("type /auth and set up the API-key plan, then quit Qwen Code"),
         },
         AgentKind::Cursor => return None,
+        other => match crate::agent::specs::of(other) {
+            Some(crate::agent::spec::Spec {
+                login: Some(login), ..
+            }) => SignIn {
+                args: login.args,
+                env: &[],
+                hint: login.hint,
+            },
+            _ => return None,
+        },
     })
 }
 
@@ -524,7 +573,7 @@ pub fn run_env(
                 }
                 account_vars(agent, &dir)
             } else {
-                Vec::new()
+                account_extra(agent)
             };
             set.push((var.to_owned(), key));
             set
@@ -645,7 +694,7 @@ pub fn encode(map: &AccountMap) -> String {
 
 /// Decodes a stored map. Anything unreadable is an empty map, which means
 /// every agent uses its default account. An entry for an agent this Hashi
-/// does not run (such as `crush`) is dropped and the rest kept.
+/// does not run (such as one whose support was removed) is dropped and the rest kept.
 #[must_use]
 pub fn decode(s: &str) -> AccountMap {
     serde_json::from_str::<BTreeMap<String, Vec<String>>>(s)
@@ -721,7 +770,7 @@ mod tests {
         assert_eq!(parse_bindings("").unwrap(), AccountMap::new());
         assert!(parse_bindings("claude=work,work").is_err());
         assert!(parse_bindings("claude=").is_err());
-        assert!(parse_bindings("copilot=x").is_err());
+        assert!(parse_bindings("nonesuch=x").is_err());
         assert!(parse_bindings("claude=Bad").is_err());
         assert_eq!(for_agent(&map, AgentKind::Gemini), ["default"]);
         assert_eq!(decode("not json"), AccountMap::new());

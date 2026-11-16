@@ -4,9 +4,14 @@
 //! environment and output parsing, plus the shared [`runner`] that owns the
 //! child process. Keeping them pure makes them easy to test against fixtures.
 //!
-//! Adding a backend: add a variant to [`AgentKind`] (and its entries in the
-//! `impl` below), create `src/agent/<name>.rs` with `build_args`, `env` and
-//! `parse_output`, and wire it into [`execute`].
+//! The first six backends have modules of their own. Every other agent is a
+//! [`spec::Spec`] in [`specs`], run by the shared table-driven code in
+//! [`spec`].
+//!
+//! Adding a backend: add a variant to [`AgentKind`] and to
+//! [`AgentKind::ALL`], then add its [`spec::Spec`] to [`specs`]. Only an
+//! agent whose output needs more than [`spec::Output`] can describe gets a
+//! module of its own, wired into [`execute_in`].
 
 pub mod claude;
 pub mod codex;
@@ -16,6 +21,8 @@ pub mod limit;
 pub mod opencode;
 pub mod qwen;
 pub mod runner;
+pub mod spec;
+pub mod specs;
 pub mod tree;
 
 use std::ffi::OsString;
@@ -44,17 +51,125 @@ pub enum AgentKind {
     Qwen,
     /// Cursor's CLI agent (`cursor-agent`, also shipped as `agent`).
     Cursor,
+    // Table-driven agents, described in `specs`.
+    /// GitHub Copilot CLI.
+    Copilot,
+    /// Grok Build (xAI).
+    Grok,
+    /// Google Antigravity CLI.
+    Antigravity,
+    /// Goose.
+    Goose,
+    /// Amp.
+    Amp,
+    /// Factory Droid.
+    Droid,
+    /// Kimi Code.
+    Kimi,
+    /// Kilo Code CLI.
+    Kilo,
+    /// Cline CLI.
+    Cline,
+    /// Crush.
+    Crush,
+    /// Aider.
+    Aider,
+    /// Continue CLI.
+    Continue,
+    /// Pi.
+    Pi,
+    /// oh-my-pi (omp).
+    Omp,
+    /// OpenClaude.
+    Openclaude,
+    /// CodeBuddy Code.
+    Codebuddy,
+    /// Qoder CLI.
+    Qoder,
+    /// Qoder CLI CN.
+    #[serde(rename = "qoder-cn")]
+    QoderCn,
+    /// Kiro CLI.
+    Kiro,
+    /// Augment Auggie.
+    Auggie,
+    /// Devin CLI.
+    Devin,
+    /// Atlassian Rovo Dev CLI.
+    Rovodev,
+    /// Mistral Vibe.
+    Vibe,
+    /// Hermes Agent.
+    Hermes,
+    /// OpenClaw.
+    Openclaw,
+    /// Jcode.
+    Jcode,
+    /// MiMo Code.
+    Mimo,
+    /// Ante.
+    Ante,
+    /// TRAE CLI.
+    Trae,
+    /// Muse Code.
+    Muse,
+    /// DeepSeek Harness.
+    Deepseek,
+    /// ZCode.
+    Zcode,
+    /// Prime Agent.
+    Prime,
+    /// Autohand Code.
+    Autohand,
+    /// Command Code.
+    #[serde(rename = "command-code")]
+    CommandCode,
 }
 
 impl AgentKind {
     /// Every supported agent, in display order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 41] = [
         Self::Claude,
         Self::Codex,
         Self::Gemini,
         Self::Opencode,
         Self::Qwen,
         Self::Cursor,
+        Self::Copilot,
+        Self::Grok,
+        Self::Antigravity,
+        Self::Goose,
+        Self::Amp,
+        Self::Droid,
+        Self::Kimi,
+        Self::Kilo,
+        Self::Cline,
+        Self::Crush,
+        Self::Aider,
+        Self::Continue,
+        Self::Pi,
+        Self::Omp,
+        Self::Openclaude,
+        Self::Codebuddy,
+        Self::Qoder,
+        Self::QoderCn,
+        Self::Kiro,
+        Self::Auggie,
+        Self::Devin,
+        Self::Rovodev,
+        Self::Vibe,
+        Self::Hermes,
+        Self::Openclaw,
+        Self::Jcode,
+        Self::Mimo,
+        Self::Ante,
+        Self::Trae,
+        Self::Muse,
+        Self::Deepseek,
+        Self::Zcode,
+        Self::Prime,
+        Self::Autohand,
+        Self::CommandCode,
     ];
 
     /// Stable lowercase identifier used in the API and database.
@@ -67,6 +182,10 @@ impl AgentKind {
             Self::Opencode => "opencode",
             Self::Qwen => "qwen",
             Self::Cursor => "cursor",
+            other => match specs::of(other) {
+                Some(s) => s.id,
+                None => "unknown",
+            },
         }
     }
 
@@ -80,6 +199,10 @@ impl AgentKind {
             Self::Opencode => "opencode",
             Self::Qwen => "Qwen Code",
             Self::Cursor => "Cursor CLI",
+            other => match specs::of(other) {
+                Some(s) => s.display,
+                None => "Unknown agent",
+            },
         }
     }
 
@@ -90,11 +213,17 @@ impl AgentKind {
             Self::Claude => &["claude"],
             Self::Codex => &["codex"],
             Self::Gemini => &["gemini"],
-            Self::Opencode => &["opencode"],
+            // `opencode2` is the legacy name of opencode V2, a shim that
+            // runs `opencode`; on a machine still on V1 it is the V2 binary.
+            Self::Opencode => &["opencode", "opencode2"],
             Self::Qwen => &["qwen"],
             // `agent` is Cursor's newer name, but it is generic enough that the
             // specific legacy name is tried first.
             Self::Cursor => &["cursor-agent", "agent"],
+            other => match specs::of(other) {
+                Some(s) => s.binaries,
+                None => &["unknown"],
+            },
         }
     }
 
@@ -113,7 +242,7 @@ impl fmt::Display for AgentKind {
 
 /// Error returned when parsing an unknown agent name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown agent `{0}` (expected claude, codex, gemini, opencode, qwen or cursor)")]
+#[error("unknown agent `{0}` (`hashi doctor` lists the agents Hashi can run)")]
 pub struct UnknownAgent(pub String);
 
 impl FromStr for AgentKind {
@@ -127,13 +256,17 @@ impl FromStr for AgentKind {
             "opencode" | "open-code" => Ok(Self::Opencode),
             "qwen" | "qwen-code" | "qwen_code" => Ok(Self::Qwen),
             "cursor" | "cursor-agent" | "cursor_agent" | "cursor-cli" => Ok(Self::Cursor),
-            other => Err(UnknownAgent(other.to_owned())),
+            other => specs::ALL
+                .iter()
+                .find(|s| s.named(other))
+                .map(|s| s.kind)
+                .ok_or_else(|| UnknownAgent(other.to_owned())),
         }
     }
 }
 
 /// Reads a saved list of agent names, dropping any this Hashi does not run
-/// (such as `crush`, whose support was removed), so an old file still loads.
+/// (such as one whose support was removed), so an old file still loads.
 /// For `#[serde(deserialize_with = ...)]`.
 ///
 /// # Errors
@@ -379,6 +512,10 @@ pub async fn execute_in(
         AgentKind::Opencode => (opencode::build_args(cfg, inv), opencode::env(workdir)),
         AgentKind::Qwen => (qwen::build_args(cfg, inv), qwen::env(state_dir)),
         AgentKind::Cursor => (cursor::build_args(cfg, inv), cursor::env(workdir)),
+        other => {
+            let s = table_spec(other)?;
+            (spec::build_args(s, cfg, inv), spec::env(s, workdir))
+        }
     };
     let remove: &[&str] = match account {
         Some(acc) => {
@@ -395,6 +532,7 @@ pub async fn execute_in(
         AgentKind::Opencode => opencode::parse_output(&raw.stdout),
         AgentKind::Qwen => qwen::parse_output(&raw.stdout),
         AgentKind::Cursor => cursor::parse_output(&raw.stdout),
+        other => spec::parse_output(table_spec(other)?, &raw.stdout, raw.success),
     };
     match parsed {
         Ok(out) => Ok(out),
@@ -420,7 +558,33 @@ pub fn limit_hit(kind: AgentKind, error: &str) -> Option<Option<time::OffsetDate
         AgentKind::Opencode => opencode::limit_hit(error),
         AgentKind::Qwen => qwen::limit_hit(error),
         AgentKind::Cursor => cursor::limit_hit(error),
+        other => specs::of(other).and_then(|s| spec::limit_hit(s, error)),
     }
+}
+
+/// The spec of a table-driven agent, or an error for one without (which a
+/// test rules out).
+fn table_spec(kind: AgentKind) -> Result<&'static spec::Spec, AgentError> {
+    specs::of(kind).ok_or_else(|| AgentError::Reported(unavailable_message(kind)))
+}
+
+/// The agents a new token, invite, link or project gets when none are
+/// named: every agent except those that must be turned on with
+/// `--enable-agents`, which are only ever given by name.
+#[must_use]
+pub fn default_agents() -> Vec<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .filter(|k| !needs_opt_in(*k))
+        .collect()
+}
+
+/// Whether `kind` can use shell or write tools without asking in a headless
+/// run, so it is offered only when the owner turns it on with
+/// `--enable-agents`.
+#[must_use]
+pub fn needs_opt_in(kind: AgentKind) -> bool {
+    specs::of(kind).is_some_and(|s| s.auto_approves)
 }
 
 /// The error for a request to an agent this host cannot run: not
@@ -534,6 +698,21 @@ pub fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// Whether `version`, what a binary found for `kind` printed for
+/// `--version`, can be that agent's. Cursor CLI's newer name `agent` is
+/// generic, and Grok Build ships an `agent` of its own (which prints
+/// `grok 0.2.11 ...`), so a Cursor binary that says it is Grok is not used.
+#[must_use]
+pub fn is_own_version(kind: AgentKind, version: &str) -> bool {
+    match kind {
+        AgentKind::Cursor => !version
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("grok"),
+        _ => true,
+    }
+}
+
 /// Asks an agent binary for its version string, with a short timeout.
 pub async fn probe_version(bin: &Path) -> Option<String> {
     let fut = tokio::process::Command::new(bin)
@@ -578,10 +757,20 @@ mod tests {
     }
 
     #[test]
+    fn grok_agent_binary_is_not_cursor() {
+        assert!(!is_own_version(
+            AgentKind::Cursor,
+            "grok 0.2.11 (3247ce8f833) [stable]"
+        ));
+        assert!(is_own_version(AgentKind::Cursor, "2026.11.05-86047df"));
+        assert!(is_own_version(AgentKind::Grok, "grok 0.2.20"));
+    }
+
+    #[test]
     fn agent_kind_rejects_unknown() {
-        assert!("copilot".parse::<AgentKind>().is_err());
-        // Support for Crush was removed; old rows naming it must not parse.
-        assert!("crush".parse::<AgentKind>().is_err());
+        assert!("nonesuch".parse::<AgentKind>().is_err());
+        // A name Hashi never ran must not parse, so old rows naming one are skipped.
+        assert!("retired".parse::<AgentKind>().is_err());
     }
 
     #[test]
@@ -591,7 +780,7 @@ mod tests {
             #[serde(deserialize_with = "known_agents")]
             agents: Vec<AgentKind>,
         }
-        let saved: Saved = serde_json::from_str(r#"{"agents":["claude","crush","codex"]}"#)
+        let saved: Saved = serde_json::from_str(r#"{"agents":["claude","retired","codex"]}"#)
             .expect("an old list still loads");
         assert_eq!(saved.agents, [AgentKind::Claude, AgentKind::Codex]);
     }

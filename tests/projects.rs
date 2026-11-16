@@ -78,6 +78,7 @@ impl Cli {
             .env("HASHI_OPENCODE_BIN", &missing)
             .env("HASHI_QWEN_BIN", &missing)
             .env("HASHI_CURSOR_BIN", &missing)
+            .env("HASHI_AGENT_BINS", missing_agent_bins(&missing))
             .env("HASHI_NO_UPDATE_CHECK", "1")
             .stdin(Stdio::null())
             .output()
@@ -798,4 +799,14 @@ async fn project_api_is_admin_only_and_validates() {
     let (_, list) = h.get("/v1/projects", &h.admin).await;
     assert_eq!(list["projects"], json!([]));
     h.running.shutdown().await;
+}
+
+/// `HASHI_AGENT_BINS` pointing every table-driven agent at `missing`, so an
+/// agent installed on the test machine is never found.
+fn missing_agent_bins(missing: &std::path::Path) -> String {
+    hashi::agent::specs::ALL
+        .iter()
+        .map(|s| format!("{}={}", s.id, missing.display()))
+        .collect::<Vec<_>>()
+        .join(",")
 }
