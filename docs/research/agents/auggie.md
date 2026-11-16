@@ -38,3 +38,16 @@ Source: npm `@augmentcode/auggie@0.37.1` ships a readable (minified) JS bundle, 
 ```
 {"type":"result","result":"","is_error":true,"subtype":"error_during_execution","session_id":"5d0c7f3e-2a91-4b6e-9f12-7c3e8a4b1d20","num_turns":0}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. The login is the plain file <cache>/session.json {accessToken, tenantURL, scopes} (class rb AuthSessionStore, augment.mjs @6351642; validation _parseSessionFromString requires all three). <cache> is the --augment-cache-dir flag, default ~/.augment (option at @10348107); no environment variable moves it (the only AUGMENT_* env vars read are AUGMENT_SESSION_AUTH, AUGMENT_API_TOKEN/URL, AUGMENT_DISABLE_AUTO_UPDATE and a few cloud/VFS ones), so the only env-based dir_var would be HOME. No keychain code exists in the bundle. A login account works if Hashi passes `--augment-cache-dir <account dir>` as an argument, or (simpler) if the login is captured once with `auggie token print` and run as a key account.
+- **API-key accounts:** yes. Order in _initializeLoginStatusSync (@6352484): --augment-session-json flag, then AUGMENT_SESSION_AUTH, then <cache>/session.json. So the env var outranks the owner's stored login; only the flag (already in unsafe_flags) beats it. The value must be the JSON {accessToken, tenantURL, scopes[]}, not a bare token.
+- **Status check:** {"args": ["account", "status", "--json"], "signed_in_when": "exit 0"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. The login is a single plain file with a long-lived token and no refresh or expiry (accessToken/tenantURL/scopes only), so a copy is safe and fresher-token races do not arise. It is not ok only because there is no env dir_var: an account folder exists only if Hashi runs logins with `--augment-cache-dir <dir>` (then sub is "") or with HOME (then sub is ".augment"). With either, switch is a plain copy of session.json. Note ~/.augment also holds sessions, settings.json and history, which must not be copied.
+- **Live quota:** yes. Exits 1 with 'The 'account status' command is not available for your current plan.' when the tenant has no subscription summary (gRPC status 5), so some enterprise accounts get no quota.
+- **Usage in output:** none
+- **Limit messages:** Spec strings match 'Rate limit reached.', 'Rate limited: too many requests...', and the TUI 'Rate limit exceeded: '. No credit-exhaustion wording exists in the bundle (it would come from the server). Possible addition: 'exceeding retry timeout' ('Request failed after exceeding retry timeout of Ns'), which is what a print run reports when rate-limit retries run out.
+
+Closed source; read from npm @augmentcode/auggie 0.37.1 package/augment.mjs (minified, cited by byte offset) and the 0.x docs (docs.augmentcode.com/cli/v0/setup-auggie/authentication.md). session.json holds no email or user name, so identity is null; tenantURL identifies only the tenant. The welcome flow reads ~/.augment/session.json directly (@8937647), always at the home path.

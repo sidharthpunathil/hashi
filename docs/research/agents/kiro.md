@@ -53,3 +53,16 @@ Kiro CLI (`kiro-cli`, AWS) is the closed-source successor of Amazon Q Developer 
 ```
 > `add` returns the sum of its two arguments.
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. Unverified, and the evidence conflicts. The predecessor source (amazon-q-developer-cli, crates/chat-cli/src) keeps the OIDC token as a row in the SQLite table auth_kv (key 'codewhisperer:odic:token', auth/builder_id.rs:304,479-485; database/mod.rs:172,413-426) inside dirs::data_local_dir()/amazon-q/data.sqlite3 (util/paths.rs:327-331), with no keychain and no env override. Third-party Kiro tools read it from ~/Library/Application Support/kiro-cli/data.sqlite3 (macOS) or ~/.local/share/kiro-cli/data.sqlite3 (Linux), key 'kirocli:odic:token'. The current kiro.dev CLI reference says KIRO_HOME 'Override[s] the global Kiro directory used for MCP configuration and sign-ins, permissions, sessions', but the 2.3 changelog that introduced KIRO_HOME lists only agents, prompts, skills, steering, settings and sessions. Whether KIRO_HOME moves data.sqlite3 needs one real run (log in with KIRO_HOME set, check which data.sqlite3 changed). Until then use KIRO_API_KEY accounts.
+- **API-key accounts:** yes. kiro.dev/docs/cli/headless: headless mode requires KIRO_API_KEY, and the key carries its own subscription identity. That the key outranks a stored login in the same environment is from docs only (UNVERIFIED by running); keys exist only for Pro, Pro+, Pro Max and Power subscribers.
+- **Status check:** {"args": ["whoami", "--format", "json"], "signed_in_when": "exit 0"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. The login is a row in a SQLite database (auth_kv) that also holds settings, history, device registration and other state (Q source database/mod.rs), not a login-only file, so copying the file would swap much more than the login and races with a running kiro-cli holding the DB open. The path is per platform (Linux ~/.local/share/kiro-cli), the token's expires_at is inside a JSON value in a table row so a JSON pointer cannot reach it, and no dir_var is confirmed. Needs SQLite-aware row copy to switch.
+- **Live quota:** yes. Text output only, format UNVERIFIED; must be run with the account's KIRO_API_KEY or login. Not parseable by pointer.
+- **Usage in output:** none
+- **Limit messages:** Spec strings match the Q source: ' Amazon Q rate limit reached:' (api_client constants.rs:17, presumably rebranded but 'rate limit reached' still matches), 'Monthly request limit reached' (cli/chat/mod.rs:1111), body 'MONTHLY_REQUEST_COUNT' / 'Maximum Request reached for this month.' (api_client/retry_classifier.rs:110). Kiro credit-exhaustion wording is undocumented; 'out of credits' and 'credit limit' are guesses. Nothing provably missing.
+
+Closed source (Kiro CLI 3.3.0). Read the predecessor source github:aws/amazon-q-developer-cli (crates/chat-cli/src) and kiro.dev docs (reference/cli-commands, cli/headless, changelog). whoami exits SUCCESS when a token loads, FAILURE with {"account":null} otherwise (Q source cli/user.rs:204-245); Kiro documents the same command with --format plain|json|json-pretty. With KIRO_API_KEY only, whether whoami reports logged in is UNVERIFIED. Text output carries no token counts; usage is credits.

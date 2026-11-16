@@ -44,3 +44,20 @@ Research date: 2026-11-16. Read with `opensrc` where the source is public; other
 ```
 {"text":"OK","stopReason":"EndTurn","sessionId":"0199f3a2-7c41-7d10-9b2e-5a1c3e7d9f20","requestId":"0199f3a2-7c55-7a31-8e02-c41b6d2e8a77"}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** yes. GROK_HOME overrides the config directory ~/.grok, which holds config.toml and auth.json ("Cached OAuth2/API credentials") (~/.grok/docs/user-guide/14-headless-mode.md:384, 448-462; 05-configuration.md:610). auth.json is a plain 0600 file (02-authentication.md:15, 83); no keychain strings tied to it. Verified here: ~/.grok contains auth.json (mode 600) and auth.json.lock.
+- **API-key accounts:** yes. 02-authentication.md:39-43 ("The API key takes precedence over browser credentials") and the Auth Precedence list, XAI_API_KEY highest (02-authentication.md:235-240).
+- **Status check:** {"args": null, "signed_in_when": null}
+- **Identity:** {"file": "auth.json", "pointer": null, "jwt_claim": null}
+- **Switch:** yes. Plain file login, and external changes to auth.json are picked up on the next API call without a restart (02-authentication.md:231). Expiry exists but cannot be a static pointer: auth.json is an object keyed by "<issuer>::<client_id>" (here "https://auth.x.ai::<uuid>", the uuid not in the binary, so per login), whose entry has expires_at as an RFC 3339 string that sorts as text, plus refresh_token. Hashi needs "first entry" semantics (pointer /<key>/expires_at) to use it.
+- **Live quota:** no. No CLI command or documented endpoint. The binary has an ACP extension `x.ai/billing` (crates/codegen/xai-grok-shell/src/extensions/billing.rs) with fields month, monthlyLimit, onDemandCap, onDemandUsed, includedUsed, totalUsed, billingPeriodStart and an `x.ai/auth/check_subscription` call, reachable only through `grok agent` (ACP), unverified.
+- **Usage in output:** none
+- **Limit messages:** Binary strings (grok 0.2.20): "You've hit the rate limit for your plan. Upgrade your account or try again later.", "You've hit the credit limit for your plan.", "You can continue by increasing your spending limit.", "...run out of credits", "rate limited, try again later", "rate limit exceeded", "Too Many Requests". "rate limit", "too many requests" and "out of credits" already match; add "credit limit" and "spending limit". "usage limit" does not occur in the binary.
+
+Closed Rust binary ~/.grok/downloads/grok-0.2.20-macos-aarch64; read `grok --help`, `grok login|logout|models --help`, the shipped docs ~/.grok/docs/user-guide, and binary strings. auth.json was inspected for key names and value types only (no values printed).
+
+- Subcommands: agent, login (--oauth, --device-auth), logout, models, sessions, inspect, update, ... There is no auth status command. `grok models` needs auth and an expired OAuth login made a headless run start an interactive browser flow and hang (docs/research/agents/grok.md:95), so it is not a safe status check.
+- Identity: the auth.json entry has email, user_id, first_name, last_name, team_id, principal_type, expires_at, refresh_token and key (the access token). The access token is a JWT whose claims are aud, client_id, exp, iat, iss, jti, principal_id, principal_type, referrer, scope, sub, team_id, tier (no email). So email is readable at /<issuer>::<client_id>/email, but not with a static pointer.
+- Browser tokens last 7 days (02-authentication.md:15) and auto-refresh with the refresh token.

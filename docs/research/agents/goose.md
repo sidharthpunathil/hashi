@@ -45,3 +45,21 @@ Source: `~/.opensrc/repos/github.com/block/goose/main` (Cargo.toml version 1.58.
 ```
 error: No provider configured. Run 'goose configure' first.
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** yes. GOOSE_PATH_ROOT moves config, data and state to <root>/config, <root>/data, <root>/state (crates/goose/src/config/paths.rs:8-16) but only when the value is an absolute path (paths.rs:40-46). Secrets default to ONE keyring entry, service "goose", user "secrets" (base.rs:31-34, 401-412), which is the same for every root, so GOOSE_DISABLE_KEYRING (any value, env checked with is_ok at base.rs:219-223) is required; then secrets go to <config_dir>/secrets.yaml (base.rs:397-399).
+- **API-key accounts:** no. Secrets are read env-first (Config::get_secret, base.rs:920-933), so a provider key in env does outrank the stored one, but there is no single key var: the provider comes from GOOSE_PROVIDER (plus GOOSE_MODEL) and the key name depends on it (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...). An env-only account needs GOOSE_PROVIDER + GOOSE_MODEL + that provider's key.
+- **Status check:** {"args": ["info", "--check"], "signed_in_when": "exit 0"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. The plain goose (etcetera Xdg strategy, ~/.config/goose on macOS too, paths.rs:20-31) keeps secrets in the OS keyring unless GOOSE_DISABLE_KEYRING is in its env or in its config.yaml (base.rs:219-223), so copying secrets.yaml alone is ignored; copying config.yaml as well overwrites the owner's provider, model and extensions, and still only works if that config.yaml carries GOOSE_DISABLE_KEYRING: true. There is no account identity or expiry to compare.
+- **Live quota:** no. Goose is bring-your-own-key across many providers; it has no plan or quota endpoint of its own.
+- **Usage in output:** tokens and cost
+- **Limit messages:** ProviderError Display strings are "Rate limit exceeded: {details}" and "Credits exhausted: {details}" (crates/goose-provider-types/src/errors.rs:18, 50); the spec's "rate limit exceeded" and "credits exhausted" match (case-insensitively). "too many requests" is a harmless extra. In 1.44.0 a setup failure is plain text on stdout, not JSON.
+
+Source: ~/.opensrc/repos/github.com/block/goose/main (1.58.0); installed 1.44.0.
+
+- `goose info --check` (crates/goose-cli/src/commands/info.rs:163-270) prints Provider/Model/Auth and returns Err("provider check failed") so the process exits 1 when not configured or auth fails (info.rs:266-270). It sends one tiny completion (check_provider calls provider_client.complete). Verified on the installed 1.44.0: with an empty absolute GOOSE_PATH_ROOT and GOOSE_DISABLE_KEYRING=1 it printed `Provider: not configured: Configuration value not found: GOOSE_PROVIDER` and exited 1. `goose doctor` also exists but is broader.
+- Keyring layout: one JSON blob under service `goose`, user `secrets` (base.rs:31-34) shared by every GOOSE_PATH_ROOT, so two keyring-mode roots would overwrite each other's keys.
+- Usage: the `complete` stream event carries total/input/output tokens and `cost_usd` (crates/goose-cli/src/session/mod.rs:164-176, 1639, 1682-1688); the spec pointers match.
+- No identity: logins are provider API keys (a few providers do OAuth, but goose stores no user name).

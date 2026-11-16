@@ -730,7 +730,7 @@ fn accounts(app: &App, frame: &mut Frame, selected: usize) {
     }
     // One label width for this block, from the longest agent name, so the
     // values line up whatever agents are shown.
-    let label_w = crate::accounts::switch::AGENTS
+    let label_w = crate::accounts::switch::agents()
         .iter()
         .map(|a| "plain ".len() + a.as_str().len())
         .max()

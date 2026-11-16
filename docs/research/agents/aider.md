@@ -53,3 +53,24 @@ Repo-map: disabled
 litellm.RateLimitError: AnthropicException - {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed the rate limit for your organization"}}
 The API provider has rate limited you. Try again later or check your quotas.
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. Aider has no login of its own. Its only sign-in is an OpenRouter OAuth that runs during onboarding when no model and no key are set (onboarding.py:79-146); it appends OPENROUTER_API_KEY="..." to ~/.aider/oauth-keys.env (onboarding.py:361-367), a path built from Path.home() / expanduser (main.py:370) that no env var moves except HOME. So there is no dir_var and no separate login folder; a 'login account' would just be an OpenRouter API key, which belongs in api_key_accounts.
+- **API-key accounts:** yes. Plain ANTHROPIC_API_KEY does NOT reliably select the account: main.py:501 loads ~/.aider/oauth-keys.env, ~/.env, <git root>/.env, ./.env and --env-file with load_dotenv(override=True) (main.py:361-387, search list main.py:305-330), so an owner's ~/.env that sets ANTHROPIC_API_KEY replaces the token's key, and ~/.aider.conf.yml can set anthropic-api-key (args.py:73) which main.py:612-613 writes over os.environ. AIDER_ANTHROPIC_API_KEY is the configargparse env form of --anthropic-api-key (auto_env_var_prefix AIDER_, args.py:41); env beats config files in configargparse, and main.py:612-613 copies it into ANTHROPIC_API_KEY AFTER the dotenv load, so it wins over ~/.env and ~/.aider.conf.yml. Remaining holes: an owner ~/.env that itself sets AIDER_ANTHROPIC_API_KEY (dotenv override=True runs before the re-parse at main.py:504), and the key only fits Anthropic models, so Hashi must also pass --model (an owner config `model:` pointing at another provider would otherwise use the owner's key for that provider). For other providers use AIDER_OPENAI_API_KEY (args.py, --openai-api-key, main.py:615-616) or --api-key provider=key (main.py:601-610, argv only).
+- **Status check:** {"args": null, "signed_in_when": null}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. Nothing to switch: keys come from env, ~/.env, ~/.aider.conf.yml and ~/.aider/oauth-keys.env (an append-only list of OPENROUTER_API_KEY lines, onboarding.py:366-367). There is no dir_var, so Hashi cannot hold a second login folder to switch in, and ~/.env (override=True) outranks oauth-keys.env anyway because oauth-keys.env is loaded first (main.py:369-373).
+- **Live quota:** no. Aider reports no remaining quota. It only asks OpenRouter GET https://openrouter.ai/api/v1/auth/key (Bearer OPENROUTER_API_KEY) for is_free_tier to pick a default model (onboarding.py:18-41); that same endpoint also returns limit/usage for the key, but it is provider-specific and not an aider feature. Anthropic/OpenAI keys have no balance endpoint.
+- **Usage in output:** none
+- **Limit messages:** Spec's list matches exceptions.py:44-47 (RateLimitError: 'The API provider has rate limited you. Try again later or check your quotas.') and litellm's 'RateLimitError'. Missing: 'insufficient credits' (exceptions.py:102-110, OpenRouter 402 maps to 'Insufficient credits with the API provider. Please add credits.', non-retryable). The OpenRouter 'rate limiting your requests' text (exceptions.py:91-99) is already covered by 'rate limit'. Rate limits are retried with doubling backoff until the delay passes RETRY_TIMEOUT=60s (models.py:26, base_coder.py:1449-1485), each retry printing the error, so a limit costs about two minutes before the run gives up. Exit code stays 0 on API errors, so the text matching is what flags failure.
+
+Source: ~/.opensrc/repos/github.com/Aider-AI/aider/main (aider/__init__.py 0.86.3.dev); not installed, nothing run.
+
+- **Login**: none. OpenRouter OAuth only in onboarding (onboarding.py:79-146, 355-375), key appended to ~/.aider/oauth-keys.env and loaded first at startup (main.py:369-373). HOME is the only relocator.
+- **Keys**: dotenv files load with override=True in order oauth-keys.env, ~/.env, git-root .env, ./.env, --env-file (main.py:305-330, 361-387); then args are re-parsed (main.py:504) and --set-env, --api-key, --anthropic-api-key, --openai-api-key are written into os.environ (main.py:590-616). So AIDER_ANTHROPIC_API_KEY / AIDER_OPENAI_API_KEY are the variables that win.
+- **Status**: no auth status command. `--exit` (args.py:681-684) runs startup and exits but does not validate the key.
+- **Identity**: none stored.
+- **Quota**: none; OpenRouter /api/v1/auth/key is used only for the free-tier check (onboarding.py:18-41).
+- **Usage**: Spec reads Text, so Hashi records none; the Tokens/Cost line is printed (base_coder.py:2023-2068).
+- **Limits**: exceptions.py:44-47, 102-110; retries up to RETRY_TIMEOUT 60s (models.py:26, base_coder.py:1449-1485).

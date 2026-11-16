@@ -46,3 +46,20 @@ Source: Factory docs repo `github:Factory-AI/factory` (opensrc fetched via npm `
 ```
 {"type":"result","subtype":"failure","is_error":true,"duration_ms":2310,"num_turns":0,"result":"Exec ended early: insufficient permission to proceed. Re-run with --auto low|medium|high (to raise autonomy), or use --skip-permissions-unsafe for dangerous commands.","session_id":"8af22e0a-d222-42c6-8c7e-7a059e391b0b","usage":{"input_tokens":5120,"output_tokens":64,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"factory_credits":1,"thinking_tokens":0}}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** yes. FACTORY_HOME_OVERRIDE replaces HOME when resolving ~/.factory (docs/research/agents/droid.md, Cje()); the credential store dir is qS() = join(home, .factory) and a login exists when auth.v2.keyring, auth.v2.loginkeychain or auth.v2.file is present (droid byte 197148530, B7()). Keyring mode keeps the encryption key in the macOS Keychain under service "Factory CLI" / "auth-encryption-key" shared by every home (byte 197178235, cr/di constants); FACTORY_DISABLE_KEYRING=1 stores on disk (message at byte 7912270).
+- **API-key accounts:** yes. The auth doctor check reports "using FACTORY_API_KEY (overrides any stored login session)" (droid byte 218579077) and runAuthChecks labels the source "FACTORY_API_KEY environment variable" vs "stored login session" (byte 218582312).
+- **Status check:** {"args": ["doctor", "--checks", "auth", "--json"], "signed_in_when": "exit 0"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. The stored login is ciphertext ({version, backend: keyfile|keyring|security-cli, ciphertext}, byte 197188581), so there is no readable expiry. The owner's plain droid normally uses keyring mode (auth.v2.keyring + Keychain key) and a secure login hides a file one ("a login saved to disk instead would be hidden behind it", byte 7912270), so dropping auth.v2.file into ~/.factory would not take effect unless the owner also runs with FACTORY_DISABLE_KEYRING=1.
+- **Live quota:** yes. og() fetches /api/billing/limits; j() reads limits.standard and extraUsageBalanceCents; C() treats any of fiveHour/weekly/monthly as exhausted; le() reads usedPercent and windowEnd (droid bytes 210162322 for C() and 210165431 for og() and j()). The doctor connectivity probes list the same endpoint (byte 218650320). Easy for FACTORY_API_KEY accounts; an OAuth login's token is encrypted on disk.
+- **Usage in output:** tokens
+- **Limit messages:** The strings in the spec are the app messages (usage limit reached, standard credit limits exhausted, rate limited by Factory, provider rate limited, provider usage quota exhausted, ChatGPT plan usage limit). The limit service also classifies "standard-exhausted" and "out-of-credits" states (fe(), byte 210165598); consider adding "out of credits" (exact user-facing text unverified).
+
+Closed bun binary; JS read from the embedded bundle by byte offset (not executed). Docs: ~/.opensrc/repos/github.com/Factory-AI/factory/1.12.1.
+
+- `droid doctor` options: --json, --verbose, --timeout, --checks <names>; check names include config, environment, system, connectivity, auth, ... (RA list at byte 198374591); the action sets process.exitCode=1 when any selected check fails (doctor command at byte 198462834). `--checks auth` does not spend credits.
+- Identity: the decrypted credential holds the WorkOS id token with an `email` claim (schema ft, byte 197172001) and a whoami object, and the API has GET /api/cli/whoami (byte 218650320), but nothing readable sits in a plain file.
+- Output: `-o json` usage has input/output/cache tokens and factory_credits but no USD cost, so cost stays null.

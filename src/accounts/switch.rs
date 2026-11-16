@@ -50,18 +50,34 @@ pub const STATE_FILE: &str = "active.json";
 /// holding the owner's original login while an account is switched in.
 pub const ORIGINAL_DIR: &str = ".original";
 
-/// The agents whose plain command can be switched, in display order.
-pub const AGENTS: [AgentKind; 4] = [
+/// The agents with a module of their own whose plain command can be
+/// switched. Table-driven agents can be switched when their spec says
+/// where their login lives ([`crate::agent::spec::Switch`]).
+pub const BUILT_IN: [AgentKind; 4] = [
     AgentKind::Claude,
     AgentKind::Codex,
     AgentKind::Gemini,
     AgentKind::Opencode,
 ];
 
+/// The agents whose plain command can be switched, in display order.
+#[must_use]
+pub fn agents() -> Vec<AgentKind> {
+    AgentKind::ALL
+        .into_iter()
+        .filter(|a| supports(*a))
+        .collect()
+}
+
+/// Where a table-driven agent keeps its login, when it can be switched.
+fn table(agent: AgentKind) -> Option<crate::agent::spec::Switch> {
+    crate::agent::specs::of(agent)?.switch
+}
+
 /// Whether `agent` can be switched.
 #[must_use]
 pub fn supports(agent: AgentKind) -> bool {
-    AGENTS.contains(&agent)
+    BUILT_IN.contains(&agent) || table(agent).is_some()
 }
 
 /// Why `agent` cannot be switched.
@@ -74,13 +90,21 @@ pub fn why_not(agent: AgentKind) -> String {
         AgentKind::Cursor => {
             "Cursor CLI has no separate login folder to switch; use an API-key account".to_owned()
         }
-        _ => format!("{} cannot be switched", agent.display_name()),
+        _ => format!(
+            "{} cannot be switched: Hashi does not know of a login it keeps in plain files \
+             in one folder (it may use your system keyring); use an account with \
+             hashi account add and pick it per token or project instead",
+            agent.display_name()
+        ),
     }
 }
 
 /// The files that hold `agent`'s login, the first being the one that must
 /// exist for it to count as signed in.
-const fn cred_names(agent: AgentKind) -> &'static [&'static str] {
+fn cred_names(agent: AgentKind) -> &'static [&'static str] {
+    if let Some(sw) = table(agent) {
+        return sw.files;
+    }
     match agent {
         AgentKind::Codex | AgentKind::Opencode => &["auth.json"],
         AgentKind::Gemini => &["oauth_creds.json", "google_accounts.json"],
@@ -247,6 +271,12 @@ pub struct Live {
     /// opencode's data folder, `~/.local/share/opencode` (or under
     /// `$XDG_DATA_HOME`).
     pub opencode_dir: PathBuf,
+    /// The user's home folder, under which table-driven agents keep their
+    /// logins ([`crate::agent::spec::Switch::live_dir`]).
+    pub user_home: PathBuf,
+    /// `$XDG_DATA_HOME`, or `~/.local/share`: a `live_dir` under
+    /// `.local/share/` is looked up here instead.
+    pub data_home: PathBuf,
     /// Set when the environment already points the CLI elsewhere, which
     /// makes the plain command impossible to switch.
     pub env_override: BTreeMap<AgentKind, String>,
@@ -270,6 +300,16 @@ impl Live {
                 env_override.insert(agent, format!("{var}={}", v.to_string_lossy()));
             }
         }
+        for spec in crate::agent::specs::ALL {
+            // `XDG_DATA_HOME` is followed rather than refused (see
+            // `data_home`), as for opencode.
+            if let (Some(var), Some(_)) = (spec.dir_var, spec.switch)
+                && var != "XDG_DATA_HOME"
+                && let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty())
+            {
+                env_override.insert(spec.kind, format!("{var}={}", v.to_string_lossy()));
+            }
+        }
         Ok(Self {
             claude_dir: home.join(".claude"),
             claude_json: home.join(".claude.json"),
@@ -279,6 +319,10 @@ impl Live {
                 .filter(|v| !v.is_empty())
                 .map_or_else(|| home.join(".local/share"), PathBuf::from)
                 .join("opencode"),
+            data_home: std::env::var_os("XDG_DATA_HOME")
+                .filter(|v| !v.is_empty())
+                .map_or_else(|| home.join(".local/share"), PathBuf::from),
+            user_home: home,
             env_override,
         })
     }
@@ -385,7 +429,10 @@ fn slot_of(ctx: &Ctx<'_>, agent: AgentKind, name: &str) -> Slot {
     let dir = match agent {
         AgentKind::Gemini => base.join(".gemini"),
         AgentKind::Opencode => base.join("opencode"),
-        _ => base,
+        other => match table(other) {
+            Some(sw) if !sw.sub.is_empty() => base.join(sw.sub),
+            _ => base,
+        },
     };
     Slot { dir, live: false }
 }
@@ -396,7 +443,10 @@ fn live_slot(ctx: &Ctx<'_>, agent: AgentKind) -> Slot {
             AgentKind::Codex => ctx.live.codex_home.clone(),
             AgentKind::Gemini => ctx.live.gemini_dir.clone(),
             AgentKind::Opencode => ctx.live.opencode_dir.clone(),
-            _ => ctx.live.claude_dir.clone(),
+            other => match table(other) {
+                Some(sw) => table_live_dir(ctx.live, sw),
+                None => ctx.live.claude_dir.clone(),
+            },
         },
         live: true,
     }
@@ -458,10 +508,16 @@ fn write_creds(ctx: &Ctx<'_>, agent: AgentKind, slot: &Slot, secret: &str) -> st
     {
         return vault.set(&claude_service(&slot.dir, slot.live), secret);
     }
-    if !slot.live {
+    if !slot.live || table(agent).is_some() {
         ensure_private_dir(&slot.dir)?;
     }
     let names = cred_names(agent);
+    // A login file may sit in a folder of its own (`agent/auth.json`).
+    for name in names {
+        if let Some(parent) = slot.dir.join(name).parent() {
+            ensure_private_dir(parent)?;
+        }
+    }
     if names.len() == 1 {
         return write_private(&slot.dir.join(names[0]), secret);
     }
@@ -537,6 +593,24 @@ fn saved_is_fresher(agent: AgentKind, saved: &str, live: &str) -> bool {
             .get("last_refresh")?
             .as_str()
             .map(str::to_owned)
+    }
+    fn table_expiry(agent: AgentKind, s: &str) -> Option<serde_json::Value> {
+        let pointer = table(agent)?.expiry?;
+        let first = creds_part(agent, s, cred_names(agent)[0])?;
+        serde_json::from_str::<serde_json::Value>(&first)
+            .ok()?
+            .pointer(pointer)
+            .cloned()
+    }
+    if table(agent).is_some() {
+        use serde_json::Value;
+        return match (table_expiry(agent, saved), table_expiry(agent, live)) {
+            (Some(Value::Number(a)), Some(Value::Number(b))) => {
+                a.as_f64().unwrap_or(0.0) > b.as_f64().unwrap_or(0.0)
+            }
+            (Some(Value::String(a)), Some(Value::String(b))) => a > b,
+            _ => false,
+        };
     }
     match agent {
         AgentKind::Codex => match (codex_refresh(saved), codex_refresh(live)) {
@@ -754,6 +828,9 @@ pub fn signed_in_as(live: &Live, agent: AgentKind) -> Option<String> {
             let v: serde_json::Value = serde_json::from_str(&text).ok()?;
             v.get("active")?.as_str().map(str::to_owned)
         }
+        other if table(other).is_some_and(|sw| sw.identity.is_some()) => {
+            table_identity(live, other)
+        }
         // opencode's sign-ins are per provider and carry no email: name the
         // providers instead.
         AgentKind::Opencode => {
@@ -764,6 +841,35 @@ pub fn signed_in_as(live: &Live, agent: AgentKind) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The folder a table-driven agent's plain command keeps its login in.
+fn table_live_dir(live: &Live, sw: crate::agent::spec::Switch) -> PathBuf {
+    let (base, rest) = match sw.live_dir.strip_prefix(".local/share/") {
+        Some(rest) => (live.data_home.clone(), rest),
+        None => (live.user_home.clone(), sw.live_dir),
+    };
+    rest.split('/').fold(base, |p, part| p.join(part))
+}
+
+/// The user a table-driven agent's plain login names, from its
+/// [`crate::agent::spec::Identity`].
+fn table_identity(live: &Live, agent: AgentKind) -> Option<String> {
+    let sw = table(agent)?;
+    let id = sw.identity?;
+    let dir = table_live_dir(live, sw);
+    let text = std::fs::read_to_string(dir.join(id.file)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let found = v.pointer(id.pointer)?.as_str()?;
+    let name = match id.jwt_claim {
+        Some(claim) => {
+            let payload = base64url(found.split('.').nth(1)?)?;
+            let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+            claims.get(claim)?.as_str()?.to_owned()
+        }
+        None => found.to_owned(),
+    };
+    (!name.trim().is_empty()).then_some(name)
 }
 
 /// Decodes unpadded base64url, as in a JWT.
@@ -958,6 +1064,8 @@ mod tests {
             codex_home: root.join("u/.codex"),
             gemini_dir: root.join("u/.gemini"),
             opencode_dir: root.join("u/.local/share/opencode"),
+            user_home: root.join("u"),
+            data_home: root.join("u/.local/share"),
             env_override: BTreeMap::new(),
         };
         std::fs::create_dir_all(&live.claude_dir).unwrap();
@@ -1345,6 +1453,114 @@ mod tests {
         assert_eq!(
             signed_in_as(&rig.live, AgentKind::Opencode).as_deref(),
             Some("providers: zai")
+        );
+    }
+
+    /// Swaps a table-driven agent's login files both ways and back.
+    fn table_round_trip(agent: AgentKind) {
+        let rig = rig();
+        let ctx = Ctx {
+            home: &rig.home,
+            live: &rig.live,
+            vault: None,
+        };
+        let sw = table(agent).unwrap();
+        let live_dir = table_live_dir(&rig.live, sw);
+        let acct_dir = slot_of(&ctx, agent, "work").dir;
+        for (dir, who) in [(&live_dir, "me"), (&acct_dir, "work")] {
+            for f in sw.files {
+                let path = dir.join(f);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, format!("{{\"who\":\"{who}\",\"file\":\"{f}\"}}")).unwrap();
+            }
+        }
+        let read = |f: &str| std::fs::read_to_string(live_dir.join(f)).unwrap();
+        switch(&ctx, agent, "work").unwrap();
+        for f in sw.files {
+            assert!(read(f).contains("work"), "{agent} {f}");
+        }
+        assert_eq!(active(&rig.home, agent), "work");
+        switch(&ctx, agent, DEFAULT).unwrap();
+        for f in sw.files {
+            assert!(read(f).contains("me"), "{agent} {f}");
+            // The account's own copy was kept.
+            let kept = std::fs::read_to_string(acct_dir.join(f)).unwrap();
+            assert!(kept.contains("work"), "{agent} {f}");
+        }
+        switch(&ctx, agent, "work").unwrap();
+        reset(&ctx, agent).unwrap();
+        for f in sw.files {
+            assert!(read(f).contains("me"), "{agent} {f}");
+        }
+    }
+
+    #[test]
+    fn every_switchable_table_agent_round_trips() {
+        let table_agents: Vec<AgentKind> = agents()
+            .into_iter()
+            .filter(|a| !BUILT_IN.contains(a))
+            .collect();
+        assert!(table_agents.len() >= 10, "{table_agents:?}");
+        for agent in table_agents {
+            table_round_trip(agent);
+        }
+    }
+
+    #[test]
+    fn table_identity_reads_a_field_or_a_token_claim() {
+        let rig = rig();
+        let cline = rig.live.user_home.join(".cline/data/settings");
+        std::fs::create_dir_all(&cline).unwrap();
+        std::fs::write(
+            cline.join("providers.json"),
+            r#"{"providers":{"cline":{"settings":{"auth":{"metadata":{"userInfo":{"email":"a@b.c"}}}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            signed_in_as(&rig.live, AgentKind::Cline).as_deref(),
+            Some("a@b.c")
+        );
+        // A JWT whose payload is {"email":"x@y.z"}.
+        let jwt = "e30.eyJlbWFpbCI6InhAeS56In0.sig";
+        let crush = rig.live.data_home.join("crush");
+        std::fs::create_dir_all(&crush).unwrap();
+        std::fs::write(
+            crush.join("crush.json"),
+            format!(r#"{{"providers":{{"openai":{{"oauth":{{"id_token":"{jwt}"}}}}}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            signed_in_as(&rig.live, AgentKind::Crush).as_deref(),
+            Some("x@y.z")
+        );
+        assert_eq!(signed_in_as(&rig.live, AgentKind::Pi), None);
+    }
+
+    #[test]
+    fn table_login_under_local_share_follows_xdg_data_home() {
+        let rig = rig();
+        let live = Live {
+            data_home: rig.live.user_home.join("xdg"),
+            ..rig.live.clone()
+        };
+        let dir = table_live_dir(&live, table(AgentKind::Mimo).unwrap());
+        assert_eq!(dir, rig.live.user_home.join("xdg").join("mimocode"));
+        let dir = table_live_dir(&live, table(AgentKind::Pi).unwrap());
+        assert_eq!(dir, rig.live.user_home.join(".pi").join("agent"));
+    }
+
+    #[test]
+    fn keyring_agents_say_why_they_cannot_be_switched() {
+        let rig = rig();
+        let ctx = Ctx {
+            home: &rig.home,
+            live: &rig.live,
+            vault: None,
+        };
+        assert!(
+            switch(&ctx, AgentKind::Copilot, "x")
+                .unwrap_err()
+                .contains("keyring")
         );
     }
 

@@ -46,3 +46,20 @@ fixture_success is derived from source (chat.ts:202-219, text mode), not run. fi
 ```
 OK
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. There is no login any more: `login()` throws `Login is not available. Hub authentication has been removed.`, `isAuthenticated()` is always false and AuthConfig is always null (extensions/cli/src/auth/workos.ts:1-7, 125-133). Credentials are only provider keys in config.yaml or ANTHROPIC_API_KEY / CONTINUE_USE_BEDROCK. CONTINUE_GLOBAL_DIR does move everything the CLI keeps (config.yaml, sessions, globalContext.json, permissions.yaml; extensions/cli/src/env.ts:8-12; core/util/paths.ts:27-28, 94-95), so a separate folder still isolates a config-file account, but there is nothing to sign in to.
+- **API-key accounts:** no. In headless mode with no --config, ANTHROPIC_API_KEY makes the CLI rewrite $CONTINUE_GLOBAL_DIR/config.yaml: managed Anthropic model blocks are dropped and re-added with the env key at the END of models (extensions/cli/src/services/index.ts:79-93; onboarding.ts:18, 35-49; util/yamlConfigUpdater.ts:76-121). Any other models the owner configured stay first, and a persisted `cliSelectedModel` in globalContext.json (util/modelPersistence.ts:7-19; auth/workos.ts:75) can still pick one of them, so in the owner's folder the key does not fully select the account, and the run also overwrites the owner's config.yaml. It works when each key account has its own empty CONTINUE_GLOBAL_DIR.
+- **Status check:** {"args": null, "signed_in_when": null}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. No login to switch: Hub auth is removed (auth/workos.ts:125-133). The only credential is an inline apiKey inside config.yaml, which also carries models, rules, MCP servers and every other setting, so swapping it would change the owner's whole configuration. Leave switch None.
+- **Live quota:** no. No account and no Continue-side billing in the CLI; Hub auth removed (auth/workos.ts:1-7). Quota is whatever the underlying provider key has.
+- **Usage in output:** none
+- **Limit messages:** Errors go to stderr as {"status":"error","message":...} with exit 1 (commands/chat.ts:620-637); wording is the provider SDK's. 429/502/503/504, error.type `rate_limit_exceeded`/`server_error`, and `overloaded` are retried first (util/exponentialBackoff.ts:51-77). `rate limit` and `too many requests` are reasonable; worth adding `rate_limit_exceeded`, `rate_limit_error` (Anthropic error type) and `insufficient_quota` (OpenAI). No Continue-specific quota strings exist.
+
+Source: github:continuedev/continue main, extensions/cli (@continuedev/cli, bundle 1.5.47 matches). Not installed; nothing run.
+
+- `env.continueHome = CONTINUE_GLOBAL_DIR || ~/.continue` (extensions/cli/src/env.ts:8-12); `dotenv.config()` loads <cwd>/.env first (env.ts:4-6), so Hashi must always set CONTINUE_GLOBAL_DIR itself.
+- No keyring, no tokens, no identity, no status command (subcommands: ls, serve, checks, review; index.ts:301-350).
+- Output is plain text; usage is tracked in the session file under $CONTINUE_GLOBAL_DIR/sessions but never printed (session.ts:149-156, 587-589), so usage_in_output is none.

@@ -71,3 +71,21 @@ Help topic `limits` quotes: "You've hit the rate limit for this model.", "You've
 {"id":"e3","timestamp":"2026-11-16T10:00:00.700Z","parentId":"e2","type":"session.error","data":{"errorType":"rate_limit","message":"You've hit your session rate limit. Please wait 41 minutes before trying again.","statusCode":429}}
 {"type":"result","timestamp":"2026-11-16T10:00:00.800Z","sessionId":"0cb916db-26aa-40f2-86b5-1ba81b225fd2","exitCode":1,"usage":{"premiumRequests":0,"totalApiDurationMs":0,"sessionDurationMs":800,"codeChanges":{"linesAdded":0,"linesRemoved":0,"filesModified":[]}}}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. COPILOT_HOME (must be absolute) moves settings, state and sessions, but `copilot login` stores the token in the system credential store and falls back to a plain-text config file only when no store works or storeTokenPlaintext is set (cli-native.node login help at byte 9548848; settings schema entry storeTokenPlaintext at runtime.node byte 114955099; /logout help at cli-native.node byte 9209264 says the token is in the system keychain or in config.json under the active Copilot home). The keychain is not under COPILOT_HOME, so per-folder separation needs the plaintext setting pre-seeded in each account dir.
+- **API-key accounts:** yes. Login help: tokens in COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN are checked in that order and are suited to headless use (cli-native.node byte 9548848); /logout help: it does not sign out an env token, which stays active (byte 9209264). Needs a fine-grained PAT with Copilot Requests or a Copilot/gh OAuth token; classic ghp_ PATs are rejected.
+- **Status check:** {"args": null, "signed_in_when": null}
+- **Identity:** {"file": "config.json", "pointer": "/lastLoggedInUser/login", "jwt_claim": null}
+- **Switch:** no. By default the token is in the OS keychain, not a file. Even with storeTokenPlaintext the token shares config.json with the owner's machine-wide state (trusted folders, installed plugins, onboarding flags: api.schema.json GlobalStateLoadResult around 38270-38360), so copying it would clobber that state; GitHub OAuth tokens have no expiry field to compare.
+- **Live quota:** yes. The URL is in runtime.node (bytes 103409854, 103527079) next to the device-code endpoints; the response fields are described in schemas/api.schema.json:31290-31340 (quota_snapshots, quota_reset_date, token_based_billing). Easy for COPILOT_GITHUB_TOKEN accounts; a keychain login needs the token read from the keychain. The exact header form is from the public VS Code extension, unverified for this CLI.
+- **Usage in output:** tokens
+- **Limit messages:** The spec's strings match the `copilot help limits` topic ("You've hit the rate limit for this model.", "...session rate limit.", "...weekly rate limit.", "...your rate limit.", "Plan: 100% used"). The runtime also has "GitHub API rate limit exceeded for the authenticated token" (runtime.node byte 103529134), already covered by "rate limit".
+
+Closed source; read from the extracted 1.0.112 SEA package (cli-main.js is the UI bundle, the auth and config logic is in the Rust prebuilds runtime.node and cli-native.node, offsets are byte offsets).
+
+- No non-interactive auth status command: subcommands do not include status or whoami; /login, /logout, /user exist only in the TUI (cli-main.js byte 2191312 `You are not logged in.`).
+- Identity: global state (lastLoggedInUser {host, login, kind?}, loggedInUsers) per api.schema.json:38322-38333 and LoggedInUser at 42585-42605; that it lives in $COPILOT_HOME/config.json is inferred from the /logout help and the `config.json` string beside the auth keys `authTokens`, `copilotTokens_direct` in runtime.node (byte 104056474); unverified. Older releases used snake_case last_logged_in_user.
+- COPILOT_DISABLE_KEYTAR appears in the env lists of runtime.node (byte 114906193) and cli-native.node (byte 9665946); it probably forces file storage but its semantics are unverified, so it is not proposed as keyring_off_env.
+- COPILOT_HOME override must be absolute (runtime.node byte 101183150).

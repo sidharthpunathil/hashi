@@ -40,3 +40,16 @@ Exists: yes. Cognition's Devin CLI (formerly Windsurf/Codeium terminal agent, in
 ```
 `add` returns the sum of its two arguments.
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** yes. The login is the plain file credentials.toml at $XDG_DATA_HOME/devin/credentials.toml when XDG_DATA_HOME is set, else ~/.local/share/devin/credentials.toml, on macOS and Linux (docs.devin.ai/cli/enterprise/devin-auth.md 'Credentials file location'; Windows uses %APPDATA%\devin). The binary has no keychain code for it (bin/devin strings: serde struct CredentialsFile with api_key/api_server_url/devin_webapp_host/devin_api_url/org_id, read via the toml crate). XDG_DATA_HOME also moves Devin's session database and summaries ($XDG_DATA_HOME/devin/summaries), which is harmless for an account folder, but it is inherited by every tool and shell command the agent runs. User config (~/.config/devin/config.json) is not moved, so org selection saved there may be shared (UNVERIFIED).
+- **API-key accounts:** yes. Binary string: '`WINDSURF_API_KEY` controls this session's identity, so `/login` is not available. Unset it and restart to log in with an account.' So the env key outranks the stored credentials.toml. Docs mention it for ACP clients (docs 'Devin uses the credentials from `devin auth login` (or `WINDSURF_API_KEY` if set)'); use with -p is UNVERIFIED by running. WINDSURF_API_SERVER_URL / DEVIN_API_URL pick the backend for the key.
+- **Status check:** {"args": ["auth", "status"], "signed_in_when": "exit 0"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** yes. One plain TOML file in a folder that XDG_DATA_HOME moves (account folder <dir>/devin). The token 'is persistent and does not expire' and the docs explicitly allow copying the file between machines (devin-auth.md), so there is no refresh race and no expiry pointer is needed. Caveats: an owner who already sets XDG_DATA_HOME has a different live dir; Windows uses %APPDATA%\devin; a running devin keeps the identity it started with; an owner WINDSURF_API_KEY in the shell overrides any switched file.
+- **Live quota:** no. Usage is shown only by the REPL commands /usage and /session-stats; no non-interactive usage or quota subcommand exists in v3000.12.57 (devin.1 and devin-*.1 man pages; `--json` exists only on doctor, list, models list, mcp list). Billing is in credits/ACUs on the Devin dashboard.
+- **Usage in output:** none
+- **Limit messages:** Spec strings match binary strings 'Quota exhausted', 'Purchase on-demand usage or turn on auto-reload, or wait for your quota to reset.', 'Rate limited: ', ACP kind 'resource_exhausted' and changelog 'Usage limit reached'. Whether they reach stdout in print mode is UNVERIFIED; since output is Text, add them to text_errors too if they print with exit 0.
+
+Closed source; read from the official Linux bundle 3000.12.57 (bin/devin strings, share/man/man1/devin-auth-*.1) and docs.devin.ai. `devin auth status` takes no --json (devin-auth-status.1); per changelog it prints login method, user name and email, user ID, team ID, plan and tier, and 'Not logged in.' when signed out; its exit code is UNVERIFIED, so 'exit 0' may need to become a text check for 'Not logged in'. credentials.toml holds no email, so identity from a file is not possible; the email is only in `auth status` text.

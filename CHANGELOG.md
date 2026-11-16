@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - `--enable-agents` (`HASHI_ENABLE_AGENTS`): agents that can run shell or write tools without asking in a headless run (amp, auggie, crush, deepseek, droid, jcode, kimi, mimo, muse, openclaw, prime, rovodev) are off until named here. `hashi doctor` lists the installed ones that are off.
 - `--agent-bin <agent>=<path>` (`HASHI_AGENT_BINS`) sets the executable of any of the new agents.
 - opencode is also found as `opencode2`, the legacy name of the opencode V2 binary.
+- `hashi switch` works for `grok`, `kimi`, `kilo`, `cline`, `crush`, `pi`, `devin`, `hermes`, `mimo`, `prime` too: agents whose login is plain files in one folder. Agents that keep it in the OS keyring, encrypted or inside their settings say why they cannot be switched. `hashi switch <agent>` and `hashi account list` show who Cline, Crush and MiMo are signed in as.
+- `hashi account list` checks login accounts with the agent's own status command for Goose, Droid, OpenClaude, Qoder, Qoder CN, Devin, Rovo Dev, OpenClaw and Command Code.
+- Login accounts for Kilo, Crush, Vibe and Devin, now that the folder variable that moves each one's whole login is known; Vibe's turns its keyring off so it never shares your key.
+- `docs/agent-coverage.md`: which features each agent supports, and why not where it does not.
 - The weekly upstream check accepts `manual:` sources for closed CLIs with no release feed, and lists them without looking them up.
 
 ### Changed

@@ -61,3 +61,20 @@ Strings: "Rate limit exceeded. Try again shortly.", "Rate Limit Hit", `rate_limi
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"what is 3 + 5?"}]},"parent_tool_use_id":null,"session_id":"T-5e2b8c41-0d9f-4a7e-b3c6-91f0e2d4a8b7"}
 {"type":"result","subtype":"error_during_execution","duration_ms":900,"is_error":true,"num_turns":0,"error":"You are out of credits. Add paid credits or choose a paid tier.","session_id":"T-5e2b8c41-0d9f-4a7e-b3c6-91f0e2d4a8b7"}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. Login state is the plain file secrets.json in Amp's data dir, which is ~/.local/share/amp on macOS and Windows and $XDG_DATA_HOME/amp only on Linux (Ra module: Yl=platform darwin|win32 ? ~/.local/share : XDG_DATA_HOME, amp byte 110354057); settings live in ~/.config/amp. AMP_HOME is the install dir only (bytes 110759076, 110892422). No single env var moves it on macOS; overriding HOME would (os.homedir) but is unverified. Saved CLI tokens are short-lived session tokens.
+- **API-key accounts:** yes. Docs cli: "If AMP_API_KEY is set, it remains active in that shell and takes precedence over saved accounts" (scratchpad/web/amp/cli.html.txt:104); binary warning "AMP_API_KEY is set and takes precedence over stored credentials". Use an sgamp_ access token or a service-account key (cli_execute-mode.html.txt:143-150).
+- **Status check:** {"args": ["usage"], "signed_in_when": "exit 0"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. Hashi cannot create a separate login folder (no dir var), and secrets.json already holds every saved account keyed per server ("apiKey@<server>#cli-account=<id>" entries, amp bytes 110376436 and the `apiKey@` strings near the account-selector errors), with the active one chosen by the amp.cli.account setting. Amp's own `amp account switch` already does what Hashi's switch would.
+- **Live quota:** yes. Help strings at amp byte ~110999392. The HTTP endpoint behind it and whether it has a JSON output flag are unverified; parse the text or add --details.
+- **Usage in output:** tokens
+- **Limit messages:** Spec strings match the binary ("Rate limit exceeded. Try again shortly.", rate_limit_exceeded, "You are out of credits...", "You've reached your free usage limit", "Low Credit Balance"). Also present: "Your Amp credit balance is low." and insufficient-credits (byte 110214505); "low credit balance" does not match "credit balance is low", so add "credit balance is low" if a low-balance warning should count.
+
+Closed Bun binary; bytecode, so most logic is not readable, only strings (byte offsets in pkgs/amp_bin/package/amp). Docs: scratchpad/web/amp.
+
+- Account commands (help strings near byte 110684808): `login` (--oauth, --oauth-browser, --legacy), `logout [account]` (--all), `account list` (--json), `account switch <account>`; plus a command described "Show the current signed-in Amp user" (byte 111015444) whose name could not be read.
+- Identity: the email/user id is in the secrets.json key names, but those entries hold tokens; read identity through `amp account list --json` instead.
+- Usage: per-call usage is on assistant events; result.usage is optional in the documented schema, so tokens may be missing with the json format; no cost field.

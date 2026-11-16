@@ -55,3 +55,21 @@ Read from a fresh shallow clone of `MoonshotAI/kimi-code` at commit 334d798 (202
 {"role":"meta","type":"system.version","version":"2.6.2"}
 {"role":"meta","type":"turn.step.retrying","failed_attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":2000,"error_name":"APIProviderRateLimitError","error_message":"429 Too Many Requests","status_code":429}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** yes. KIMI_CODE_HOME (default ~/.kimi-code) is the home for tokens, config, region marker and device_id (packages/oauth/src/toolkit.ts:400-404, region.ts:172-177, identity.ts:42-62). Tokens are files: FileTokenStorage under <home>/credentials/<name>.json, mode 0600 (storage.ts:1-13, toolkit.ts:112-113); managed refs default to storage 'file' (managed-kimi-code.ts:288-292). Login exits 0 with `Logged in to <provider>.` on stderr (apps/kimi-code/src/cli/sub/login-flow.ts:69-81) and provisions config.toml (packages/node-sdk/src/auth.ts:102-119).
+- **API-key accounts:** no. KIMI_MODEL_API_KEY only fills the env provider (configSection.ts:74-80); the env model becomes the default model only when KIMI_MODEL_NAME is also set (kosongConfig/envOverlay.ts:89-172 sets defaultModel to the env alias), and node-sdk fails if KIMI_MODEL_NAME is set without the key (node-sdk/src/config/env-model.ts:79-81). With the key alone the stored OAuth login's default_model still wins. Works when KIMI_MODEL_NAME (and KIMI_MODEL_BASE_URL / KIMI_MODEL_PROVIDER_TYPE for non-default endpoints) is set too.
+- **Status check:** {"args": null, "signed_in_when": null}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** yes. The login is one plain JSON file {access_token, refresh_token, expires_at (number), scope, token_type, expires_in} (packages/oauth/src/types.ts:63-90) at credentials/kimi-code.json for the default slot (KIMI_CODE_OAUTH_KEY 'oauth/kimi-code' maps to file name 'kimi-code', managed-kimi-code.ts:13, toolkit.ts:384-398). Caveats: the owner's ~/.kimi-code/config.toml must already hold the managed kimi-code provider and default model (from their own `kimi login`), both accounts must be in the same region (global or scoped logins use a different key 'oauth/kimi-code-env-...', managed-kimi-code.ts:14, region.ts:252-291), and whether the server binds refresh tokens to <home>/device_id is unverified.
+- **Live quota:** yes. packages/oauth/src/managed-usage.ts:5-23 (URL), 60-130 (schema and parse), 218-252 (fetch with Bearer); toolkit.ts:279, 405-409. A /me endpoint on the same base returns the profile (managed-userinfo.ts:1-47).
+- **Usage in output:** none
+- **Limit messages:** Matches: 429 maps to code provider.rate_limit and the recognised message patterns are too many requests, provider.rate_limit, rate limit(ed), rate-limited, reached ... max rpm (packages/agent-core-v2/src/llm-adapter/contract/errors.ts:28, 346-370). Missing: plan quota exhaustion is APIProviderQuotaExhaustedError (errors.ts:225-244) raised for server codes exceeded_current_quota_error / insufficient_quota (packages/core/src/llm/builtin/provider/kimi/errors.ts:7, protocol/openai/decode.ts:374, 434); add "exceeded_current_quota" and "insufficient_quota". The failure text reaches stderr as `error: failed to run prompt: <code>: <message>`.
+
+Source: fresh clone of MoonshotAI/kimi-code at 334d798 (2.6.2) in the scratchpad; paths relative to it.
+
+- No auth status subcommand exists: the subcommands are login, provider, doctor (validates config.toml / tui.toml only), session, export, fork, acp, app, vis, upgrade (apps/kimi-code/src/cli/sub/*.ts). A check would have to call GET <base>/me or /usages with the stored access token.
+- Identity is not stored locally; GET <base>/me returns user_id, nickname, email (managed-userinfo.ts:4-47). Whether the access token is a JWT with an email claim is unverified (the only JWT decode in the tree reads sub or user_id, agent-core-v2/src/agent/media/mediaResolverService.ts:634-648).
+- Refresh rotates refresh_token under a lock and re-reads storage first (oauth-manager.ts:193, 311-371), so a switched-in file stays valid as long as the copy is the freshest; expires_at is a number, so the expiry pointer compares correctly.
+- No usage or cost is printed in stream-json (spec has none), confirmed again in prompt-render.ts and v2/run-v2-print.ts.

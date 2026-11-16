@@ -879,6 +879,8 @@ mod tests {
             codex_home: user.join(".codex"),
             gemini_dir: user.join(".gemini"),
             opencode_dir: user.join(".local/share/opencode"),
+            user_home: user.clone(),
+            data_home: user.join(".local/share"),
             env_override: std::collections::BTreeMap::new(),
         };
         std::fs::create_dir_all(&user).unwrap();

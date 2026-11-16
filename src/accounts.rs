@@ -399,12 +399,15 @@ pub const fn sign_in(agent: AgentKind) -> Option<SignIn> {
 }
 
 /// Arguments of a command that reports whether a login account is signed
-/// in, where the CLI has one. Only Claude Code's is known.
+/// in, where the CLI has one.
 #[must_use]
 pub const fn status_args(agent: AgentKind) -> Option<&'static [&'static str]> {
     match agent {
         AgentKind::Claude => Some(&["auth", "status", "--json"]),
-        _ => None,
+        other => match crate::agent::specs::of(other) {
+            Some(s) => s.status_args,
+            None => None,
+        },
     }
 }
 

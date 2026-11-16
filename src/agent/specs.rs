@@ -16,7 +16,7 @@
 #![allow(clippy::doc_markdown)]
 
 use super::AgentKind;
-use super::spec::{Events, Fields, Login, Output, Prompt, Spec};
+use super::spec::{Events, Fields, Identity, Login, Output, Prompt, Spec, Switch};
 
 /// Copilot CLI: `copilot --output-format json`. Checked against 1.0.112 (from source);
 /// notes in `docs/research/agents/copilot.md`.
@@ -94,7 +94,7 @@ pub const COPILOT: Spec = Spec {
         error_kind: Some("session.error"),
         error: Some("/data/message"),
     }),
-    dir_var: Some("COPILOT_HOME"),
+    dir_var: None,
     account_env: &[],
     key_var: Some("COPILOT_GITHUB_TOKEN"),
     credential_vars: &[
@@ -121,6 +121,8 @@ pub const COPILOT: Spec = Spec {
             "copilot login (device or web flow; token goes to the OS keychain, or plain text in $COPILOT_HOME/config.json only after consent). Or export COPILOT_GITHUB_TOKEN with a fine-grained PAT that has the Copilot Requests permission (classic ghp_ PATs are not accepted).",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "you've hit the rate limit for this model",
         "you've hit your session rate limit",
@@ -220,15 +222,23 @@ pub const GROK: Spec = Spec {
     ],
     login: Some(Login {
         args: &["login"],
-        hint: Some(
-            "grok login opens a browser OAuth flow (grok.com account, token valid 7 days); grok login --device-auth for a machine without a browser; or set XAI_API_KEY from console.x.ai",
-        ),
+        hint: None,
     }),
+    switch: Some(Switch {
+        live_dir: ".grok",
+        sub: "",
+        files: &["auth.json"],
+        expiry: None,
+        identity: None,
+    }),
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "too many requests",
         "usage limit",
         "out of credits",
+        "credit limit",
+        "spending limit",
     ],
     text_errors: &[],
     install: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
@@ -302,6 +312,8 @@ pub const ANTIGRAVITY: Spec = Spec {
             "run agy interactively and complete the Google sign-in in the browser (token kept in the macOS keychain); or set GEMINI_API_KEY with \"modelProvider\": \"gemini\" in settings.json",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "resource_exhausted",
         "quota exhausted",
@@ -394,6 +406,8 @@ pub const GOOSE: Spec = Spec {
             "Interactive wizard: pick a provider and paste a key (stored in the OS keyring unless GOOSE_DISABLE_KEYRING is set, then in secrets.yaml under the config dir).",
         ),
     }),
+    switch: None,
+    status_args: Some(&["info", "--check"]),
     limit_messages: &[
         "rate limit exceeded",
         "credits exhausted",
@@ -462,6 +476,8 @@ pub const AMP: Spec = Spec {
             "amp login stores a short-lived session token that execute mode via env rejects; for unattended runs set AMP_API_KEY to an sgamp_ access token from https://ampcode.com/settings/security#access-token (or a service-account key).",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "rate_limit_exceeded",
@@ -523,10 +539,10 @@ pub const DROID: Spec = Spec {
     ],
     login: Some(Login {
         args: &[],
-        hint: Some(
-            "Run `droid` interactively and type /login (browser device flow), or create an API key at https://app.factory.ai/settings/api-keys and set FACTORY_API_KEY.",
-        ),
+        hint: Some("type /login to sign in, then quit droid"),
     }),
+    switch: None,
+    status_args: Some(&["doctor", "--checks", "auth", "--json"]),
     limit_messages: &[
         "usage limit reached",
         "credit limits are exhausted",
@@ -534,6 +550,7 @@ pub const DROID: Spec = Spec {
         "provider rate limited",
         "usage quota is exhausted",
         "has reached its usage limit",
+        "out of credits",
     ],
     text_errors: &[],
     install: Some(
@@ -592,7 +609,7 @@ pub const KIMI: Spec = Spec {
     }),
     dir_var: Some("KIMI_CODE_HOME"),
     account_env: &[],
-    key_var: Some("KIMI_MODEL_API_KEY"),
+    key_var: None,
     credential_vars: &[
         "KIMI_MODEL_NAME",
         "KIMI_MODEL_API_KEY",
@@ -611,11 +628,21 @@ pub const KIMI: Spec = Spec {
             "OAuth device-code flow (RFC 8628): prints a URL and user code on stderr and polls until approved in a browser. Token is stored under KIMI_CODE_HOME (default ~/.kimi-code). Alternatively set KIMI_MODEL_NAME + KIMI_MODEL_API_KEY + KIMI_MODEL_BASE_URL (+ KIMI_MODEL_PROVIDER_TYPE).",
         ),
     }),
+    switch: Some(Switch {
+        live_dir: ".kimi-code",
+        sub: "",
+        files: &["credentials/kimi-code.json"],
+        expiry: Some("/expires_at"),
+        identity: None,
+    }),
+    status_args: None,
     limit_messages: &[
         "provider.rate_limit",
         "rate limit",
         "rate-limited",
         "too many requests",
+        "exceeded_current_quota",
+        "insufficient_quota",
     ],
     text_errors: &[],
     install: Some(
@@ -677,7 +704,7 @@ pub const KILO: Spec = Spec {
         error_kind: Some("error"),
         error: Some("/error/data/message"),
     }),
-    dir_var: None,
+    dir_var: Some("XDG_DATA_HOME"),
     account_env: &[],
     key_var: None,
     credential_vars: &[
@@ -701,15 +728,23 @@ pub const KILO: Spec = Spec {
     ],
     login: Some(Login {
         args: &["auth", "login"],
-        hint: Some(
-            "Run `kilo auth login` and pick Kilo Gateway (or a provider), or export KILO_API_KEY. Credentials go to $XDG_DATA_HOME/kilo/auth.json.",
-        ),
+        hint: Some("pick Kilo Gateway to sign in in the browser"),
     }),
+    switch: Some(Switch {
+        live_dir: ".local/share/kilo",
+        sub: "kilo",
+        files: &["auth.json"],
+        expiry: Some("/kilo/expires"),
+        identity: None,
+    }),
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "too many requests",
         "quota exceeded",
         "resource exhausted",
+        "insufficient_balance",
+        "quota_exceeded",
     ],
     text_errors: &[],
     install: Some(
@@ -792,11 +827,29 @@ pub const CLINE: Spec = Spec {
     ],
     login: Some(Login {
         args: &["auth"],
-        hint: Some(
-            "`cline auth` signs in to a Cline account or stores a provider key; `-P <provider> -k <key>` on a run also saves the key.",
-        ),
+        hint: Some("pick Cline account to sign in in the browser, or a provider key"),
     }),
-    limit_messages: &["rate limit", "too many requests", "insufficient credits"],
+    switch: Some(Switch {
+        live_dir: ".cline",
+        sub: "",
+        // The file also holds the provider and model choice, which switch
+        // with the login.
+        files: &["data/settings/providers.json"],
+        expiry: Some("/providers/cline/settings/auth/expiresAt"),
+        identity: Some(Identity {
+            file: "data/settings/providers.json",
+            pointer: "/providers/cline/settings/auth/metadata/userInfo/email",
+            jwt_claim: None,
+        }),
+    }),
+    status_args: None,
+    limit_messages: &[
+        "rate limit",
+        "too many requests",
+        "insufficient credits",
+        "insufficient_credits",
+        "not enough credits",
+    ],
     text_errors: &[],
     install: Some("npm i -g cline"),
     color: (230, 230, 240),
@@ -839,7 +892,7 @@ pub const CRUSH: Spec = Spec {
     slash_commands: false,
     word_commands: false,
     output: Output::Text,
-    dir_var: None,
+    dir_var: Some("CRUSH_GLOBAL_DATA"),
     account_env: &[],
     key_var: None,
     credential_vars: &[
@@ -868,12 +921,30 @@ pub const CRUSH: Spec = Spec {
         "CRUSH_CLIENT_SERVER",
     ],
     login: Some(Login {
-        args: &[],
+        args: &["login"],
         hint: Some(
-            "Run `crush` with no arguments in a terminal; the first-run TUI picks a provider and stores the key or OAuth login under the global config/data dirs.",
+            "signs in to Charm Hyper; `crush login copilot`, `openai` or `grok` for the others",
         ),
     }),
-    limit_messages: &["rate limit", "too many requests"],
+    switch: Some(Switch {
+        live_dir: ".local/share/crush",
+        sub: "",
+        // Model choices live in the same file and switch with the login.
+        files: &["crush.json"],
+        expiry: None,
+        identity: Some(Identity {
+            file: "crush.json",
+            pointer: "/providers/openai/oauth/id_token",
+            jwt_claim: Some("email"),
+        }),
+    }),
+    status_args: None,
+    limit_messages: &[
+        "rate limit",
+        "too many requests",
+        "usage limit",
+        "insufficient_quota",
+    ],
     text_errors: &[],
     install: Some(
         "brew install charmbracelet/tap/crush | npm i -g @charmland/crush | go install github.com/charmbracelet/crush@latest",
@@ -980,12 +1051,15 @@ pub const AIDER: Spec = Spec {
         "AIDER_SET_ENV",
     ],
     login: None,
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "the api provider has rate limited you",
         "ratelimiterror",
         "rate limit",
         "check your quotas",
         "insufficient_quota",
+        "insufficient credits",
     ],
     text_errors: &["litellm."],
     install: Some(
@@ -1038,6 +1112,8 @@ pub const CONTINUE: Spec = Spec {
         "CONTINUE_GLOBAL_DIR",
     ],
     login: None,
+    switch: None,
+    status_args: None,
     limit_messages: &["rate limit", "too many requests"],
     text_errors: &[],
     install: Some("npm i -g @continuedev/cli"),
@@ -1126,11 +1202,19 @@ pub const PI: Spec = Spec {
         "PI_CODING_AGENT_SESSION_DIR",
     ],
     login: Some(Login {
-        args: &["auth", "login"],
+        args: &["auth", "login", "anthropic"],
         hint: Some(
-            "pi auth login <provider> [--api-key] [--no-browser]: browser OAuth (Claude Pro/Max, ChatGPT, Copilot, ...) or a saved API key, stored in <agentDir>/auth.json. Needs the provider name as the next argument.",
+            "for another provider run `pi auth login <provider>` with PI_CODING_AGENT_DIR set to the account folder",
         ),
     }),
+    switch: Some(Switch {
+        live_dir: ".pi/agent",
+        sub: "",
+        files: &["auth.json"],
+        expiry: None,
+        identity: None,
+    }),
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "ratelimit",
@@ -1144,6 +1228,7 @@ pub const PI: Spec = Spec {
         "free_usage_limit",
         "gousagelimiterror",
         "freeusagelimiterror",
+        "available balance",
     ],
     text_errors: &[],
     install: Some(
@@ -1228,6 +1313,8 @@ pub const OMP: Spec = Spec {
             "omp login: interactive provider login (OAuth or API key); credentials are stored in <agentDir>/agent.db (SQLite). UNVERIFIED exact subcommand arguments.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "ratelimit",
@@ -1293,7 +1380,7 @@ pub const OPENCLAUDE: Spec = Spec {
     output: Output::ClaudeResult,
     dir_var: Some("OPENCLAUDE_CONFIG_DIR"),
     account_env: &[],
-    key_var: Some("OPENAI_API_KEY"),
+    key_var: None,
     credential_vars: &[
         "CLAUDE_CODE_USE_OPENAI",
         "CLAUDE_CODE_USE_GEMINI",
@@ -1347,6 +1434,8 @@ pub const OPENCLAUDE: Spec = Spec {
             "Anthropic account only. For other providers, run `openclaude` interactively and use /provider, or set provider env vars (CLAUDE_CODE_USE_OPENAI=1, OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL).",
         ),
     }),
+    switch: None,
+    status_args: Some(&["auth", "status", "--json"]),
     limit_messages: &[
         "you've hit your",
         "you're out of extra usage",
@@ -1355,6 +1444,8 @@ pub const OPENCLAUDE: Spec = Spec {
         "request rejected (429)",
         "rate limit",
         "insufficient_quota",
+        "free usage exhausted",
+        "subscription limit reached",
     ],
     text_errors: &[],
     install: Some("npm install -g @twigpine/openclaude@latest"),
@@ -1425,6 +1516,8 @@ pub const CODEBUDDY: Spec = Spec {
             "Run `codebuddy` in a terminal (no -p) and choose a login method; a browser opens. For China edition set CODEBUDDY_INTERNET_ENVIRONMENT=internal first. Headless alternative: CODEBUDDY_API_KEY.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "too many requests",
@@ -1498,6 +1591,10 @@ pub const QODER: Spec = Spec {
         "QODER_JOB_TOKEN",
         "QODER_CONFIG_DIR",
         "QODER_CLI_HOME",
+        "QODER_PAT",
+        "QODER_SDK_ACCESS_TOKEN",
+        "QODER_SDK_AUTH_PAYLOAD_FILE",
+        "QODER_SDK_AUTH_CONFIG_DIR",
     ],
     login: Some(Login {
         args: &["login"],
@@ -1505,6 +1602,8 @@ pub const QODER: Spec = Spec {
             "`qodercli login` (or `/login` in the TUI); browser OAuth, NO_BROWSER=1 prints the URL; or set QODER_PERSONAL_ACCESS_TOKEN from https://qoder.com/account/integrations (PAT beats a stored login).",
         ),
     }),
+    switch: None,
+    status_args: Some(&["--list-models"]),
     limit_messages: &[
         "quota_exhausted",
         "quota_exceeded",
@@ -1512,6 +1611,10 @@ pub const QODER: Spec = Spec {
         "quota exceeded",
         "rate limit",
         "rate limited",
+        "credits exhausted",
+        "usage limit has been reached",
+        "daily usage limit",
+        "daily quota",
     ],
     text_errors: &[],
     install: Some(
@@ -1569,6 +1672,10 @@ pub const QODER_CN: Spec = Spec {
         "QODERCN_JOB_TOKEN",
         "QODERCN_CONFIG_DIR",
         "QODERCN_CLI_HOME",
+        "QODERCN_PAT",
+        "QODERCN_SDK_ACCESS_TOKEN",
+        "QODERCN_SDK_AUTH_PAYLOAD_FILE",
+        "QODERCN_SDK_AUTH_CONFIG_DIR",
     ],
     login: Some(Login {
         args: &["login"],
@@ -1576,6 +1683,8 @@ pub const QODER_CN: Spec = Spec {
             "`qoderclicn login` (or `/login` in the TUI); browser OAuth against qoder.com.cn, or set QODERCN_PERSONAL_ACCESS_TOKEN (PAT beats a stored login).",
         ),
     }),
+    switch: None,
+    status_args: Some(&["--list-models"]),
     limit_messages: &[
         "quota_exhausted",
         "quota_exceeded",
@@ -1583,6 +1692,10 @@ pub const QODER_CN: Spec = Spec {
         "quota exceeded",
         "rate limit",
         "rate limited",
+        "credits exhausted",
+        "usage limit has been reached",
+        "daily usage limit",
+        "daily quota",
     ],
     text_errors: &[],
     install: Some(
@@ -1636,6 +1749,8 @@ pub const KIRO: Spec = Spec {
             "kiro-cli login opens a browser (Builder ID, Google, GitHub, or Identity Center with --license pro --identity-provider <url> --region <r>); add --use-device-flow on a remote host. Headless runs officially require KIRO_API_KEY, which only Pro, Pro+, Pro Max and Power subscribers can generate.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit reached",
         "monthly request limit reached",
@@ -1715,6 +1830,8 @@ pub const AUGGIE: Spec = Spec {
             "Run `auggie login` (OAuth in browser), then `auggie token print` and pass the JSON as AUGMENT_SESSION_AUTH for automation.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &["rate limit reached", "rate limited", "rate limit exceeded"],
     text_errors: &[],
     install: Some("npm install -g @augmentcode/auggie"),
@@ -1752,14 +1869,13 @@ pub const DEVIN: Spec = Spec {
     slash_commands: true,
     word_commands: false,
     output: Output::Text,
-    dir_var: None,
+    dir_var: Some("XDG_DATA_HOME"),
     account_env: &[],
     key_var: Some("WINDSURF_API_KEY"),
     credential_vars: &[
         "WINDSURF_API_KEY",
         "WINDSURF_API_SERVER_URL",
         "DEVIN_API_URL",
-        "DEVIN_AUTH_FILE",
         "XDG_DATA_HOME",
     ],
     login: Some(Login {
@@ -1768,6 +1884,14 @@ pub const DEVIN: Spec = Spec {
             "Run `devin auth login` (add --force-manual-token-flow on a headless or SSH host and paste the token). Requires a Devin or Windsurf Enterprise account with the Use Devin CLI permission.",
         ),
     }),
+    switch: Some(Switch {
+        live_dir: ".local/share/devin",
+        sub: "devin",
+        files: &["credentials.toml"],
+        expiry: None,
+        identity: None,
+    }),
+    status_args: Some(&["auth", "status"]),
     limit_messages: &[
         "quota exhausted",
         "usage limit reached",
@@ -1811,6 +1935,9 @@ pub const ROVODEV: Spec = Spec {
         "ATLASSIAN_API_URL",
         "ATLASSIAN_AUTH_URL",
         "ATLASSIAN_ACCESS_TOKEN_URL",
+        "USER_EMAIL",
+        "USER_API_TOKEN",
+        "ROVODEV_BETA",
     ],
     login: Some(Login {
         args: &["rovodev", "auth", "login"],
@@ -1818,6 +1945,8 @@ pub const ROVODEV: Spec = Spec {
             "Create a scoped Rovo Dev API token at https://go.atlassian.com/rovo-dev-api-token, then run `acli rovodev auth login` (or `acli rovodev auth login --email <you@example.com> --token < token.txt`). A site with Rovo Dev activated and Rovo Dev credits is required.",
         ),
     }),
+    switch: None,
+    status_args: Some(&["rovodev", "auth", "status"]),
     limit_messages: &["rate limit", "too many requests"],
     text_errors: &[],
     install: Some(
@@ -1869,8 +1998,8 @@ pub const VIBE: Spec = Spec {
         error_kind: None,
         error: None,
     }),
-    dir_var: None,
-    account_env: &[],
+    dir_var: Some("VIBE_HOME"),
+    account_env: &[("VIBE_TEST_DISABLE_KEYRING", "1")],
     key_var: Some("MISTRAL_API_KEY"),
     credential_vars: &[
         "MISTRAL_API_KEY",
@@ -1881,6 +2010,7 @@ pub const VIBE: Spec = Spec {
         "VIBE_VIBE_BASE_URL",
         "VIBE_CONSOLE_BASE_URL",
         "VIBE_CLI_OIDC_ENABLED",
+        "VIBE_HOME",
     ],
     login: Some(Login {
         args: &["--setup"],
@@ -1888,6 +2018,8 @@ pub const VIBE: Spec = Spec {
             "Interactive: sign in with a Mistral account or paste an API key; the key is saved to VIBE_HOME/.env or the OS keyring. Headless alternative: export MISTRAL_API_KEY.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate_limited",
         "rate limit",
@@ -1987,6 +2119,23 @@ pub const HERMES: Spec = Spec {
         "KILOCODE_API_KEY",
         "OPENCODE_ZEN_API_KEY",
         "OPENCODE_GO_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY",
+        "XIAOMI_API_KEY",
+        "STEPFUN_API_KEY",
+        "KIMI_CN_API_KEY",
+        "KIMI_CODING_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "ALIBABA_CODING_PLAN_API_KEY",
+        "ARCEEAI_API_KEY",
+        "GMI_API_KEY",
+        "LM_API_KEY",
+        "TOKENHUB_API_KEY",
+        "TOKENPLAN_API_KEY",
     ],
     login: Some(Login {
         args: &["setup"],
@@ -1994,11 +2143,29 @@ pub const HERMES: Spec = Spec {
             "hermes setup runs the provider wizard; hermes model picks the default model; hermes auth add <provider> adds a pooled key or OAuth login",
         ),
     }),
+    switch: Some(Switch {
+        live_dir: ".hermes",
+        sub: "",
+        files: &["auth.json", ".env"],
+        expiry: None,
+        identity: None,
+    }),
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "usage limit reached",
         "usage limit has been reached",
         "insufficient credits",
+        "too many requests",
+        "insufficient_quota",
+        "exceeded your current quota",
+        "quota exceeded",
+        "resource_exhausted",
+        "credits exhausted",
+        "payment required",
+        "budget limit exceeded",
+        "weekly usage limit",
+        "reached your session usage limit",
     ],
     text_errors: &[],
     install: Some("curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"),
@@ -2055,13 +2222,15 @@ pub const OPENCLAW: Spec = Spec {
         "XAI_API_KEY",
         "GROQ_API_KEY",
         "MISTRAL_API_KEY",
+        "OPENCLAW_AGENT_DIR",
+        "OPENCLAW_OAUTH_DIR",
     ],
     login: Some(Login {
-        args: &["onboard"],
-        hint: Some(
-            "Run `openclaw onboard` (or `openclaw models auth login`, UNVERIFIED) once interactively to store provider credentials, or export a provider API key such as ANTHROPIC_API_KEY.",
-        ),
+        args: &["models", "auth", "login"],
+        hint: None,
     }),
+    switch: None,
+    status_args: Some(&["models", "status", "--check", "--json"]),
     limit_messages: &[
         "rate limit",
         "too many requests",
@@ -2071,6 +2240,12 @@ pub const OPENCLAW: Spec = Spec {
         "usage limit",
         "daily usage limit",
         "out of budget",
+        "needs a short break",
+        "billing error",
+        "billing problem",
+        "exceeded your current quota",
+        "insufficient credits",
+        "payment required",
     ],
     text_errors: &[],
     install: Some(
@@ -2156,6 +2331,11 @@ pub const JCODE: Spec = Spec {
         "JCODE_ACTIVE_PROVIDER",
         "GROQ_API_KEY",
         "MISTRAL_API_KEY",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_ENV_FILE",
+        "JCODE_RUNTIME_DIR",
     ],
     login: Some(Login {
         args: &["login"],
@@ -2163,6 +2343,8 @@ pub const JCODE: Spec = Spec {
             "jcode login [provider] (OAuth, API key or reuse of local Claude/ChatGPT logins); --no-browser shows a QR/URL for another device",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "too many requests",
@@ -2171,6 +2353,8 @@ pub const JCODE: Spec = Spec {
         "usage exhausted",
         "limit reached",
         "payment required",
+        "rate_limit",
+        "usage_limit",
     ],
     text_errors: &[],
     install: Some("curl -fsSL https://jcode.sh/install | bash"),
@@ -2228,7 +2412,7 @@ pub const MIMO: Spec = Spec {
     }),
     dir_var: Some("MIMOCODE_HOME"),
     account_env: &[],
-    key_var: None,
+    key_var: Some("XIAOMI_API_KEY"),
     credential_vars: &[
         "MIMOCODE_AUTH_CONTENT",
         "MIMOCODE_CONFIG_CONTENT",
@@ -2242,6 +2426,7 @@ pub const MIMO: Spec = Spec {
         "GROQ_API_KEY",
         "MISTRAL_API_KEY",
         "DEEPSEEK_API_KEY",
+        "XIAOMI_API_KEY",
     ],
     login: Some(Login {
         args: &["providers", "login"],
@@ -2249,6 +2434,18 @@ pub const MIMO: Spec = Spec {
             "`mimo providers login` (alias `mimo auth login`); choose Xiaomi MiMo Platform (OAuth), Codex/ChatGPT OAuth, or import from Claude Code. Interactive; run once per MIMOCODE_HOME.",
         ),
     }),
+    switch: Some(Switch {
+        live_dir: ".local/share/mimocode",
+        sub: "data",
+        files: &["auth.json"],
+        expiry: None,
+        identity: Some(Identity {
+            file: "auth.json",
+            pointer: "/xiaomi/metadata/uid",
+            jwt_claim: None,
+        }),
+    }),
+    status_args: None,
     limit_messages: &[
         "too many requests",
         "rate limit",
@@ -2257,6 +2454,8 @@ pub const MIMO: Spec = Spec {
         "usage limit reached",
         "freeusagelimiterror",
         "subscriptionusagelimiterror",
+        "too_many_requests",
+        "free usage exceeded",
     ],
     text_errors: &[],
     install: Some(
@@ -2330,6 +2529,8 @@ pub const ANTE: Spec = Spec {
             "`ante auth login <NAME> [--no-browser]` for OAuth subscriptions (anthropic/<name>, openai/<name>), or `echo $KEY | ante auth add <provider>`; env API keys take precedence on built-in providers.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit",
         "quota_exceeded",
@@ -2390,6 +2591,7 @@ pub const TRAE: Spec = Spec {
         "COCO_NEXTCODE_URL",
         "COCO_NEXTCODE_HEADERS",
         "COCO_BYTED_GPT_API_KEY",
+        "CODE_USER_JWT",
     ],
     login: Some(Login {
         args: &[],
@@ -2397,7 +2599,16 @@ pub const TRAE: Spec = Spec {
             "Run `traecli` interactively once in a terminal and complete the TRAE Enterprise / ByteDance SSO login in the browser; only Enterprise accounts can use the CLI.",
         ),
     }),
-    limit_messages: &["rate limit", "rate limit exceeded"],
+    switch: None,
+    status_args: None,
+    limit_messages: &[
+        "rate limit",
+        "rate limit exceeded",
+        "quota limit",
+        "quota exceeded",
+        "usage has reached limit",
+        "too many requests",
+    ],
     text_errors: &[],
     install: Some(
         "sh -c \"$(curl -L https://lf-cdn.trae.com.cn/obj/trae-com-cn/trae-cli/install.sh)\" (installs ~/.local/share/trae-cli/trae-cli with symlinks traecli, trae-cli, trae-agent, ta in ~/.local/bin)",
@@ -2457,7 +2668,7 @@ pub const MUSE: Spec = Spec {
         error_kind: None,
         error: None,
     }),
-    dir_var: Some("XDG_CONFIG_HOME"),
+    dir_var: None,
     account_env: &[],
     key_var: Some("META_API_KEY"),
     credential_vars: &[
@@ -2479,6 +2690,8 @@ pub const MUSE: Spec = Spec {
             "`muse login` (Meta account device-code flow via auth.meta.com), or set META_API_KEY from the Meta Model API dashboard (required for Meta Managed Accounts). Env key beats stored key beats browser session.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &["usage limit", "rate limit", "too many requests"],
     text_errors: &[],
     install: Some(
@@ -2520,19 +2733,21 @@ pub const DEEPSEEK: Spec = Spec {
         text: "/text",
         concat: false,
         session: Some("/sessionId"),
-        usage_kind: None,
+        usage_kind: Some("status"),
         input_tokens: Some("/usage/inputTokens"),
         output_tokens: Some("/usage/outputTokens"),
         cost: None,
         error_kind: Some("error"),
         error: Some("/message"),
     }),
-    dir_var: Some("DSH_HOME"),
+    dir_var: None,
     account_env: &[],
     key_var: Some("DEEPSEEK_API_KEY"),
     credential_vars: &["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DSH_HOME"],
     login: None,
-    limit_messages: &["rate limit"],
+    switch: None,
+    status_args: None,
+    limit_messages: &["rate limit", "insufficient balance", "rate_limit"],
     text_errors: &[],
     install: Some("npm i -g @deepseek-ai/dsh (or npx @deepseek-ai/dsh ...)"),
     color: (80, 110, 255),
@@ -2547,7 +2762,7 @@ pub const ZCODE: Spec = Spec {
     display: "ZCode",
     binaries: &["zcode"],
     aliases: &["zcode-cli", "z-code", "zai-zcode"],
-    base_args: &["--output-format", "stream-json"],
+    base_args: &["--output-format", "stream-json", "--no-color"],
     pinned_args: &[&["--mode", "build"]],
     prompt: Prompt::FlagEq("--prompt"),
     model_flag: None,
@@ -2584,16 +2799,22 @@ pub const ZCODE: Spec = Spec {
         "ZCODE_DATA_BASE_DIR",
         "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
         "ZCODE_BASE_URL",
-        "ZCODE_API_KEY",
-        "ZCODE_MODEL",
+        "ZCODE_CREDENTIAL_SECRET",
+        "ZCODE_CREDENTIAL_SECRET_FILE",
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
+        "ZCODE_ENV",
     ],
     login: Some(Login {
-        args: &[],
-        hint: Some(
-            "Run `zcode` (TUI) and configure a provider: Z.ai / BigModel account (GLM Coding Plan) or your own API key; stored in ~/.zcode/v2/provider_config.json (under ZCODE_DATA_BASE_DIR).",
-        ),
+        args: &["login"],
+        hint: None,
     }),
-    limit_messages: &["rate limit", "usage limit"],
+    switch: None,
+    status_args: None,
+    limit_messages: &[
+        "rate limit",
+        "usage limit",
+        "rate limit reached for requests",
+    ],
     text_errors: &[],
     install: Some(
         "Build the CLI distribution from source: pnpm bootstrap && pnpm build:zcode (installer install.sh puts the runtime in ~/.zcode/runtime and `zcode` in ~/.local/bin); the ZCode desktop app embeds the same CLI. No official public npm package.",
@@ -2670,14 +2891,31 @@ pub const PRIME: Spec = Spec {
         "OPENCODE_API_KEY",
         "CLOUDFLARE_API_KEY",
         "XIAOMI_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "XIAOMI_TOKEN_PLAN_API_KEY",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "AWS_REGION",
     ],
     login: Some(Login {
         args: &[],
         hint: Some(
-            "Run prime-agent in a terminal and type /login to pick a subscription (Claude, ChatGPT, GitHub Copilot) or an API-key provider; credentials land in <PRIME_AGENT_CODING_AGENT_DIR or ~/.prime/agent>/auth.json.",
+            "run prime-agent and type /login to pick a subscription or an API-key provider, then quit",
         ),
     }),
-    limit_messages: &["rate limit exceeded", "usage limit"],
+    switch: Some(Switch {
+        live_dir: ".prime/agent",
+        sub: "",
+        files: &["auth.json"],
+        expiry: None,
+        identity: None,
+    }),
+    status_args: None,
+    limit_messages: &[
+        "rate limit exceeded",
+        "usage limit",
+        "provider requires payment",
+    ],
     text_errors: &[],
     install: Some(
         "curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh (Windows: irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex)",
@@ -2695,7 +2933,7 @@ pub const AUTOHAND: Spec = Spec {
     binaries: &["autohand", "autohand-code"],
     aliases: &["autohand-cli"],
     base_args: &["--json", "local"],
-    pinned_args: &[&["--bare"], &["--no-daemon"]],
+    pinned_args: &[&["--no-daemon"]],
     prompt: Prompt::FlagEq("--prompt"),
     model_flag: Some("--model"),
     resume_flag: Some("--resume"),
@@ -2735,7 +2973,7 @@ pub const AUTOHAND: Spec = Spec {
     }),
     dir_var: Some("AUTOHAND_HOME"),
     account_env: &[],
-    key_var: Some("AUTOHAND_API_KEY"),
+    key_var: None,
     credential_vars: &[
         "AUTOHAND_API_KEY",
         "AUTOHAND_AI_API_KEY",
@@ -2754,6 +2992,7 @@ pub const AUTOHAND: Spec = Spec {
         "AZURE_TENANT_ID",
         "AZURE_CLIENT_ID",
         "AZURE_CLIENT_SECRET",
+        "AUTOHAND_AUTH_API_URL",
     ],
     login: Some(Login {
         args: &["login"],
@@ -2761,6 +3000,8 @@ pub const AUTOHAND: Spec = Spec {
             "Run `autohand login` once in a terminal (device authorization, token saved in $AUTOHAND_HOME/config.json). For unattended API-key accounts set AUTOHAND_API_KEY and add --bare.",
         ),
     }),
+    switch: None,
+    status_args: None,
     limit_messages: &[
         "rate limit exceeded",
         "request quota reached",
@@ -2768,6 +3009,7 @@ pub const AUTOHAND: Spec = Spec {
         "usage limit",
         "quota was exceeded",
         "payment required",
+        "token throughput",
     ],
     text_errors: &[],
     install: Some(
@@ -2820,13 +3062,22 @@ pub const COMMAND_CODE: Spec = Spec {
     dir_var: None,
     account_env: &[],
     key_var: Some("COMMAND_CODE_API_KEY"),
-    credential_vars: &["COMMAND_CODE_API_KEY", "CMD_LOCAL_ONLY", "CMD_ZDR"],
+    credential_vars: &[
+        "COMMAND_CODE_API_KEY",
+        "CMD_LOCAL_ONLY",
+        "CMD_ZDR",
+        "COMMANDCODE_API_ENV",
+        "COMMANDCODE_API_URL",
+        "COMMANDCODE_SANDBOX",
+    ],
     login: Some(Login {
         args: &["login"],
         hint: Some(
             "Run `command-code login` once in a terminal (browser login, key saved to ~/.commandcode/auth.json), or set COMMAND_CODE_API_KEY.",
         ),
     }),
+    switch: None,
+    status_args: Some(&["whoami"]),
     limit_messages: &[
         "rate limit exceeded",
         "usage limit",

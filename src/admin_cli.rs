@@ -1550,7 +1550,7 @@ pub fn account(store: &Store, home: &Path, cmd: AccountCommand) -> Result<()> {
             );
             println!();
             let live = acct::switch::Live::from_user().ok();
-            for agent in acct::switch::AGENTS {
+            for agent in acct::switch::agents() {
                 let who = acct::switch::PlainLogin::read(home, live.as_ref(), agent);
                 // Agents with no login here and nothing switched in say nothing.
                 if who.switched() || who.email.is_some() {

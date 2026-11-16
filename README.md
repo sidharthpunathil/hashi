@@ -128,11 +128,11 @@ hashi account list
 
 Your own login stays the `default` account and is never touched unless you switch.
 
-**Switching the plain CLI.** `hashi switch <claude|codex|gemini|opencode> <name>` points the normal command at one of your login accounts, so typing `claude` in any terminal or editor uses it, with no alias and no variable. `hashi switch claude default` puts your original login back, and `hashi switch claude` shows who is signed in, with the email. Hashi swaps only the saved login and keeps the one it leaves where it belongs. `w` in the dashboard's Accounts popup does the same.
+**Switching the plain CLI.** `hashi switch <agent> <name>` points the normal command at one of your login accounts, so typing `claude` in any terminal or editor uses it, with no alias and no variable. `hashi switch claude default` puts your original login back, and `hashi switch claude` shows who is signed in, with the email. Hashi swaps only the saved login and keeps the one it leaves where it belongs. `w` in the dashboard's Accounts popup does the same.
 
 - Running sessions keep their login until they restart.
 - The Claude desktop app is not switched; it has its own sign-in.
-- Qwen Code and Cursor CLI cannot be switched, and only login accounts can be switched to (not keys, tokens or remote accounts).
+- It works for `claude`, `codex`, `gemini`, `opencode`, `grok`, `kimi`, `kilo`, `cline`, `crush`, `pi`, `devin`, `hermes`, `mimo`, `prime`. An agent that keeps its login in the OS keyring, encrypted or inside its settings cannot be switched and says why ([coverage](docs/agent-coverage.md)). Only login accounts can be switched to (not keys, tokens or remote accounts).
 - `hashi account reset` puts everything back: the plain CLIs on your own logins, Hashi's saved copies of them deleted, and every command Hashi wrote removed. Your accounts stay.
 
 **A command that skips permission prompts.** Nothing is set up by default. Pick the word yourself and Hashi writes a small script by that name next to `hashi` on your PATH:
@@ -274,7 +274,7 @@ Hashi drives whichever of these you have installed and signed in to. Each runs h
 
 "Verified with" is the upstream release whose headless flags, environment variables, account isolation and limit messages were last checked, recorded in [`verified-versions.json`](docs/research/verified-versions.json). A newer release usually works; `hashi doctor` says when yours is newer, and a weekly check opens an issue for each new release.
 
-Live quota figures are read for Claude Code and Codex only. `hashi switch` works for Claude Code, Codex, Gemini CLI and opencode. To loosen Claude Code or Codex for shared runs, use `--claude-permission-mode` or `--codex-sandbox`; the other defaults are fixed in this release.
+Live quota figures are read for Claude Code and Codex only; for the others a run that hits a limit marks the account limited. Which agents support login accounts, key accounts, status checks and `hashi switch` is in the [agent coverage](docs/agent-coverage.md) table. To loosen Claude Code or Codex for shared runs, use `--claude-permission-mode` or `--codex-sandbox`; the other defaults are fixed in this release.
 
 ## Remote access
 

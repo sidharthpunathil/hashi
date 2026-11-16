@@ -103,6 +103,41 @@ pub struct Login {
     pub hint: Option<&'static str>,
 }
 
+/// Where an agent keeps its login, for `hashi switch`: plain files in one
+/// folder, which its [`Spec::dir_var`] moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Switch {
+    /// The folder the plain command uses, relative to the user's home,
+    /// with `/` between parts (such as `.grok`).
+    pub live_dir: &'static str,
+    /// Where the same folder is under the account directory that
+    /// [`Spec::dir_var`] points at: `""` for the directory itself.
+    pub sub: &'static str,
+    /// The files that hold the login, relative to the folder; the first
+    /// must exist for the agent to count as signed in.
+    pub files: &'static [&'static str],
+    /// Pointer to an expiry (a number, or a timestamp that sorts as text)
+    /// in the first file, so a login a run refreshed is never replaced by
+    /// an older copy.
+    pub expiry: Option<&'static str>,
+    /// Where the signed-in user can be read, to show who the plain command
+    /// signs in as.
+    pub identity: Option<Identity>,
+}
+
+/// Where a login file names its user: a string at `pointer` in `file`,
+/// or, with `jwt_claim`, that claim of the JSON Web Token found there.
+/// Only the name is read; nothing secret is kept or shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    /// The file, relative to the login folder.
+    pub file: &'static str,
+    /// Pointer to the user name, email or token.
+    pub pointer: &'static str,
+    /// The claim to read when the pointer holds a token.
+    pub jwt_claim: Option<&'static str>,
+}
+
 /// Everything Hashi knows about one table-driven agent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Spec {
@@ -164,6 +199,12 @@ pub struct Spec {
     pub credential_vars: &'static [&'static str],
     /// How to sign a login account in.
     pub login: Option<Login>,
+    /// Where the login lives, when the plain command can be switched.
+    pub switch: Option<Switch>,
+    /// Arguments of a command that says whether a login account is signed
+    /// in: by a `loggedIn` field when it prints JSON with one, else by its
+    /// exit status.
+    pub status_args: Option<&'static [&'static str]>,
     /// Lowercase parts of the agent's usage-limit messages.
     pub limit_messages: &'static [&'static str],
     /// Lowercase parts of the messages a plain-text agent prints, still
@@ -633,6 +674,8 @@ mod tests {
             key_var: None,
             credential_vars: &[],
             login: None,
+            switch: None,
+            status_args: None,
             limit_messages: &["rate limit"],
             text_errors: &["litellm."],
             install: None,

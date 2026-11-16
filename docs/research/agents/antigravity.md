@@ -51,3 +51,21 @@ Research date: 2026-11-16. Read with `opensrc` where the source is public; other
 ```
 {"conversation_id":"","status":"ERROR","response":"","error":"unknown model \"no-such-model\"","duration_seconds":0.41,"num_turns":0}
 ```
+
+## Hashi features (coverage pass, 2026-11-16)
+
+- **Login accounts:** no. State lives in ~/.gemini/antigravity-cli (verified names here: settings.json, conversations, brain, cache, log, updater, installation_id, ...; no credential file), the path is built from the home dir (binary string "/.gemini/antigravity-cli/settings.json") and no env var relocates it: the AGY_*/ANTIGRAVITY_* names in the binary are UI, ADC, gateway and IDE-sidecar switches. The sign-in token is in the system keychain (changelog:15, 105, 253), shared by any HOME override. AGY_ACCOUNT selects among accounts connected in the Plugins Manager for agent tool calls, not the CLI login.
+- **API-key accounts:** no. The auth route is chosen by settings, not by the env var: GEMINI_API_KEY needs "modelProvider": "gemini" in settings.json (changelog:826, 10), and an auth method without its credential falls back to the saved login (changelog:9). Hashi could pass modelProvider through its --settings JSON together with the key, unverified.
+- **Status check:** {"args": ["--print=/usage", "--output-format", "json"], "signed_in_when": "json pointer /status SUCCESS"}
+- **Identity:** {"file": null, "pointer": null, "jwt_claim": null}
+- **Switch:** no. The login is a keychain item, not a file in the folder, so there is nothing to copy; and Hashi has no separate login folder for it.
+- **Live quota:** yes. Print mode answers read-only slash commands without a turn, quota or a saved conversation (changelog:880, 452). Ran here with the cached sign-in: exit 0, /status SUCCESS, /num_turns 0, /usage/total_tokens 0, /command/name "usage", two groups ("Gemini Models", "Claude and GPT models") with weekly buckets carrying remaining_fraction and reset_time.
+- **Usage in output:** tokens
+- **Limit messages:** Binary/changelog texts: RESOURCE_EXHAUSTED, Quota exhausted, AI: Out of credits, ERROR_FAILED_RATE_LIMIT_SYSTEM; plan quota used up with credits unable to cover (changelog:456) and Gemini API daily quota or spend cap (changelog:484). The spec covers these; exact headless wording still unverified.
+
+Closed Go binary ~/.local/bin/agy 1.5.9; read `agy --help`, the embedded changelog (scratchpad/agy_changelog.txt, cited changelog:N) and binary strings, and ran `agy -p /usage --output-format json` once in a temp dir (only key names and non-secret status fields printed).
+
+- Subcommands: acp, agent(s), changelog, install, mcp, mic-serve, models, plugin(s), remote-control, update; no login, logout or status (sign-in and /logout are TUI only).
+- An unauthenticated print run exits with an `authentication required` error (docs/cli/headless), so /status ERROR (or a non-zero exit) means signed out.
+- Identity is read from the stored credential (changelog:633) in the keychain; nothing readable on disk.
+- Usage: /usage has input, output, thinking, cache_read and total tokens; no cost.
