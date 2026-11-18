@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-19
+
+### Security
+
+- Release builds no longer restore the shared Rust build cache, so a cache written by another workflow run cannot end up inside the published binaries.
+- Dependabot waits seven days after a crate or GitHub Action is published before proposing it, which keeps a freshly compromised release out of update pull requests.
+
+### Fixed
+
+- The end-to-end script no longer stops without a summary when the friend bridge fails to issue a token. The failed check is reported like the others.
+
 ## [0.4.5] - 2026-11-16
 
 ### Added
