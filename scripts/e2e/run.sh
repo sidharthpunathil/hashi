@@ -107,7 +107,7 @@ check "remote account added" \
 serve "$B" 7802 "$WORK/b.log"
 BADMIN=$(grep -o 'hashi_[0-9a-f]\{64\}' "$WORK/b.log" | head -1) || true
 BT=$(curl -fs http://127.0.0.1:7802/v1/tokens -H "Authorization: Bearer $BADMIN" \
-  -d '{"name":"b-app","accounts":{"claude":["via-owner"]}}' | grep -o 'hashi_[0-9a-f]\{64\}')
+  -d '{"name":"b-app","accounts":{"claude":["via-owner"]}}' | grep -o 'hashi_[0-9a-f]\{64\}') || true
 check "a run on the remote account is forwarded" \
   'curl -fs http://127.0.0.1:7802/v1/ask -H "Authorization: Bearer $BT" -d "{\"message\":\"forwarded\",\"wait\":60}" | grep -q "claude says forwarded"'
 

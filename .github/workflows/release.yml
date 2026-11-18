@@ -39,9 +39,8 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-        with:
-          key: ${{ matrix.target }}
+      # No build cache here: a cache written by an earlier workflow run could
+      # carry tampered artifacts into the published binaries.
       - run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (unix)
