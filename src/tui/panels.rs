@@ -172,6 +172,21 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
         Popup::Pool { selected } => pool(app, frame, *selected),
         Popup::PoolOpen(form) => pool_open(frame, form),
         Popup::PoolJoin(form) => pool_join(frame, form, app.tick),
+        Popup::ConfirmKickMember { name, .. } => fitted(
+            frame,
+            64,
+            "remove member",
+            vec![
+                Line::from(vec![
+                    Span::styled("Remove ", plain()),
+                    Span::styled(name.clone(), t::bold(t::PINK)),
+                    Span::styled(" from the pool?", plain()),
+                ]),
+                muted_line("They can only come back by joining through a pool link again."),
+                Line::raw(""),
+                key_hint(&[("y", "remove"), ("n", "keep")]),
+            ],
+        ),
         Popup::ConfirmRemoveRemote { name } => fitted(
             frame,
             64,

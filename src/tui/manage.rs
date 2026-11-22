@@ -443,6 +443,23 @@ impl App {
             Popup::Pool { selected } => self.pool_key(selected, code),
             Popup::PoolOpen(form) => self.pool_open_key(form, code),
             Popup::PoolJoin(form) => self.pool_join_key(form, code),
+            Popup::ConfirmKickMember { id, name, selected } => match code {
+                KeyCode::Char('y' | 'Y') => {
+                    match self.state.store.remove_pool_member(&id) {
+                        Ok(Some(m)) => {
+                            self.state.dispatcher.pool().forget(&m.id);
+                            self.audit("pool.kick", &m.name, "");
+                            self.state.bus.log(format!("{} is out of the pool", m.name));
+                            self.notify(format!("{} is out of the pool", m.name));
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.notify(format!("{e}")),
+                    }
+                    Some(Popup::Pool { selected: 0 })
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(Popup::Pool { selected }),
+                _ => Some(Popup::ConfirmKickMember { id, name, selected }),
+            },
             Popup::ConfirmRemoveRemote { name } => match code {
                 KeyCode::Char('y' | 'Y') => {
                     match self.home().map(|h| crate::remote::forget(&h, &name)) {
@@ -1777,16 +1794,11 @@ impl App {
             },
             KeyCode::Char('x') => {
                 if let Some(m) = members.get(selected) {
-                    match self.state.store.remove_pool_member(&m.id) {
-                        Ok(Some(m)) => {
-                            self.state.dispatcher.pool().forget(&m.id);
-                            self.audit("pool.kick", &m.name, "");
-                            self.state.bus.log(format!("{} is out of the pool", m.name));
-                            self.notify(format!("{} is out of the pool", m.name));
-                        }
-                        Ok(None) => {}
-                        Err(e) => self.notify(format!("{e}")),
-                    }
+                    return Some(Popup::ConfirmKickMember {
+                        id: m.id.clone(),
+                        name: m.name.clone(),
+                        selected,
+                    });
                 }
             }
             KeyCode::Char('a') => {

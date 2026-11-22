@@ -820,6 +820,15 @@ pub enum Popup {
     PoolOpen(Box<crate::tui::forms::PoolOpenForm>),
     /// "Join a pool" form.
     PoolJoin(Box<crate::tui::forms::PoolJoinForm>),
+    /// Pool member removal confirmation.
+    ConfirmKickMember {
+        /// The member's id.
+        id: String,
+        /// The member's name.
+        name: String,
+        /// The pool row to go back to.
+        selected: usize,
+    },
     /// Bridge removal confirmation.
     ConfirmRemoveRemote {
         /// The bridge's name.
@@ -1479,6 +1488,7 @@ impl App {
             | Popup::Pool { .. }
             | Popup::PoolOpen(_)
             | Popup::PoolJoin(_)
+            | Popup::ConfirmKickMember { .. }
             | Popup::ConfirmRemoveRemote { .. }
             | Popup::Audit { .. }
             | Popup::MyUsage { .. }

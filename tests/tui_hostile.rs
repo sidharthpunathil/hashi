@@ -315,6 +315,11 @@ fn popups(app: &App) -> Vec<Popup> {
             name: evil_long(),
             tokens: 9,
         },
+        Popup::ConfirmKickMember {
+            id: evil_long(),
+            name: evil_long(),
+            selected: 0,
+        },
         Popup::ConfirmRemoveRemote { name: evil_long() },
         Popup::ReportSaved {
             path: evil_long(),
