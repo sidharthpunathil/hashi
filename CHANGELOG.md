@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-23
+
+### Changed
+
+- Removing a member from the pool in the dashboard now asks first, like removing an account, project or bridge already did. Press `x`, then `y` to remove or `n` (or `esc`) to keep them.
+
 ## [0.4.6] - 2026-11-19
 
 ### Security
