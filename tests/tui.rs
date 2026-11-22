@@ -2165,7 +2165,18 @@ fn the_access_popup_opens_and_closes_the_link() {
     assert_eq!(link.status(hashi::util::now_ms()), "open");
     app.on_key(key(KeyCode::Enter));
     assert!(draw(&mut app, 150, 44).contains("link is open"));
+    // x asks first: n keeps the link open, y closes it.
     app.on_key(key(KeyCode::Char('x')));
+    assert!(matches!(app.popup, Some(Popup::ConfirmCloseLink { .. })));
+    assert!(draw(&mut app, 150, 44).contains("Close the ask-access link?"));
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(matches!(app.popup, Some(Popup::AccessRequests { .. })));
+    let link = hashi::access::current_link(&app.state.store)
+        .unwrap()
+        .unwrap();
+    assert_eq!(link.status(hashi::util::now_ms()), "open");
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Char('y')));
     assert!(toast(&app).contains("closed the ask-access link"));
     let link = hashi::access::current_link(&app.state.store)
         .unwrap()

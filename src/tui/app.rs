@@ -879,6 +879,13 @@ pub enum Popup {
         /// Decided and expired requests too, as `hashi requests list --all`.
         all: bool,
     },
+    /// Confirmation before closing the ask-access link.
+    ConfirmCloseLink {
+        /// The request row to go back to.
+        selected: usize,
+        /// Whether every request was shown.
+        all: bool,
+    },
     /// The accept popup, prefilled with what was asked.
     AcceptRequest(Box<super::access::AcceptForm>),
     /// The decline popup, with an optional reason.
@@ -1500,6 +1507,7 @@ impl App {
             | Popup::ConfirmListen { .. }
             | Popup::ConfirmUpdate
             | Popup::AccessRequests { .. }
+            | Popup::ConfirmCloseLink { .. }
             | Popup::AcceptRequest(_)
             | Popup::DeclineRequest(_)
             | Popup::AccessLink { .. }) => self.on_manage_key(popup, key),

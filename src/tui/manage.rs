@@ -587,6 +587,23 @@ impl App {
                 _ => Some(Popup::ConfirmUpdate),
             },
             Popup::AccessRequests { selected, all } => self.access_key(selected, all, code),
+            Popup::ConfirmCloseLink { selected, all } => match code {
+                KeyCode::Char('y' | 'Y') => {
+                    match crate::access::close_link(&self.state.store, ACTOR) {
+                        Ok(true) => {
+                            self.state.bus.log("ask-access link closed");
+                            self.notify("closed the ask-access link");
+                        }
+                        Ok(false) => self.notify("no ask-access link was open"),
+                        Err(e) => self.notify(format!("could not close the link: {e}")),
+                    }
+                    Some(Popup::AccessRequests { selected, all })
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    Some(Popup::AccessRequests { selected, all })
+                }
+                _ => Some(Popup::ConfirmCloseLink { selected, all }),
+            },
             Popup::AcceptRequest(mut form) => match form.on_key(key) {
                 FormAction::Edit => Some(Popup::AcceptRequest(form)),
                 FormAction::Cancel => Some(Popup::AccessRequests {
@@ -679,14 +696,16 @@ impl App {
                 self.notify(format!("this request is {}, not pending", r.state(now)));
             }
             (KeyCode::Char('o'), _) => return self.open_access_link(),
-            (KeyCode::Char('x'), _) => match crate::access::close_link(&self.state.store, ACTOR) {
-                Ok(true) => {
-                    self.state.bus.log("ask-access link closed");
-                    self.notify("closed the ask-access link");
+            (KeyCode::Char('x'), _) => {
+                let open = crate::access::current_link(&self.state.store)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|l| l.status(now) == "open");
+                if open {
+                    return Some(Popup::ConfirmCloseLink { selected, all });
                 }
-                Ok(false) => self.notify("no ask-access link was open"),
-                Err(e) => self.notify(format!("could not close the link: {e}")),
-            },
+                self.notify("no ask-access link was open");
+            }
             (KeyCode::Char('s'), _) => {
                 all = !all;
                 selected = 0;
