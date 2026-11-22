@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - Removing a member from the pool in the dashboard now asks first, like removing an account, project or bridge already did. Press `x`, then `y` to remove or `n` (or `esc`) to keep them.
 
+### Security
+
+- `url` is updated to 2.5.9 for RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+
 ## [0.4.6] - 2026-11-19
 
 ### Security
