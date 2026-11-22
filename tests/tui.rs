@@ -2868,7 +2868,15 @@ fn a_pool_link_is_opened_from_the_dashboard_and_members_show_up() {
     app.on_key(key(KeyCode::Enter));
     let out = draw(&mut app, 140, 44);
     assert!(out.contains("sid") && out.contains("offline"), "{out}");
+    // x asks first: n keeps the member, y removes it.
     app.on_key(key(KeyCode::Char('x')));
+    assert!(matches!(app.popup, Some(Popup::ConfirmKickMember { .. })));
+    assert!(draw(&mut app, 140, 44).contains("from the pool?"));
+    app.on_key(key(KeyCode::Char('n')));
+    assert!(matches!(app.popup, Some(Popup::Pool { .. })));
+    assert_eq!(app.state.store.list_pool_members().unwrap().len(), 1);
+    app.on_key(key(KeyCode::Char('x')));
+    app.on_key(key(KeyCode::Char('y')));
     assert!(app.state.store.list_pool_members().unwrap().is_empty());
 }
 
