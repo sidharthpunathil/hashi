@@ -315,6 +315,10 @@ fn popups(app: &App) -> Vec<Popup> {
             name: evil_long(),
             tokens: 9,
         },
+        Popup::ConfirmCloseLink {
+            selected: 0,
+            all: false,
+        },
         Popup::ConfirmKickMember {
             id: evil_long(),
             name: evil_long(),

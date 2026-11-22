@@ -282,6 +282,17 @@ pub fn render(app: &App, frame: &mut Frame, popup: &Popup) {
             ],
         ),
         Popup::AccessRequests { selected, all } => access_requests(app, frame, *selected, *all),
+        Popup::ConfirmCloseLink { .. } => fitted(
+            frame,
+            64,
+            "close link",
+            vec![
+                Line::from(Span::styled("Close the ask-access link?", plain())),
+                muted_line("Nobody new can ask through it. Press o later to open a new one."),
+                Line::raw(""),
+                key_hint(&[("y", "close"), ("n", "keep")]),
+            ],
+        ),
         Popup::AcceptRequest(form) => super::access::render_accept(frame, frame.area(), form),
         Popup::DeclineRequest(form) => super::access::render_decline(frame, frame.area(), form),
         Popup::AccessLink {
