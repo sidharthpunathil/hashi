@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-23
+
+### Changed
+
+- Closing the ask-access link in the dashboard now asks first. Press `x`, then `y` to close it or `n` (or `esc`) to keep it open.
+
 ## [0.4.7] - 2026-11-23
 
 ### Changed
