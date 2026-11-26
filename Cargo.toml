@@ -25,7 +25,7 @@ memchr = "2.8.3"
 hyper-util = { version = "0.1.21", features = ["server", "server-graceful", "http1", "service", "tokio"] }
 rand = "0.10.3"
 ratatui = "0.30.2"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 rustls-pki-types = { version = "1.15.1", features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
@@ -43,11 +43,11 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-normalization = "0.1.25"
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls", "json"] }
-qrcode = { version = "0.14.1", default-features = false }
+qrcode = { version = "0.15.0", default-features = false }
 zeroize = "1.9.1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["signal", "process", "resource"] }
+nix = { version = "0.32.0", default-features = false, features = ["signal", "process", "resource"] }
 
 [target.'cfg(windows)'.dependencies]
 self-replace = "1.5.1"
